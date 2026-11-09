@@ -48,14 +48,66 @@ program starts execution at `fn main()` (unless you pass `--freestanding`).
 ```kr
 // Line comment
 
-// There are no block comments. `/* ... */` is a parse error; use `//` on
-// each line.
+// There are no block comments; use `//` on each line. `/* ... */` is not
+// a comment: it is a parse error, in a function body and between
+// declarations alike (see below).
 
 fn main() {
     println("Hello, KernRift!")
     exit(0)
 }
 ```
+
+**Anything between declarations that cannot start one is a parse error.** At
+top level the parser accepts declarations (`fn`, `static`, `const`, `struct`,
+`enum`, `type`, `extern`, `device`, `import`), annotations (`@...`), and `;`
+as a separator (ignored, as between statements -- but not right after an
+annotation, which it would detach), and nothing else: `error: expected a
+declaration at top level (...), got <token>`. One error is reported per run of
+such tokens (`foo bar baz` is one), and the compile stops before anything is
+generated. That includes text the lexer does not skip: a `#!` first line
+(there is no shebang support), a vertical tab or form feed, a trailing
+Ctrl-Z (0x1A). This used to be skipped one token at a time without a word
+(register item 99), which compiled a `fn` written inside a top-level
+`/* ... */`, silently dropped an annotation (`@naked`, `@export`) separated
+from its `fn` by such text, and turned a C-style `static uint32 table[8]`
+into one scalar -- write `static uint32[8] table`.
+
+**Which annotations are accepted where.** Each is accepted only before the
+declarations listed; some of those uses have no effect on the output at all:
+
+- **fn**: `@noreturn`, `@naked`, `@builtin_override`, `@module_init`,
+  `@module_exit`, `@lkm_ioctl_handler`, `@lkm_mmap_handler`,
+  `@pci_probe_handler`, `@pci_remove_handler` and `@section(...)` change the
+  generated code or object. `@ctx(...)`, `@eff(...)`, `@caps(...)` and
+  `@acquires(...)` change nothing in the output; `krc check` reads them
+  (EFFECT_SYSTEM.md). `@releases(...)` is accepted and has no effect at all:
+  the parser records nothing for it.
+- **fn, static or const**: `@export`. On a fn it marks the symbol exported;
+  on a static or a const it is accepted and changes nothing (statics in the
+  compiler's own sources, and in other shipped code, carry it).
+- **struct**: `@packed`, accepted and changes nothing, because every struct
+  is already packed: fields are laid out in declaration order with no
+  padding, each at the sum of the sizes before it (`struct_add_field`,
+  src/codegen.kr). A field takes 1 byte for `u8`/`i8`/`bool`/`char`, 2 for
+  `u16`/`i16`, 4 for `u32`/`i32`, 8 for `u64`/`i64` and for `f16`/`f32`/`f64`
+  (an 8-byte slot), the size of the struct for a nested struct, and the
+  target's word size for anything else.
+- **module-wide** (they take effect where they stand, so they may precede
+  anything, or end the file): `@module_license`, `@module_author`,
+  `@module_description`, `@module_name`, `@module_register_misc_device`,
+  `@module_register_pci_driver`; they change only an `--emit=lkm` module.
+
+The no-effect uses are pinned byte-identical by the suite
+(`annotation_noops_are_byte_identical`), so a change in their meaning is
+noticed.
+
+Anything else is an error rather than an annotation silently dropped: one
+before a declaration it does not apply to (`annotation '@naked' applies only
+to fn, not to 'static'`), an unknown name (`unknown annotation '@nakd'`), `@`
+not followed by a name, a declaration-bound annotation at the end of a file
+(`... at end of file applies to nothing`), and arguments whose `(` is never
+closed.
 
 Statements do not require trailing semicolons. Semicolons are accepted and
 ignored — useful when you want to write multiple statements on one line.
@@ -145,11 +197,20 @@ char bad = 97              // compile error — int literal not assignable
 - **`_` is a digit separator** and may appear anywhere among the digits of a
   decimal, hex, binary or float literal: `1_000_000`, `0xFF_FF`,
   `0b1010_1010`, `1_0.5` (which is 10.5, not 10.05).
-- A **prefix with no digits** — `0x`, `0X`, `0b`, `0B`, `0x_` — is an error
-  token, not a number, and so is a decimal digit glued to the end of a binary
-  literal (`0b1012`). There are **no octal (`0o`) literals** and no `\u{...}`
-  escape: `0o17` is `0` followed by the identifier `o17`, and `'\u{41}'` is
-  silently `'u'` (117), not `'A'`.
+- A **prefix with no digits** — `0x`, `0X`, `0b`, `0B`, `0x_` — is malformed
+  (`error: malformed number literal '0x': a base prefix needs at least one
+  digit`), not a number. There are **no octal (`0o`) literals** and no
+  `\u{...}` escape: `0o17` is `0` glued to `o17` (malformed, below), and
+  `'\u{41}'` is an invalid escape (below).
+- **A number ends where its digits end.** A letter, a digit that does not
+  belong to the base, or a quote glued straight onto a literal makes the whole
+  run ONE malformed literal, refused by the lexer: `5x`, `42exit`, `0x1Fg`,
+  `0b1012`, `10.5fx`, and `1_f"x"` / `0b1f"x"` (which used to lex as a number
+  followed by an f-string) all give
+  `error: malformed number literal '<text>': a number must not be followed
+  directly by a letter, a stray digit or a quote`. The `f` of a float literal
+  (`1.5f`, `1e3f`) is part of the literal, not a glued letter; `10f` (no
+  fraction or exponent) is not a float literal and is refused.
 - An integer literal must **fit in 64 bits**: anything above
   18446744073709551615 (`0xFFFFFFFFFFFFFFFF`, 64 binary ones) -- a 65th
   binary digit, a 17th significant hex digit, a decimal value of 2^64 or more
@@ -157,15 +218,29 @@ char bad = 97              // compile error — int literal not assignable
   bits"), never a wrapped value. Leading zeros add no value and are fine.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
-- Char: `'A'`, `'\n'`, `'\x41'` — exactly one character or one escape. `'AB'`,
-  `''` and a multi-byte UTF-8 character are errors ("a character literal holds
-  exactly one character or one escape"); use a string for more than one byte.
-- String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes
-- Character: `'A'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` — evaluates
-  to the byte value of the character (e.g. `'A'` is 65, `'\n'` is 10).
-  Use them directly in comparisons and arithmetic: `if c == 'a' { ... }`.
+- Char: `'A'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''`, `'\x41'` —
+  evaluates to the byte value of the character (e.g. `'A'` is 65, `'\n'` is
+  10); use them directly in comparisons and arithmetic: `if c == 'a' { ... }`.
+  Exactly one character or one escape: `'AB'`, `''` and a multi-byte UTF-8
+  character are errors ("a character literal holds exactly one character or
+  one escape"); use a string for more than one byte.
+- **Escapes are checked.** A string, character or f-string literal takes
+  exactly `\n \t \r \0 \\ \' \" \a \b \f \v \e` and `\xHH`, where `\x` is
+  followed by EXACTLY two hex digits (an f-string also takes `\{` and `\}`).
+  Anything else after a backslash -- `\q`, `\u{41}`, `\x4]`, a `\x4` just
+  before the closing quote -- is a lexical error, `file:line:col: error:
+  invalid escape '<text>'`, at the backslash. (Before, `\x` took the next two
+  bytes whatever they were, so `"\x4]"` swallowed the bracket and a short
+  `\x4` printed `x4`, and an unknown letter silently became the letter.)
+- String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes. A string,
+  character or f-string literal still open at the end of its file is an error
+  at its opening quote (`file:line:col: error: unterminated string literal`).
+  Each imported file is lexed on its own, so a literal can never run on into
+  the file that imported it.
 - f-string: `f"pi = {3.14}, answer = {x}"` — `{expr}` interpolates with type-directed
   formatting (integers, floats, bools, chars, `@string` slots), `{{`/`}}` escape.
+  The literal segments take exactly the string escapes above (`f"a\"b"` is one
+  f-string containing a quote) — see §18.
 
 ---
 
@@ -1450,8 +1525,48 @@ Import paths are resolved:
 2. Then in the standard library location: `~/.local/share/kernrift/`
    (or `%LOCALAPPDATA%\KernRift\share\` on Windows)
 
-Paths are always joined to one of those roots, so an absolute path in an
-`import` does not work.
+An **absolute** path (one starting with `/`) is used as written, with no
+search. It used to be joined to the importing file's directory too, so it
+worked from `krc m.kr` and failed from `krc sub/m.kr` (`cannot open import:
+sub//...`).
+
+Every file the import system reads -- the one named on the command line and
+each import -- may start with a `#lang` line (§22) before its imports; the
+import scanner skips it exactly as the lexer does. A file that starts with a
+UTF-8 byte-order mark is refused (`file:1:1: error: this file starts with a
+UTF-8 byte-order mark (bytes EF BB BF), which is not accepted; save it as
+UTF-8 without a BOM`): it is not skipped, so every reader of a file sees the
+same bytes. An import that names a directory, or anything else that is not a
+regular file, is refused as such (`error: cannot import '<path>': it is a
+directory or another non-regular file, not a source file`). Each file is also
+parsed within its own bounds: a declaration cut off at the end of an imported
+file (`fn tail` and nothing after it) is reported as `expected '(', got end of
+file` at the end of THAT file, not against the file that imported it.
+
+**An import path is a plain path, not an escaped string.** It is the bytes
+between the quotes, on the same line as `import`, and is written with `/` on
+every host (Windows accepts `/` too). The import scanner opens exactly those
+bytes, so anything on which it and the string lexer could read the line
+differently is refused before any file is opened, at the offending `line:col`:
+
+| Import line | Diagnostic |
+|---|---|
+| `import "a\"b.kr"` (any backslash) | `import path contains a backslash; escapes are not decoded in an import path, so write it with '/' (which every host accepts)` |
+| `import "a.kr` (no closing quote on the line, or end of file) | `unterminated import path: the closing '"' must be on the same line as the opening one` |
+| `import ""` | `empty import path` |
+| a NUL byte in the path | `import path contains a NUL byte` |
+| `import` with no `"` after it on its line | `` `import` needs a quoted path on the same line, as in import "std/io.kr" `` |
+
+Before this, `import "q\" "` opened a file named `q\` while the parser saw a
+different string, and an unclosed path ran on across lines to the next quote.
+
+**KernRift and MLRift scan imports and lex source identically** — the same
+path rules, the same per-file lexing, the same number and string forms, and the
+same text for every lexer and import-scanner diagnostic (MLRift's own extension,
+`.mlr`, aside; parser and semantic diagnostics keep each compiler's own frame). The two
+deliberate differences are listed in MLRift's `docs/LANGUAGE.md` §17: MLRift
+has no `let` keyword, and under `--target=amdgpu-native` it redirects a
+`std/hip.mlr` import to `std/hip_kfd.mlr`.
 
 Circular imports are detected and rejected. Each file is compiled at most
 once regardless of how many files import it.
@@ -1494,7 +1609,8 @@ so `is_errno` does not recognise it there. This is a known defect (#164).
 `{expr}` with the same type-directed formatter `print` uses. The literal
 segments between the interpolations take **exactly the escape sequences a
 plain `"..."` literal takes** — `\n \t \r \0 \\ \" \' \b \f \v \a \e` and
-`\xHH` — so `f"a\nb={n}\n"` is two lines, not a backslash and an `n`. A
+`\xHH` (exactly two hex digits; any other escape is an error) — so
+`f"a\nb={n}\n"` is two lines, not a backslash and an `n`. A
 literal brace is written `{{` or `}}` (`\{` and `\}` also work). f-strings
 compose with variadic `println`:
 
@@ -2461,7 +2577,7 @@ none of which exist here.
 UART directly and return; none of them calls a boot service. Two things this
 paragraph used to name as blockers are gone. The x86_64 entry function now
 receives `ImageHandle` in rcx and `SystemTable` in rdx under the Win64 ABI
-(`src/main.kr:4219`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
+(`src/main.kr:4419`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
 no longer drops every argument past the sixth: its argument array is
 `uint64[64]` (`src/ir.kr:3391`), and `call_ptr(p, 1, 2, 4, 8, 16, 32, 64)`
 into a seven-parameter callee returns **127** on x86_64, on arm64 and on the
@@ -2965,8 +3081,12 @@ Recognized profiles:
 | `stable` | Default. All stable features. Safe for production code. |
 | `experimental` | Also allows features under active development. |
 
-The directive must be the first non-empty line of the file. If absent,
-the profile defaults to `stable`.
+The directive must be the **very first line** of the file, starting at its first
+byte -- not after a blank line or a comment, where `#lang` is not a directive
+and is a parse error like any other text between declarations (§1). Every
+file may carry one, imported files included, and the import scanner reads past
+it to the file's imports; the profile is set by the file named on the command
+line alone. If absent, the profile defaults to `stable`.
 
 Profiles are part of the Living Compiler's two-layer model: the stable
 semantic core doesn't change, but the adaptive surface layer may gate

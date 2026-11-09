@@ -185,7 +185,7 @@ fi
 #   xt_freestanding_arith. Nothing else in the matrix moved, on any arch, any
 #   container or any backend; bmarr.kr and probe_io.kr are untouched.
 #
-#   WHY. arith.kr:27 is `counter = add3(counter, table[i], i)`. daf57b7 made
+#   WHY. arith.kr:36 (27 before 20d9249) is `counter = add3(...)`. daf57b7 made
 #   the inliner decline a call whose argument is not effect-free, and
 #   `table[i]` is an Index node, which inline_kind_is_pure does not whitelist
 #   and deliberately must not (an index read can fault, and under --debug it
@@ -287,10 +287,10 @@ fi
 #   that is known-noisy stops being read, and the next person could not have
 #   told this expected delta from a real one.
 #
-# Pinned to 1679573, the first parent of the merge that re-pinned it: that
+# Pinned to d92f1f1, the first parent of the merge that re-pinned it: that
 # merge's own sources are the AFTER side, so gate 1 compares two distinct
 # trees, and every row the merge moved is listed in G1_MOVED below.
-TN_PIN=167957314804a5205eee89c20b2d12a6e4f9b081
+TN_PIN=d92f1f1684b267a4506e7790044b87b06cafc711
 # G1_MOVED: the rows TN_PIN is EXPECTED to differ on, one name per line, each
 # with its exit status unchanged. A commit that moves output on purpose (a
 # merge of a codegen change, say) may pin to its own parent and list here
@@ -299,20 +299,9 @@ TN_PIN=167957314804a5205eee89c20b2d12a6e4f9b081
 # differ, and a change of exit status all fail. The list belongs to the pin:
 # with TN_BASE set from outside to another commit it is empty (every row must
 # be identical) unless G1_MOVED_WANT is set too.
-# Pinned by the merge of defect-sweep to its first parent (1679573); these are
-# the rows that merge moved, measured when it was made (12 of 147).
-G1_MOVED="bm_arx_arm64_arith
-bm_arx_x86_64_arith
-bm_image_arm64_arith
-bm_image_stub_arm64_arith
-bm_image_stub_x86_64_arith
-bm_image_x86_64_arith
-bm_resetvec_x86_64_arith
-bm_uefi_arm64_arith
-bm_uefi_x86_64_arith
-rv32_freestanding_arith
-rv32_hosted_arith
-xt_freestanding_arith"
+# Pinned by the merge of lexer-import-fixes to its first parent (d92f1f1); these are
+# the rows that merge moved, measured when it was made (0 of 147).
+G1_MOVED=""
 TN_BASE="${TN_BASE:-$TN_PIN}"
 if [ "$TN_BASE" = "$TN_PIN" ]; then G1_MOVED_WANT="${G1_MOVED_WANT-$G1_MOVED}"; else G1_MOVED_WANT="${G1_MOVED_WANT-}"; fi
 

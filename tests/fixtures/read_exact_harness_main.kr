@@ -2,10 +2,16 @@
 // BY NAME from src/main.kr and src/runner.kr (#170). The file does not exist,
 // so file_size and file_read fail with the SAME -errno (Linux -9, Windows -5);
 // read_exact must not report that as a complete read.
+// The extracted read_exact writes this static (src/main.kr declares it), and
+// must set it: the read failed with an error, not at end of file
+// (lexer-import-fixes' read_exact_failed; review r19, finding 3).
+static uint64 read_exact_failed = 0
 fn main() {
     uint64 fd = file_open("read_exact_missing_win_file_errors.krbo", 0)
     uint64 fsize = file_size(fd)
     uint64 data = alloc(64)
     uint64 rgot = read_exact(fd, data, fsize)
-    if rgot != fsize { println("short read caught") } else { println("SHORT READ NOT CAUGHT") }
+    if rgot != fsize {
+        if read_exact_failed == 1 { println("short read caught") } else { println("SHORT READ CAUGHT BUT read_exact_failed NOT SET") }
+    } else { println("SHORT READ NOT CAUGHT") }
 }

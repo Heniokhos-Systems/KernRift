@@ -15,6 +15,11 @@ fn rn_alloc(uint64 n) -> uint64 {
     return p
 }
 
+// read_exact_failed: set by read_exact (the same text as src/main.kr's, kept
+// in sync by hand; row read_exact_copies_agree) when a read returned an
+// error rather than end of file. The runner does not read it.
+static uint64 read_exact_failed = 0
+
 // A LOCAL COPY of main.kr's read_exact, and it has to be one. The runner is a
 // SEPARATE program -- `cat src/runner.kr src/bcj.kr` (Makefile) -- and
 // src/runner.kr is not in SRCS, so nothing here can see src/main.kr. The
@@ -29,17 +34,25 @@ fn rn_alloc(uint64 n) -> uint64 {
 // returns 0 before `want` is reached is a truncation.
 fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
     uint64 got = 0
+    read_exact_failed = 0
     while got < want {
         uint64 n = file_read(fd, buf + got, want - got)
         // A failed read is -errno, a huge unsigned value: never add it to the
         // count. When file_size failed with the SAME errno the caller asked
         // for `want` = that value, and adding it made got == want -- a
         // failure reported as a complete read (#170).
-        if n > 0xFFFFFFFFFFFFF000 { return got }
+        if n > 0xFFFFFFFFFFFFF000 {
+            read_exact_failed = 1
+            return got
+        }
         if n == 0 { return got }
         // A provider claiming to have written more than there was room for is
-        // lying; believing it would advance `got` past the buffer.
-        if n > want - got { return got }
+        // lying; believing it would advance `got` past the buffer. (A failed
+        // read, -errno, has already returned above.)
+        if n > want - got {
+            read_exact_failed = 1
+            return got
+        }
         got = got + n
     }
     return got

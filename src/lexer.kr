@@ -162,96 +162,127 @@ fn lexer_init(uint64 source, uint64 length, uint64 tokens, uint64 capacity) {
     lang_profile = 0
 }
 
-// Parse an optional #lang directive at the very start of a file.
+// `#lang <profile>` -- an optional directive on the FIRST line of a file.
 // Recognized forms:
 //   #lang stable
 //   #lang experimental
-// Anything else is silently ignored (forward-compat with future profiles).
-// The directive must be on the first line; otherwise it's treated as normal
-// source (but #lang is not valid KernRift tokens, so this is an error path).
-fn lexer_parse_lang_directive() {
-    if src_len < 6 { return }
-    uint64 p0 = src_ptr
+// An unknown profile name is ignored (forward-compat with future profiles).
+//
+// THE LEXER AND THE IMPORT SCANNER BOTH CALL lang_directive_end, so they agree
+// on what the line is. They did not: the lexer skipped `#lang` only at byte 0
+// of the whole buffer, while import_process() stopped its leading-import scan
+// at the `#`. So `#lang stable` followed by `import "nonexistent.kr"` compiled
+// clean -- the import was never read -- and a `#lang` line at the top of any
+// imported file did the same to that file's imports. Now the directive is
+// accepted as the first line of EVERY file (at its first byte, after the
+// optional BOM check below), skipped by both readers, and only the file named
+// on the command line sets the profile.
+//
+// Returns the offset just past a directive line (its CR, LF or CRLF included)
+// that starts at buf[off], or `off` itself when none does. "#lang" is matched as
+// a 5-byte prefix and the rest of the line is the profile name.
+fn lang_directive_end(uint64 buf, uint64 size, uint64 off) -> uint64 {
+    if off + 6 > size { return off }
+    uint64 p0 = buf + off
     uint64 c0 = 0
     unsafe { *(p0 as uint8) -> c0 }
-    if c0 != 35 { return }  // '#'
-    uint64 p1 = src_ptr + 1
+    if c0 != 35 { return off }  // '#'
+    uint64 p1 = buf + off + 1
     uint64 c1 = 0
     unsafe { *(p1 as uint8) -> c1 }
-    uint64 p2 = src_ptr + 2
+    uint64 p2 = buf + off + 2
     uint64 c2 = 0
     unsafe { *(p2 as uint8) -> c2 }
-    uint64 p3 = src_ptr + 3
+    uint64 p3 = buf + off + 3
     uint64 c3 = 0
     unsafe { *(p3 as uint8) -> c3 }
-    uint64 p4 = src_ptr + 4
+    uint64 p4 = buf + off + 4
     uint64 c4 = 0
     unsafe { *(p4 as uint8) -> c4 }
-    // Match "#lang"
-    if c1 != 108 { return }  // 'l'
-    if c2 != 97 { return }   // 'a'
-    if c3 != 110 { return }  // 'n'
-    if c4 != 103 { return }  // 'g'
-    // Skip spaces after "#lang"
-    uint64 dp = 5
-    while dp < src_len {
-        uint64 psp = src_ptr + dp
-        uint64 csp = 0
-        unsafe { *(psp as uint8) -> csp }
-        if csp != 32 && csp != 9 { break }
+    if c1 != 108 { return off }  // 'l'
+    if c2 != 97 { return off }   // 'a'
+    if c3 != 110 { return off }  // 'n'
+    if c4 != 103 { return off }  // 'g'
+    uint64 dp = off + 5
+    while dp < size {
+        uint64 pe = buf + dp
+        uint64 ce = 0
+        unsafe { *(pe as uint8) -> ce }
+        if ce == 10 || ce == 13 { break }
         dp = dp + 1
     }
-    // Read the profile name up to end of line
-    uint64 name_start = dp
-    while dp < src_len {
-        uint64 pnm = src_ptr + dp
-        uint64 cnm = 0
-        unsafe { *(pnm as uint8) -> cnm }
-        if cnm == 10 || cnm == 13 { break }
+    if dp < size {
+        uint64 pt = buf + dp
+        uint64 ct = 0
+        unsafe { *(pt as uint8) -> ct }
         dp = dp + 1
-    }
-    uint64 name_len = dp - name_start
-    // Trim trailing whitespace
-    while name_len > 0 {
-        uint64 lp = src_ptr + name_start + name_len - 1
-        uint64 lc = 0
-        unsafe { *(lp as uint8) -> lc }
-        if lc != 32 && lc != 9 { break }
-        name_len = name_len - 1
-    }
-    // Compare against known profile names
-    if name_len == 6 {
-        uint64 sp6 = src_ptr + name_start
-        uint64 b0 = 0
-        unsafe { *(sp6 as uint8) -> b0 }
-        if b0 == 115 { lang_profile = 0 }   // 'stable' (starts with 's')
-    }
-    if name_len == 12 {
-        uint64 sp12 = src_ptr + name_start
-        uint64 b0x = 0
-        unsafe { *(sp12 as uint8) -> b0x }
-        if b0x == 101 { lang_profile = 1 }  // 'experimental'
-    }
-    // Skip the whole first line (including the newline) so the lexer
-    // doesn't try to tokenize '#lang stable' as source.
-    pos = dp
-    if pos < src_len {
-        uint64 pnl = src_ptr + pos
-        uint64 cnl = 0
-        unsafe { *(pnl as uint8) -> cnl }
-        if cnl == 13 {
-            pos = pos + 1
-            if pos < src_len {
-                uint64 pnl2 = src_ptr + pos
-                uint64 cnl2 = 0
-                unsafe { *(pnl2 as uint8) -> cnl2 }
-                if cnl2 == 10 { pos = pos + 1 }
-            }
-        } else if cnl == 10 {
-            pos = pos + 1
+        if ct == 13 && dp < size {
+            uint64 pt2 = buf + dp
+            uint64 ct2 = 0
+            unsafe { *(pt2 as uint8) -> ct2 }
+            if ct2 == 10 { dp = dp + 1 }
         }
-        line = 2
     }
+    return dp
+}
+
+// 1 if buf[off..] starts with a UTF-8 byte-order mark (EF BB BF).
+//
+// A BOM IS REFUSED, NOT SKIPPED, in the lexer and the import scanner alike. It
+// used to reach the import scanner as three bytes that are not `import`, which
+// ended the leading run, so a BOM-prefixed file had its imports dropped and was
+// then told "`import` must precede every declaration" about a line that was
+// first in the file. Refusing it with its own message keeps every reader of a
+// file on the same bytes; the fix for the user is one editor setting.
+fn utf8_bom_at(uint64 buf, uint64 size, uint64 off) -> uint64 {
+    if off + 3 > size { return 0 }
+    uint64 b0p = buf + off
+    uint64 b0 = 0
+    unsafe { *(b0p as uint8) -> b0 }
+    uint64 b1p = buf + off + 1
+    uint64 b1 = 0
+    unsafe { *(b1p as uint8) -> b1 }
+    uint64 b2p = buf + off + 2
+    uint64 b2 = 0
+    unsafe { *(b2p as uint8) -> b2 }
+    if b0 == 239 && b1 == 187 && b2 == 191 { return 1 }
+    return 0
+}
+
+// Called with pos at the first byte of a file. Refuses a BOM, then skips a
+// `#lang` line; set_profile says whether this file's directive sets the
+// profile (only the top-level file's does).
+fn lexer_file_start(uint64 set_profile) {
+    if utf8_bom_at(src_ptr, src_len, pos) != 0 {
+        lex_report(pos, line, "this file starts with a UTF-8 byte-order mark (bytes EF BB BF), which is not accepted; save it as UTF-8 without a BOM", 0, 0, 0)
+        pos = pos + 3
+        return
+    }
+    uint64 end = lang_directive_end(src_ptr, src_len, pos)
+    if end == pos { return }
+    if set_profile != 0 {
+        // The profile name: after "#lang" and its blanks, up to the line end,
+        // trailing blanks trimmed.
+        uint64 ns = pos + 5
+        while ns < end && (peek_at(ns - pos) == 32 || peek_at(ns - pos) == 9) {
+            ns = ns + 1
+        }
+        uint64 ne = ns
+        while ne < end && peek_at(ne - pos) != 10 && peek_at(ne - pos) != 13 {
+            ne = ne + 1
+        }
+        while ne > ns && (peek_at(ne - 1 - pos) == 32 || peek_at(ne - 1 - pos) == 9) {
+            ne = ne - 1
+        }
+        uint64 nl = ne - ns
+        uint64 n0 = peek_at(ns - pos)
+        if nl == 6 && n0 == 115 { lang_profile = 0 }   // 'stable' (starts with 's')
+        if nl == 12 && n0 == 101 { lang_profile = 1 }  // 'experimental'
+    }
+    // advance() counts the LF; a bare-CR line end is counted here.
+    uint64 last = peek_at(end - 1 - pos)
+    while pos < end { advance() }
+    if last == 13 { line = line + 1 }
 }
 
 @export
@@ -259,10 +290,59 @@ fn get_lang_profile() -> uint64 {
     return lang_profile
 }
 
+// Lexical errors (an unterminated literal, a malformed number) are reported as
+// they are found and counted here; lexer_run refuses the compile once the whole
+// buffer has been scanned, so every one of them is reported, not just the first.
+static uint64 lex_err_count = 0
+
+// ONE FILE AT A TIME, even though the buffer holds every imported file.
+//
+// import_process() concatenates each module into import_buf and records where
+// each one starts in srcmap_table. Lexed as one run, an unterminated string or
+// character literal at the end of an imported file did not stop at that file:
+// it ran on into the NEXT file, swallowed the importer's code up to the next
+// quote, and the error -- if one came at all -- was reported against the
+// importer, at a line that had nothing wrong with it.
+//
+// So when the buffer being lexed is import_buf, src_len is clamped to the end
+// of the current file for the whole time that file is lexed. No scanner can
+// read past it (peek/peek_at/advance all stop at src_len), and a literal still
+// open at the clamp is reported as unterminated at its own file:line:col. Line
+// numbers keep counting across files exactly as before, so the token stream of
+// a well-formed program is byte-for-byte what it was. Any other buffer (the
+// living compiler lexing a single file, a re-lex of kernel source) is a single
+// file already and is lexed whole.
 @export
 fn lexer_run() -> uint64 {
-    // Optional #lang directive on the first line sets the language profile
-    lexer_parse_lang_directive()
+    lex_err_count = 0
+    uint64 full_len = src_len
+    if src_ptr == import_buf && srcmap_count > 0 {
+        uint64 si = 0
+        while si < srcmap_count {
+            uint64 seg_end = full_len
+            if si + 1 < srcmap_count {
+                uint64 nxt = srcmap_table + (si + 1) * 16
+                unsafe { *(nxt as uint64) -> seg_end }
+            }
+            if seg_end > full_len { seg_end = full_len }
+            src_len = seg_end
+            // Each file's own first line may be `#lang`; the LAST file is the
+            // one named on the command line (import_process appends a file
+            // after everything it imports), so it alone sets the profile.
+            uint64 top_file = 0
+            if si + 1 == srcmap_count { top_file = 1 }
+            lexer_file_start(top_file)
+            while pos < src_len {
+                skip_whitespace_and_comments()
+                if pos < src_len {
+                    lex_one_token()
+                }
+            }
+            si = si + 1
+        }
+        src_len = full_len
+    }
+    if pos == 0 { lexer_file_start(1) }
     while pos < src_len {
         skip_whitespace_and_comments()
         // Check again after skipping (avoid break-in-if)
@@ -272,7 +352,140 @@ fn lexer_run() -> uint64 {
     }
     // Emit EOF token
     emit_token(TokenKind.Eof, pos, 0, line)
+    if lex_err_count > 0 {
+        uint8[24] nb
+        // lex_report prints the first 20; say how many it held back rather
+        // than stopping in silence.
+        if lex_err_count > 20 {
+            write(2, "(", 1)
+            uint64 nh = fmt_uint(nb, lex_err_count - 20)
+            write(2, nb, nh)
+            write(2, " more errors not shown)\n", 24)
+        }
+        uint64 nl = fmt_uint(nb, lex_err_count)
+        write(2, nb, nl)
+        write(2, " lex error(s)\n", 14)
+        exit(1)
+    }
     return tok_count
+}
+
+// "file:line:col: error: <msg_a>[<quoted text><msg_b>]". The location is the
+// byte `start` (the opening quote of an unterminated literal, the first digit
+// of a malformed number). In import_buf the file and line come from the
+// source map, so an error in an imported file names THAT file; elsewhere the
+// buffer is a single file and only line:col is known.
+fn lex_report(uint64 start, uint64 tok_line, uint64 msg_a, uint64 txt, uint64 txt_len, uint64 msg_b) {
+    lex_err_count = lex_err_count + 1
+    if lex_err_count > 20 { return }
+    uint64 l = tok_line
+    if src_ptr == import_buf && srcmap_count > 0 {
+        uint64 fp = srcmap_file(start)
+        if fp != 0 {
+            write(2, fp, str_len(fp))
+            write(2, ":", 1)
+        }
+        l = srcmap_line(start)
+    }
+    uint64 ls = start
+    while ls > 0 {
+        uint64 pb = src_ptr + ls - 1
+        uint64 cb = 0
+        unsafe { *(pb as uint8) -> cb }
+        if cb == 10 { break }
+        ls = ls - 1
+    }
+    uint8[24] nb
+    uint64 n1 = fmt_uint(nb, l)
+    write(2, nb, n1)
+    write(2, ":", 1)
+    uint64 n2 = fmt_uint(nb, start - ls + 1)
+    write(2, nb, n2)
+    write(2, ": error: ", 9)
+    write(2, msg_a, str_len(msg_a))
+    if txt_len != 0 {
+        write(2, "'", 1)
+        write(2, txt, txt_len)
+        write(2, "'", 1)
+        write(2, msg_b, str_len(msg_b))
+    }
+    write(2, "\n", 1)
+}
+
+// A number must END where its digits end. Called with pos just past a complete
+// literal (digits, separators, fraction, exponent, `f` suffix). If what follows
+// is a letter, a digit or a quote, the two were glued together -- `5x`,
+// `0b1012`, `1_f"x"`, `10.5fx` -- and the old reading (a number followed by an
+// identifier, or by an f-string) was never what anyone wrote. The whole run is
+// consumed and reported as one malformed literal; returns 1 if it was.
+fn lex_number_glued(uint64 start, uint64 tok_line) -> uint64 {
+    if pos >= src_len { return 0 }
+    uint64 nc = peek()
+    if is_alnum(nc) == 0 && nc != 34 && nc != 39 { return 0 }
+    while pos < src_len && is_alnum(peek()) != 0 {
+        advance()
+    }
+    lex_report(start, tok_line, "malformed number literal ", src_ptr + start, pos - start,
+               ": a number must not be followed directly by a letter, a stray digit or a quote")
+    emit_token(TokenKind.Error, start, pos - start, tok_line)
+    return 1
+}
+
+fn is_hex_digit(uint64 c) -> uint64 {
+    if c >= 48 && c <= 57 { return 1 }
+    if c >= 97 && c <= 102 { return 1 }
+    if c >= 65 && c <= 70 { return 1 }
+    return 0
+}
+
+// One escape inside a string, character or f-string literal; pos is at the
+// backslash. Consumes the backslash and the byte after it -- exactly what the
+// three scanners always did, so where a literal ENDS never changes -- and
+// refuses an escape that is not in the grammar's char_escape set.
+//
+// The decoders behind the lexer (the string lowering in three backends,
+// fstr_part_bake, parse_int_token for characters) never checked: `\x` took the
+// next two bytes whatever they were, so "\x4]" was one byte made from '4' and
+// ']' (the bracket vanished), and a `\x` with fewer than two bytes left before
+// the closing quote fell through to the generic path and printed "x4". An
+// unknown letter (`\q`, `\u{41}`) silently became the letter. Each is now a
+// lexical error at the backslash.
+//
+// Valid: \n \t \r \0 \\ \' \" \a \b \f \v \e, and \x followed by exactly two
+// hex digits. In an f-string \{ and \} are also accepted (each is its brace,
+// as fstr_part_bake documents). Only a VALID \x consumes its two digits; after
+// an invalid one the scan resumes at the byte after the `x`, so a closing
+// quote straight after `\x4` still closes the literal.
+fn lex_escape(uint64 is_fstr) {
+    uint64 bs = pos
+    uint64 bs_line = line
+    advance()                                   // the backslash
+    if pos >= src_len { return }                // unterminated: the caller reports it
+    uint64 e = peek()
+    if e == 120 {
+        advance()                               // 'x'
+        if is_hex_digit(peek()) != 0 && pos + 1 < src_len && is_hex_digit(peek_at(1)) != 0 {
+            advance()
+            advance()
+            return
+        }
+        uint64 shown = 2
+        if is_hex_digit(peek()) != 0 { shown = 3 }
+        lex_report(bs, bs_line, "invalid escape ", src_ptr + bs, shown,
+                   ": \\x must be followed by exactly two hex digits (0-9, a-f, A-F), as in \\x41")
+        return
+    }
+    uint64 ok = 0
+    if e == 110 || e == 116 || e == 114 || e == 48 || e == 92 || e == 39 || e == 34 { ok = 1 }
+    if e == 97 || e == 98 || e == 102 || e == 118 || e == 101 { ok = 1 }
+    if is_fstr != 0 && (e == 123 || e == 125) { ok = 1 }
+    if ok == 0 {
+        uint64 shown2 = 2
+        if e == 10 || e == 13 { shown2 = 1 }
+        lex_report(bs, bs_line, "invalid escape ", src_ptr + bs, shown2,
+                   ": the escapes are \\n \\t \\r \\0 \\\\ \\' \\\" \\a \\b \\f \\v \\e and \\xHH (two hex digits)")
+    }
+    advance()                                   // the escaped byte
 }
 
 @export
@@ -481,8 +694,7 @@ fn lex_one_token() {
                     // when the segment is baked by fstr_part_bake. Without
                     // this, f"say \"hi\"" ended at the first escaped quote
                     // and the rest of the line was parsed as code.
-                    advance()
-                    if pos < src_len { advance() }
+                    lex_escape(1)
                 } else if fch == 34 {
                     fstr_running = 0
                 } else if fch == 123 {
@@ -538,7 +750,11 @@ fn lex_one_token() {
                 uint64 plen2 = pos - part_start
                 emit_token(TokenKind.StrPart, part_start, plen2, tok_line)
             }
-            if pos < src_len { advance() }  // consume closing '"'
+            if pos < src_len {
+                advance()  // consume closing '"'
+            } else {
+                lex_report(start, tok_line, "unterminated f-string literal (no closing '\"' before the end of the file)", 0, 0, 0)
+            }
             emit_token(TokenKind.FStrEnd, pos, 0, tok_line)
             return
         }
@@ -590,6 +806,8 @@ fn lex_one_token() {
                 }
             }
             if hex_n == 0 {
+                lex_report(start, tok_line, "malformed number literal ", src_ptr + start, pos - start,
+                           ": a base prefix needs at least one digit")
                 emit_token(TokenKind.Error, start, pos - start, tok_line)
                 return
             }
@@ -611,20 +829,17 @@ fn lex_one_token() {
                 }
             }
             if bin_n == 0 {
+                lex_report(start, tok_line, "malformed number literal ", src_ptr + start, pos - start,
+                           ": a base prefix needs at least one digit")
                 emit_token(TokenKind.Error, start, pos - start, tok_line)
                 return
             }
             // A decimal digit straight after the binary ones is a typo, not two
             // tokens: `0b1012` would otherwise lex as 0b101 followed by 2, and
-            // the stray 2 is not always where it would be noticed. Letters are
-            // deliberately NOT rejected here -- number-then-identifier
-            // adjacency is meaningful elsewhere (see the `42exit` note in the
-            // exponent scan below).
-            if pos < src_len && peek() >= 50 && peek() <= 57 {
-                advance()
-                emit_token(TokenKind.Error, start, pos - start, tok_line)
-                return
-            }
+            // the stray 2 is not always where it would be noticed. The same
+            // holds for a letter or a quote (`0b1f"x"` used to lex as 0b1
+            // followed by an f-string), so lex_number_glued covers all three.
+            if lex_number_glued(start, tok_line) != 0 { return }
             emit_token(TokenKind.IntLit, start, pos - start, tok_line)
             return
         } else {
@@ -665,8 +880,9 @@ fn lex_one_token() {
             }
             if pos < src_len && (peek() == 101 || peek() == 69) {
                 // Only consume `e`/`E` if a digit (optionally preceded by
-                // + or -) actually follows — otherwise we'd eat the 'e'
-                // out of identifiers like `42exit`.
+                // + or -) actually follows. A bare `e` is left alone, and
+                // lex_number_glued then reports `42exit` as one malformed
+                // literal rather than silently splitting it.
                 uint64 exp_probe = 1
                 uint64 c1 = peek_at(exp_probe)
                 if c1 == 43 || c1 == 45 {
@@ -686,22 +902,32 @@ fn lex_one_token() {
             }
             if is_float != 0 {
                 if pos < src_len && peek() == 102 { advance() }
+                if lex_number_glued(start, tok_line) != 0 { return }
                 emit_token(TokenKind.FloatLit, start, pos - start, tok_line)
                 return
             }
         }
+        // Integer (decimal or hex): nothing may be glued to its end -- `5x`,
+        // `1_f"x"` and `0x1Fg` are one malformed literal each, not a number
+        // followed by something else.
+        if lex_number_glued(start, tok_line) != 0 { return }
         emit_token(TokenKind.IntLit, start, pos - start, tok_line)
         return
     }
 
-    // String literal
+    // String literal. A literal still open at the end of the file (src_len is
+    // the end of the CURRENT file while import_buf is lexed -- see lexer_run)
+    // is an error at its opening quote, not a token that quietly ends there.
     if ch == 34 {
         advance()
         while pos < src_len && peek() != 34 {
-            if peek() == 92 { advance() }
-            advance()
+            if peek() == 92 { lex_escape(0) } else { advance() }
         }
-        if pos < src_len { advance() }
+        if pos < src_len {
+            advance()
+        } else {
+            lex_report(start, tok_line, "unterminated string literal (no closing '\"' before the end of the file)", 0, 0, 0)
+        }
         emit_token(TokenKind.StrLit, start, pos - start, tok_line)
         return
     }
@@ -712,10 +938,13 @@ fn lex_one_token() {
     if ch == 39 {
         advance()
         while pos < src_len && peek() != 39 {
-            if peek() == 92 { advance() }
-            advance()
+            if peek() == 92 { lex_escape(0) } else { advance() }
         }
-        if pos < src_len { advance() }
+        if pos < src_len {
+            advance()
+        } else {
+            lex_report(start, tok_line, "unterminated character literal (no closing \"'\" before the end of the file)", 0, 0, 0)
+        }
         emit_token(TokenKind.CharLit, start, pos - start, tok_line)
         return
     }

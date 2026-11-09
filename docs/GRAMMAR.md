@@ -36,8 +36,12 @@ COMMENT     = "//" [^\n]*                     (discarded)
 
 **There are no block comments.** `/* ... */` is not a comment — the lexer
 (`skip_whitespace_and_comments` in `src/lexer.kr`) recognises `//` and nothing
-else, so `/*` lexes as a `/` followed by a `*` and the parser reports
-`error: unexpected '/' in expression`. Use `//` on each line.
+else, so `/*` lexes as a `/` followed by a `*`. Inside a function body the
+parser reports `error: unexpected '/' in expression`; between declarations it
+reports `error: expected a declaration at top level (...), got '/'` (LANGUAGE.md
+§1; until register item 99 was fixed it skipped them without a word and
+compiled any declaration written between the `/*` and the `*/`). Use `//` on
+each line.
 
 Whitespace (spaces, tabs, CR, LF) is a token separator; no significant
 indentation. `TokenKind` in `src/lexer.kr` has 96 members (counting `Eof` and `Error`); only the subset relevant to
@@ -47,16 +51,30 @@ grammar is referenced below.
 `0B1010` is 10, and `1_000` is 1000; the separator is allowed in decimal, hex
 and binary literals and runs through floats as well, so `1_0.5` is 10.5 and not
 10.05. `0x` accepts a capital `X` too. A *prefix with no digits* — `0x`, `0X`,
-`0b`, `0B`, `0x_` — is an **error token**, not a number: `static u64 X = 0x`
+`0b`, `0B`, `0x_` — is a **malformed literal**, not a number: `static u64 X = 0x`
 once compiled and stored 72, because the decimal fallback read the text `0x` as
 the digit `'x' - '0'`. A decimal digit immediately after a binary literal
 (`0b1012`) is an error too, rather than `0b101` followed by a stray `2`.
 
+**A literal must end where its digits end.** A letter, a stray digit or a
+quote glued onto a number (`5x`, `0b1012`, `10.5fx`, `1_f"x"`) is one
+malformed literal, refused by the lexer with `malformed number literal
+'<text>'`; a prefix with no digits (`0x`, `0b_`) likewise. Lexical errors --
+these and an unterminated string, character or f-string literal -- are
+reported as `file:line:col: error: ...` and stop the compile before parsing.
+Each imported file is lexed on its own, so no literal crosses into the next
+file. The f-string segments take the same `char_escape` set as `STR_LIT`, plus
+`\{` and `\}`. The set is enforced: any other byte after a backslash, and a
+`\x` not followed by exactly two hex digits, is `error: invalid escape
+'<text>'` at the backslash. A file may begin with a `#lang` line (LANGUAGE.md
+§22); a file that begins with a UTF-8 byte-order mark is refused. Past 20
+lexical errors the rest are counted, not printed, and the count of the held-back
+ones is printed as `(N more errors not shown)`; the parser does the same past
+its own 20.
+
 **Octal (`0o...`) literals and `\u{...}` escapes are still not implemented.**
-`0o17` is `0` followed by the identifier `o17` — an undeclared-identifier error
-at the point of use — and `'\u{41}'` silently evaluates to `'u'` (117), not
-`'A'`, because the lexer's escape set has no `u` case and the backslash simply
-escapes the next byte.
+`0o17` is a malformed literal (`0` glued to `o17`), and `'\u{41}'` is an
+invalid escape.
 
 ## Keywords
 
@@ -86,7 +104,8 @@ variable names, and using one is a parse error rather than a shadowing warning.
 
 ```
 module      = import_decl* top_item*
-import_decl = "import" STR_LIT
+import_decl = "import" IMPORT_PATH      (* on ONE line *)
+IMPORT_PATH = '"' [^"\\\n\r\0]+ '"'          (* no escapes, no backslash, non-empty *)
 top_item    = annotation* fn_decl
             | extern_decl
             | const_decl
@@ -106,6 +125,12 @@ surface as `undefined function` at the *use* site, pointing away from the
 import. Comments and blank lines before the first import are skipped and do not
 end the run. `import` with no `STR_LIT` is an error at any position, because a
 pathless `import` also terminates the leading run.
+
+`IMPORT_PATH` is narrower than `STR_LIT` on purpose: the import scanner opens
+the path's bytes as written, so a backslash (which `STR_LIT` reads as an
+escape), a line break before the closing quote, a NUL, an empty path, or an
+`import` whose path is not on the same line is refused by the scanner before
+any file is opened (see LANGUAGE.md §17 for the exact diagnostics).
 
 ## Annotations
 

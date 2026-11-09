@@ -2678,7 +2678,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         // Size is bits 31:30 — STLRB / STLRH / STLR Wt / STLR Xt.
         // An unrecognised width takes the narrowest form, matching x86
         // (ir.kr:11569): losing data locally beats corrupting neighbours.
-        // Unreachable today — parser.kr:4055-4060 is the only producer and it
+        // Unreachable today — parser.kr:4284-4289 is the only producer and it
         // yields 1/2/4/8 only — but defensive, and cheap.
         uint64 vs_base = 0x089FFC00
         if vw == 2 { vs_base = 0x489FFC00 } else if vw == 4 { vs_base = 0x889FFC00 } else if vw == 8 { vs_base = 0xC89FFC00 }

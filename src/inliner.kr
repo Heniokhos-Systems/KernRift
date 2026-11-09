@@ -721,7 +721,7 @@ fn inline_try_call(uint64 call_node, uint64 root) -> uint64 {
     // DO NOT "OPTIMISE" THIS BY WHITELISTING Index OR FieldAccess IN
     // inline_kind_is_pure. It looks like free speed -- it is the one
     // and only site in this tree's whole corpus where the guard costs
-    // anything (tests/target_none/corpus/arith.kr:27,
+    // anything (tests/target_none/corpus/arith.kr:36,
     // `add3(counter, table[i], i)` -- ONE static call site declined,
     // whose emitted call then runs eight times because the site sits
     // inside a `while i < 8` loop) -- and it is the same mistake as

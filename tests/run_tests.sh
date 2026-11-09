@@ -2791,14 +2791,12 @@ rm -f "$DIR/../dmassign_idx_$$.kr" "$DIR/../dmassign_ptr_$$.kr" \
 #    lexed as a divide operator and the parser then chokes.
 #
 #    SUBTLETY, and the exact reason the "block comments are supported" claim
-#    survived: a SINGLE-LINE `/* x */` at TOP LEVEL compiles clean. That is an
-#    accident, not support -- before a declaration the parser skips tokens it
-#    does not recognise, so the whole comment is swallowed and never reaches an
-#    expression context. Anyone who probes block comments by putting one at the
-#    top of a file therefore "confirms" a feature that does not exist. THE
-#    TOP-LEVEL FORM IS NOT A VALID PROBE. Pin the statement position instead,
-#    which genuinely errors, and pin the top-level accident too so that a
-#    partial implementation cannot land unnoticed.
+#    survived: a SINGLE-LINE `/* x */` at TOP LEVEL used to compile clean. That
+#    was an accident, not support -- before a declaration the parser skipped
+#    tokens it did not recognise (register item 99), so the whole comment was
+#    swallowed and never reached an expression context. Junk at top level is
+#    now a parse error, so both positions are pinned as refusals, each with its
+#    own diagnostic, so that a partial implementation cannot land unnoticed.
 #
 #    Parse-only: a parse error is reached before any codegen, so the arch is
 #    irrelevant -- $RUN_ARCH is used purely because it is always a valid value.
@@ -2844,16 +2842,20 @@ if ! printf '%s' "$bc_out" | grep -q 'docpin_bc_body_.*\.kr:2:5: error:'; then
     BC_OK=0
     echo "  diagnostic did not point at the '/*' at line 2 col 5"
 fi
-# The top-level accident, pinned so a top-level-only implementation is visible.
-$KRC --arch=$RUN_ARCH "$DIR/../docpin_bc_top_$$.kr" -o /tmp/krc_bct_$$ >/dev/null 2>&1
+# The top-level form: refused by the top-level-junk error, at the `/`.
+bct_out=$($KRC --arch=$RUN_ARCH "$DIR/../docpin_bc_top_$$.kr" -o /tmp/krc_bct_$$ 2>&1)
 bct_rc=$?
 rm -f /tmp/krc_bct_$$
-if [ "$bct_rc" != "0" ]; then
+if [ "$bct_rc" = "0" ]; then
     BC_OK=0
-    echo "  the top-level single-line form no longer compiles (it did, by accident, on 2026-08-14)"
+    echo "  the top-level single-line form compiled -- top-level junk is skipped again (register item 99)"   # tripwire: not a skip -- part of a FAIL report
+fi
+if ! printf '%s' "$bct_out" | grep -q "docpin_bc_top_.*\.kr:1:1: error: expected a declaration at top level .*got '/'; there are no \`/\* \*/\` block comments"; then
+    BC_OK=0
+    echo "  top-level form: expected the top-level-junk error at 1:1 on '/', got: $(printf '%s' "$bct_out" | head -2)"
 fi
 if [ "$BC_OK" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  block_comments_unimplemented: PASS (statement position errors; top-level form still slips through)"
+    PASS=$((PASS + 1)); echo "  block_comments_unimplemented: PASS (statement position and top level both refuse /*)"
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: block_comments_unimplemented"
@@ -2861,6 +2863,155 @@ else
     echo "  do NOT 'confirm' the feature with a top-level /* */ -- that form passes without any lexer support"
 fi
 rm -f "$DIR/../docpin_bc_body_$$.kr" "$DIR/../docpin_bc_top_$$.kr"
+
+# 1b. Top-level junk is a parse error (register item 99). It used to be skipped
+#     one token at a time without a word, which hid three distinct mistakes.
+#     Each refusal row below compiles clean on a compiler without the fix, so
+#     each fails there; the rows named *_accepted are controls that pass on
+#     both. Parse errors precede codegen: $RUN_ARCH is just a valid arch.
+#     tlj_check <row> <want-in-stderr> -- the probe is $TLJ_SRC; it must be
+#     refused (non-zero exit, no artifact) with that text in the diagnostic.
+TLJ_SRC="$DIR/../tlj_$$.kr"
+TLJ_BIN="/tmp/krc_tlj_$$"
+tlj_check() {
+    TOTAL=$((TOTAL + 1))
+    rm -f "$TLJ_BIN"
+    local out rc
+    out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1); rc=$?
+    if [ "$rc" = "0" ] || [ -e "$TLJ_BIN" ]; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (compiled: exit $rc$( [ -e "$TLJ_BIN" ] && echo ', artifact written'); the probe was accepted)"
+    elif ! printf '%s' "$out" | grep -qF -- "$2"; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (refused, but without '$2': $(printf '%s' "$out" | head -1))"
+    else
+        PASS=$((PASS + 1)); echo "  $1: PASS (refused: $2)"
+    fi
+    rm -f "$TLJ_BIN"
+}
+# A `fn` written inside a top-level /* */ used to be COMPILED: main called it
+# and the program exited 7.
+printf '/* fn hidden() -> uint64 { return 7 } */\nfn main() { exit(hidden()) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_block_comment_compiles_nothing "tlj_$$.kr:1:1: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '/'"
+# An annotation followed by junk used to be consumed, the junk skipped, and the
+# next fn compiled with a full prologue and no @naked.
+printf '@naked\n/* c */\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_does_not_drop_naked "tlj_$$.kr:2:1: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '/'; the annotation before it applies to nothing"
+printf '@export *\nfn s() -> uint64 { return 1 }\nfn main() { exit(s()) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_does_not_drop_export "tlj_$$.kr:1:9: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '*'; the annotation before it applies to nothing"
+# A C-style array declaration: the `[8]` used to be skipped, leaving `table`
+# one scalar (tests/target_none/corpus/arith.kr carried exactly this).
+printf 'static uint32 table[8]\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_c_style_array "tlj_$$.kr:1:20: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got '['"
+# `;` between declarations is a separator, accepted as between statements
+# (control: the suite's const_* rows write `const u64 X = 42; fn main() ...`);
+# right after an annotation it would detach it, so there it is refused.
+printf '@export ;\nfn s() -> uint64 { return 1 }\nfn main() { exit(s()) }\n' > "$TLJ_SRC"
+tlj_check toplevel_junk_semicolon_after_annotation "tlj_$$.kr:1:9: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got ';'; the annotation before it applies to nothing"
+printf 'const uint64 X = 40; static uint64 Y = 2;\nfn main() { exit(X + Y) };\n' > "$TLJ_SRC"
+TOTAL=$((TOTAL + 1))
+rm -f "$TLJ_BIN"
+if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$TLJ_BIN"; tlj_rc=$?
+    if rb_timed_out "$tlj_rc" "$RT_T0"; then
+        FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+    elif [ "$tlj_rc" = "42" ]; then
+        PASS=$((PASS + 1)); echo "  toplevel_semicolon_separator_accepted: PASS (compiles, exits 42)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (ran, exit $tlj_rc, want 42)"
+    fi
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: toplevel_semicolon_separator_accepted (did not compile: ';' between declarations must be accepted)"
+fi
+# An annotation that applies to nothing is an error too (register item 99,
+# part 2): before a declaration it does not apply to, misspelt, `@` before a
+# non-name, at end of file, with its arguments never closed. Each of these
+# compiled clean before, the annotation simply dropped.
+printf '@naked\nstatic uint64 g = 1\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check annotation_on_wrong_declaration_refused "tlj_$$.kr:1:2: error: annotation '@naked' applies only to fn, not to 'static'"
+printf '@nakd\nfn s() {\n}\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check annotation_unknown_name_refused "tlj_$$.kr:1:2: error: unknown annotation '@nakd'"
+printf '@ 5\nfn main() { exit(0) }\n' > "$TLJ_SRC"
+tlj_check annotation_without_name_refused "tlj_$$.kr:1:3: error: expected an annotation name after '@', got integer '5'"
+# ...and that is the only error: the junk after `@` is not reported again.
+TOTAL=$((TOTAL + 1))
+tlj_out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1)
+if [ "$(printf '%s\n' "$tlj_out" | grep -c ': error: ')" = "1" ] && printf '%s' "$tlj_out" | grep -qx "1 parse error(s)"; then
+    PASS=$((PASS + 1)); echo "  annotation_without_name_one_error: PASS"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_without_name_one_error ($(printf '%s' "$tlj_out" | grep -c ': error: ') errors: $(printf '%s' "$tlj_out" | grep ': error: ' | tr '\n' '|' | cut -c1-200))"
+fi
+rm -f "$TLJ_BIN"
+printf 'fn main() { exit(0) }\n@naked\n' > "$TLJ_SRC"
+tlj_check annotation_at_end_of_file_refused "tlj_$$.kr:2:2: error: annotation '@naked' at end of file applies to nothing"
+printf 'fn main() { exit(0) }\n@section(".x"\n' > "$TLJ_SRC"
+tlj_check annotation_unclosed_arguments_refused "tlj_$$.kr:2:2: error: unclosed '(' in the arguments of annotation '@section'"
+# Control: every form the shipped sources use still compiles and runs.
+printf '@packed struct H { u8 a }\n@export static uint64 g = 1\n@export const uint64 C = 2\n@noreturn\nfn f() { exit(9) }\n@naked\nfn nk() {\n    asm { "ret" }\n}\n@section(".text.k")\nfn sk() -> uint64 { return 0 }\n@ctx(task)\nfn ck() -> uint64 { return 0 }\nfn main() { exit(g + C + sk() + ck()) }\n@module_license("GPL")\n' > "$TLJ_SRC"
+TOTAL=$((TOTAL + 1))
+rm -f "$TLJ_BIN"
+if $KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" >/dev/null 2>&1; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$TLJ_BIN"; tlj_rc=$?
+    if rb_timed_out "$tlj_rc" "$RT_T0"; then
+        FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+    elif [ "$tlj_rc" = "3" ]; then
+        PASS=$((PASS + 1)); echo "  annotation_valid_forms_accepted: PASS (@packed struct, @export static/const, @noreturn, @naked, @section and @ctx fns, a module-wide @module_license at end of file; exits 3)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (ran, exit $tlj_rc, want 3)"
+    fi
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_valid_forms_accepted (did not compile: @packed struct, @export static/const, @noreturn, @naked, @section and @ctx fns, a module-wide @module_license at end of file must be accepted)"
+fi
+# The annotations that are accepted and change nothing in the output --
+# @export on a static or const, @packed, @releases, and @ctx/@eff/@caps/
+# @acquires (which `krc check` reads, but the code generator does not) --
+# pinned byte-identical with and without, in an executable (IR and --legacy,
+# x86_64 and arm64) and an --emit=obj object. LANGUAGE.md §1 says they change
+# nothing in the output; if one starts to, this row goes red and the doc has
+# to change with it.
+TOTAL=$((TOTAL + 1))
+ANP_D=$(mktemp -d "${TMPDIR:-/tmp}/anp.XXXXXX")
+printf 'struct H { u8 a  u32 b }\nstatic uint64 g = 1\nconst uint64 C = 2\nfn f(uint64 x) -> uint64 { return x + 1 }\nfn main() { H h  h.b = 3  exit(f(g) + C + h.b) }\n' > "$ANP_D/base.kr"
+ANP_WHY=""
+anp_case() { # <label> <sed expression>
+    sed -e "$2" "$ANP_D/base.kr" > "$ANP_D/ann.kr"
+    cmp -s "$ANP_D/base.kr" "$ANP_D/ann.kr" && { ANP_WHY="$ANP_WHY [$1: the probe did not change]"; return; }
+    local m
+    for m in "--arch=x86_64" "--arch=x86_64 --legacy" "--arch=arm64" "--arch=x86_64 --emit=obj"; do
+        rm -f "$ANP_D/b.out" "$ANP_D/a.out"
+        $KRC $m "$ANP_D/base.kr" -o "$ANP_D/b.out" > /dev/null 2>&1
+        if ! $KRC $m "$ANP_D/ann.kr" -o "$ANP_D/a.out" > /dev/null 2>&1; then
+            ANP_WHY="$ANP_WHY [$1 $m: refused]"
+        elif [ ! -s "$ANP_D/b.out" ] || ! cmp -s "$ANP_D/a.out" "$ANP_D/b.out"; then
+            ANP_WHY="$ANP_WHY [$1 $m: output differs]"
+        fi
+    done
+}
+anp_case '@export static' 's/^static uint64 g/@export static uint64 g/'
+anp_case '@export const' 's/^const uint64 C/@export const uint64 C/'
+anp_case '@packed struct' 's/^struct H/@packed struct H/'
+anp_case '@releases fn' 's/^fn f(/@releases(L) fn f(/'
+anp_case '@acquires fn' 's/^fn f(/@acquires(L) fn f(/'
+anp_case '@ctx fn' 's/^fn f(/@ctx(task) fn f(/'
+anp_case '@eff fn' 's/^fn f(/@eff(io) fn f(/'
+anp_case '@caps fn' 's/^fn f(/@caps(X) fn f(/'
+if [ -z "$ANP_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  annotation_noops_are_byte_identical: PASS (8 annotations x 4 builds)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: annotation_noops_are_byte_identical$ANP_WHY"
+fi
+rm -rf "$ANP_D"
+# A run of stray words is ONE error, not one per word: recovery resumes at the
+# next token that can start a declaration.
+printf 'fn a() {}\nfoo bar baz\nfn main() { exit(3) }\n' > "$TLJ_SRC"
+TOTAL=$((TOTAL + 1))
+tlj_out=$($KRC --arch=$RUN_ARCH "$TLJ_SRC" -o "$TLJ_BIN" 2>&1); tlj_rc=$?
+if [ "$tlj_rc" != "0" ] && printf '%s' "$tlj_out" | grep -qF "tlj_$$.kr:2:1: error: expected a declaration at top level (fn, static, const, struct, enum, type, extern, device or import), got identifier 'foo'" \
+   && [ "$(printf '%s\n' "$tlj_out" | grep -c 'error: expected a declaration at top level')" = "1" ] \
+   && printf '%s' "$tlj_out" | grep -qx "1 parse error(s)"; then
+    PASS=$((PASS + 1)); echo "  toplevel_junk_one_error_per_run: PASS (foo bar baz is one error)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: toplevel_junk_one_error_per_run (exit $tlj_rc: $(printf '%s' "$tlj_out" | tr '\n' '|' | head -c 300))"
+fi
+rm -f "$TLJ_SRC" "$TLJ_BIN"
 
 # 2. The @ctx / @effects / caps / lock-order analyses CANNOT FIRE. `ann_register`
 #    and `lock_add_edge` are defined in src/analysis.kr and called from nowhere:
@@ -15593,7 +15744,7 @@ printf 'fn main() { exit(42) }\n' > "$XT_E_SRC"
 # esp32 must REFUSE, with the new wording, and must exit non-zero: a
 # print-and-continue regression would still match the grep below while
 # happily emitting SIMCALL into an ESP32 image (xtensa_framecap_guard,
-# tests/run_tests.sh:14383, checks its rc the same way).
+# tests/run_tests.sh:14534, checks its rc the same way).
 XT_REFUSE_ERR=$($KRC --arch=xtensa --freestanding --target=esp32 "$XT_E_SRC" -o /dev/null 2>&1)
 XT_REFUSE_RC=$?
 if [ $XT_REFUSE_RC -ne 0 ] && echo "$XT_REFUSE_ERR" | grep -q "no OS to return an exit status to"; then
@@ -20376,7 +20527,7 @@ done
 # validation under --target=none (asserted by t6_legacy_tnone_* above).
 # --emit=obj is: it reaches the SAME src/codegen.kr and
 # src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
-# `emit_mode != 3` guard at src/main.kr:4250 and arm64 through the one at
+# `emit_mode != 3` guard at src/main.kr:4450 and arm64 through the one at
 # :4005 -- so retargeting these assertions onto it keeps every legacy
 # bare-metal guard live and tested rather than turning them into unreachable
 # code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
@@ -21654,12 +21805,12 @@ fi
 # claimed every site. Three live wrong lengths sat behind that blind spot the
 # whole time, all in the --emit=asm listing writer, which writes to an opened
 # file rather than to stdout/stderr:
-#   main.kr:1153  "; KernRift assembly listing\n" declared 27, real 28 -- the
+#   main.kr:1353  "; KernRift assembly listing\n" declared 27, real 28 -- the
 #                 listing header lost its newline and ran straight into
 #                 "; Architecture: x86_64". Observed on the wire.
-#   main.kr:1715  "           mfence"            declared 18, real 17 -- a NUL
+#   main.kr:1915  "           mfence"            declared 18, real 17 -- a NUL
 #                 byte after every disassembled mfence.
-#   main.kr:1797  "...          lock ..."        declared 20, real 21 -- the
+#   main.kr:1997  "...          lock ..."        declared 20, real 21 -- the
 #                 lock-prefix line lost its last ".".
 # A guard whose scope is narrower than its comment is worse than no guard: it
 # reads as coverage. Two lessons are wired in below rather than written down.
@@ -27136,22 +27287,23 @@ fn main() -> u64 { return X }' 31
 run_test "decimal_unchanged" 'static u64 X = 31
 fn main() -> u64 { return X }' 31
 run_test "float_literal_unchanged" 'fn main() -> u64 { f64 x = 0.5; if x > 0.4 { return 7 } return 0 }' 7
-# A MALFORMED LITERAL IS DIAGNOSED, NOT SKIPPED. These reach the folder through
-# TokenKind.Error (255) being listed beside the literal kinds at both initialiser
-# sites. Without that they fall to the "skip unsupported initializer" path and
-# the static keeps its default 0 -- quieter than the 72 `0x` used to produce, and
-# just as unasked-for. The array-size row is here because that position reaches
-# the folder directly and would have been the one place already covered.
+# A MALFORMED LITERAL IS DIAGNOSED, NOT SKIPPED. These used to reach the folder
+# through TokenKind.Error (255) being listed beside the literal kinds at both
+# initialiser sites ("expected a compile-time constant"); without that they fell
+# to the "skip unsupported initializer" path and the static kept its default 0.
+# The lexer now names the literal itself and refuses the compile before parsing
+# ("malformed number literal '0x'"), at every position alike -- the array-size
+# row is here because that position reached the folder directly.
 run_test_rejects "hex_prefix_no_digits" 'static u64 X = 0x
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "binary_prefix_no_digits" 'static u64 X = 0b
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "hex_prefix_separator_only" 'static u64 X = 0x_
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "binary_literal_bad_digit" 'static u64 X = 0b1012
-fn main() -> u64 { return X }' "expected a compile-time constant"
+fn main() -> u64 { return X }' "malformed number literal"
 run_test_rejects "hex_prefix_no_digits_array_size" 'static u8[0x] a
-fn main() -> u64 { return 0 }' "expected a compile-time constant"
+fn main() -> u64 { return 0 }' "malformed number literal"
 
 # --- digit separators --------------------------------------------------------
 #
@@ -32486,6 +32638,448 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: oom_is_a_clean_error$OOM_WHY"
 fi
 rm -rf "$OOM_D"
+
+# --- lexer / import-scanner parity (ANCHOR LEXIMP) ----------------------------
+#
+# GENERATED by tests/gen_leximp_block.py -- the same file in KernRift and MLRift.
+# Edit the rows there and paste its output over this block; lip_block_is_generated
+# fails if the two differ. The defect numbers are the register's
+# (memory/project_known_unfixed_defects.md). Every diagnostic row asserts the
+# EXACT first line of stderr. The round-1 rows (98, 110-116) were red on
+# KernRift ab51c92 / MLRift bea4e92, the round-2 rows (marked R2) on KernRift
+# 93c1053 / MLRift 9f8ecd9; positive controls are marked as such.
+echo ""
+echo "--- lexer / import-scanner parity (ANCHOR LEXIMP) ---"
+LIP_D="$DIR/../test_tmp_leximp_$$"
+rm -rf "$LIP_D"; mkdir -p "$LIP_D"
+
+# THE COMPILER IS NAMED BY AN ABSOLUTE PATH. Every row cds into its probe
+# directory first, because the diagnostics name files the way they were passed
+# on the command line, and `make test` runs the suite through a wrapper that
+# execs the RELATIVE ./build/krc2 -- so a row that cd'd and called $KRC ran
+# nothing (exit 127) and all 32 round-1 rows failed under the real `make test`.
+# These rows also need the compiler with no flags injected ($KRC may be a
+# wrapper that adds --arch, as make test's is). So the compiler is $KRC_RAW,
+# the compiler under test with nothing injected (`make test` sets it; a
+# binary, or a script that execs one, e.g. under a ulimit), else $KRC when
+# $KRC is itself a compiler binary (an ELF file). Nothing else: with neither,
+# every row here FAILS and says why. It never falls back to the tree's
+# build/krc2, which is the last compiler built, not the one under test.
+LIP_RAW="${KRC_RAW:-}"
+if [ -z "$LIP_RAW" ] && [ -n "${KRC:-}" ] && [ -f "$KRC" ] && [ -x "$KRC" ] \
+   && [ "$(head -c 4 "$KRC" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; then
+    LIP_RAW="$KRC"
+fi
+if [ -n "$LIP_RAW" ] && [ -f "$LIP_RAW" ] && [ -x "$LIP_RAW" ]; then
+    LIP_CC="$(cd "$(dirname "$LIP_RAW")" && pwd)/$(basename "$LIP_RAW")"
+else
+    echo "  (lexer / import-scanner parity: KRC_RAW is not an executable file and $KRC is not a compiler binary, so every lip_* row FAILS; set KRC_RAW to the compiler under test)"
+    LIP_CC="/nonexistent/KRC_RAW-not-set"
+fi
+LIP_ROOT="$(cd "$DIR/.." && pwd)"
+
+# lip_err <name> <want>: compiles $LIP_D/<name>/m.kr (from inside that
+# directory) and wants a refusal whose first stderr line is exactly <want>.
+lip_err() {
+    local name="$1"; local want="$2"
+    TOTAL=$((TOTAL + 1))
+    local d="$LIP_D/$name"
+    local out st first
+    out=$(cd "$d" && "$LIP_CC" $KRC_FLAGS "m.kr" -o "$d/a.out" 2>&1); st=$?
+    first=$(printf '%s\n' "$out" | head -1)
+    if [ "$st" = "0" ]; then
+        echo "FAIL: $name (compiled clean, exit 0; wanted: $want)"
+        FAIL=$((FAIL + 1))
+    elif [ "$first" != "$want" ]; then
+        echo "FAIL: $name (exit $st, wrong diagnostic)"
+        echo "  want: $want"
+        echo "  got:  $first"
+        FAIL=$((FAIL + 1))
+    else
+        PASS=$((PASS + 1))
+    fi
+}
+# lip_lines <name> <first> <count> <want>: like lip_err, but stderr lines
+# <first>..<first+count-1>, joined by newlines, must equal <want>.
+lip_lines() {
+    local name="$1"; local from="$2"; local cnt="$3"; local want="$4"
+    TOTAL=$((TOTAL + 1))
+    local d="$LIP_D/$name"
+    local out st got
+    out=$(cd "$d" && "$LIP_CC" $KRC_FLAGS "m.kr" -o "$d/a.out" 2>&1); st=$?
+    got=$(printf '%s\n' "$out" | tail -n +"$from" | head -"$cnt")
+    if [ "$st" != "0" ] && [ "$got" = "$want" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $name (exit $st, wrong lines $from..+$cnt)"
+        printf '  want: %s\n' "$want"
+        printf '  got:  %s\n' "$got"
+        FAIL=$((FAIL + 1))
+    fi
+}
+# lip_run <name> <want stdout> <want exit> [extra flags]: compiles and RUNS.
+lip_run() {
+    local name="$1"; local want="$2"; local wexit="$3"; local extra="$4"
+    TOTAL=$((TOTAL + 1))
+    local d="$LIP_D/$name"
+    if (cd "$d" && "$LIP_CC" $KRC_FLAGS $extra "m.kr" -o "$d/a.out" > "$d/cc.log" 2>&1); then
+        local got gexit
+        got=$("$d/a.out" 2>/dev/null); gexit=$?
+        if [ "$got" = "$want" ] && [ "$gexit" = "$wexit" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $name (want '$want' exit $wexit, got '$got' exit $gexit)"
+            FAIL=$((FAIL + 1))
+        fi
+    else
+        echo "FAIL: $name (did not compile: $(head -1 "$d/cc.log"))"
+        FAIL=$((FAIL + 1))
+    fi
+}
+lip_src() { mkdir -p "$LIP_D/$1"; printf '%b' "$3" > "$LIP_D/$1/$2"; }
+
+# 110. The import scanner read a path raw up to the next `"` while the lexer
+#      treats `\"` as an escape, so `import "q\" "` OPENED a file named `q\`
+#      (it compiled and ran, exit 7) while the parser saw a different string;
+#      an unclosed path ran across lines to the next quote anywhere; an empty
+#      path opened the importing file's DIRECTORY (MLRift: SIGSEGV). Now every
+#      byte on which the two readings could differ is refused, at its line:col.
+lip_src lip_import_backslash m.kr 'import "q\\" "\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_backslash/q\\"
+lip_err lip_import_backslash "m.kr:1:10: error: import path contains a backslash; escapes are not decoded in an import path, so write it with '/' (which every host accepts)"
+lip_src lip_import_unterminated m.kr 'import "aux.kr\nfn main() {\n    exit(0)\n}\n// "\n'
+lip_err lip_import_unterminated "m.kr:1:8: error: unterminated import path: the closing '\"' must be on the same line as the opening one"
+mkdir -p "$LIP_D/lip_import_unterminated_eof"; printf 'import "aux' > "$LIP_D/lip_import_unterminated_eof/m.kr"
+lip_err lip_import_unterminated_eof "m.kr:1:8: error: unterminated import path: the closing '\"' must be on the same line as the opening one"
+lip_src lip_import_empty m.kr '// header\nimport ""\nfn main() {\n    exit(0)\n}\n'
+lip_err lip_import_empty "m.kr:2:8: error: empty import path"
+lip_src lip_import_nul m.kr 'import "a\0b.kr"\nfn main() {\n    exit(0)\n}\n'
+lip_err lip_import_nul "m.kr:1:10: error: import path contains a NUL byte"
+#      `import` with its path on the NEXT line: the scanner stopped there (so
+#      the file was never opened) while the parser saw `import` + a string and
+#      accepted it -- compiled clean with the import silently dropped.
+lip_src lip_import_path_next_line m.kr 'import\n"aux.kr"\nfn main() {\n    exit(0)\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_path_next_line/aux.kr"
+lip_err lip_import_path_next_line "m.kr:1:1: error: \`import\` needs a quoted path on the same line, as in import \"std/io.kr\""
+#      Positive control: a plain import still opens, compiles and runs.
+lip_src lip_import_ok m.kr '// comment first\nimport "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_ok/aux.kr"
+lip_run lip_import_ok "" 7
+#      Positive control: an identifier that merely starts with `import`.
+lip_src lip_import_prefix_ident m.kr 'fn importer() -> uint64 { return 5 }\nfn main() {\n    exit(importer())\n}\n'
+lip_run lip_import_prefix_ident "" 5
+
+# 111. f-strings honour the same escapes as strings, on every backend. MLRift's
+#      f-string scanner did not skip the byte after `\`, so f"a\"b" ENDED at the
+#      escaped quote, and its three lowerings copied segments raw, so `\n`
+#      printed as backslash-n and `{{` as two braces.
+lip_src lip_fstr_quote m.kr 'fn main() {\n    u64 x = 5\n    println(f"a\\"b{x}c")\n    exit(0)\n}\n'
+lip_run lip_fstr_quote 'a"b5c' 0
+lip_run lip_fstr_quote 'a"b5c' 0 --legacy
+lip_src lip_fstr_escapes m.kr 'fn main() {\n    u64 x = 5\n    println(f"t\\tn\\\\{x}q\\"z\\x41{{}}")\n    exit(0)\n}\n'
+lip_run lip_fstr_escapes "$(printf 't\tn\\5q"zA{}')" 0
+lip_run lip_fstr_escapes "$(printf 't\tn\\5q"zA{}')" 0 --legacy
+#      R2: the same f-string built for arm64 and RUN -- the legacy arm64
+#      lowering is a third copy of the segment loop, and nothing executed it
+#      (reverting its fstr_part_bake call left every row green). Natively on an
+#      aarch64 host, else under qemu-aarch64; skipped, not counted, without one.
+LIP_A64_RUN=""
+if [ "$(uname -m)" = "aarch64" ]; then
+    LIP_A64_RUN="direct"
+elif command -v qemu-aarch64-static > /dev/null 2>&1; then
+    LIP_A64_RUN="qemu-aarch64-static"
+elif command -v qemu-aarch64 > /dev/null 2>&1; then
+    LIP_A64_RUN="qemu-aarch64"
+fi
+if [ -n "$LIP_A64_RUN" ]; then
+    for lip_mode in ir legacy; do
+        TOTAL=$((TOTAL + 1))
+        lip_d="$LIP_D/lip_fstr_escapes"
+        lip_x=""; [ "$lip_mode" = "legacy" ] && lip_x="--legacy"
+        if (cd "$lip_d" && "$LIP_CC" --arch=arm64 $lip_x m.kr -o "$lip_d/a64.out" > "$lip_d/a64.log" 2>&1); then
+            if [ "$LIP_A64_RUN" = "direct" ]; then lip_got=$("$lip_d/a64.out"); lip_ge=$?
+            else lip_got=$("$LIP_A64_RUN" "$lip_d/a64.out"); lip_ge=$?; fi
+            if [ "$lip_got" = "$(printf 't\tn\\5q"zA{}')" ] && [ "$lip_ge" = "0" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: lip_fstr_escapes_arm64_$lip_mode (got '$lip_got' exit $lip_ge)"
+                FAIL=$((FAIL + 1))
+            fi
+        else
+            echo "FAIL: lip_fstr_escapes_arm64_$lip_mode (did not compile: $(head -1 "$lip_d/a64.log"))"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+else
+    for lip_mode in ir legacy; do
+        TOTAL=$((TOTAL + 1)); skip_row lip_fstr_escapes_arm64_$lip_mode "no aarch64 host and no qemu-aarch64"
+    done
+fi
+#      An embedded NUL is part of the segment on EVERY backend: the composed
+#      string is "a\0b5", which print() ends at the NUL -- so "a". A lowering
+#      that measured the segment with strlen would copy only "a" and write the
+#      interpolation straight after it, printing "a5" on that backend alone.
+lip_src lip_fstr_nul m.kr 'fn main() {\n    u64 x = 5\n    print(f"a\\0b{x}")\n    exit(0)\n}\n'
+lip_run lip_fstr_nul "a" 0
+lip_run lip_fstr_nul "a" 0 --legacy
+
+# R2. An escape the grammar does not list is a lexical error, in strings,
+#     characters and f-strings alike. `\x` took the next two bytes WHATEVER
+#     they were, so "a\x4]b" printed one byte made of '4' and ']' (the bracket
+#     vanished), a `\x` with fewer than two bytes before the closing quote
+#     printed "x4", and an unknown letter (`\q`, `\u{41}`) became the letter.
+lip_src lip_esc_hex_bracket m.kr 'fn main() {\n    println("a\\x4]b")\n    exit(0)\n}\n'
+lip_err lip_esc_hex_bracket "m.kr:2:15: error: invalid escape '\x4': \x must be followed by exactly two hex digits (0-9, a-f, A-F), as in \x41"
+lip_src lip_esc_hex_end m.kr 'fn main() {\n    println("ab\\x4")\n    exit(0)\n}\n'
+lip_err lip_esc_hex_end "m.kr:2:16: error: invalid escape '\x4': \x must be followed by exactly two hex digits (0-9, a-f, A-F), as in \x41"
+lip_src lip_esc_hex_fstr m.kr 'fn main() {\n    u64 x = 5\n    println(f"{x}\\x4]")\n    exit(0)\n}\n'
+lip_err lip_esc_hex_fstr "m.kr:3:18: error: invalid escape '\x4': \x must be followed by exactly two hex digits (0-9, a-f, A-F), as in \x41"
+lip_src lip_esc_hex_char m.kr 'fn main() {\n    u64 c = '"'"'\\x4'"'"'\n    exit(c)\n}\n'
+lip_err lip_esc_hex_char "m.kr:2:14: error: invalid escape '\x4': \x must be followed by exactly two hex digits (0-9, a-f, A-F), as in \x41"
+lip_esc_unknown='invalid escape '"'"'\q'"'"': the escapes are \n \t \r \0 \\ \'"'"' \" \a \b \f \v \e and \xHH (two hex digits)'
+lip_src lip_esc_unknown m.kr 'fn main() {\n    println("a\\qb")\n    exit(0)\n}\n'
+lip_err lip_esc_unknown "m.kr:2:15: error: $lip_esc_unknown"
+lip_src lip_esc_unknown_fstr m.kr 'fn main() {\n    println(f"a\\qb")\n    exit(0)\n}\n'
+lip_err lip_esc_unknown_fstr "m.kr:2:16: error: $lip_esc_unknown"
+#      `\{` is an f-string escape (one brace); in a plain string it is unknown.
+lip_src lip_esc_brace_plain m.kr 'fn main() {\n    println("a\\{b")\n    exit(0)\n}\n'
+lip_err lip_esc_brace_plain "m.kr:2:15: error: invalid escape '\{': the escapes are \n \t \r \0 \\\\ \\' \\\" \a \b \f \v \e and \xHH (two hex digits)"
+#      Positive control: every listed escape, and two-digit \x in both kinds.
+lip_src lip_esc_ok m.kr 'fn main() {\n    u64 x = 5\n    print("[\\x41\\x7a\\t\\\\\\x2D]")\n    println(f"\\{\\}\\x42{x}")\n    exit(0)\n}\n'
+lip_run lip_esc_ok "$(printf '[Az\t\\-]{}B5')" 0
+lip_run lip_esc_ok "$(printf '[Az\t\\-]{}B5')" 0 --legacy
+
+# 112. Number literals lex the same in both trees: 0b/0B, 0X and `_` separators
+#      (MLRift lexed 0b1010 as `0` + identifier `b1010`), a prefix with no
+#      digits is malformed, and a number glued to a letter, digit or quote is
+#      ONE malformed literal -- `1_f"x"` was a number followed by an f-string
+#      in KernRift and an identifier `_f` plus a string in MLRift.
+lip_src lip_num_forms m.kr 'fn main() {\n    u64 a = 0b1010\n    u64 b = 0B1_0\n    u64 c = 0X0A\n    u64 d = 1_000\n    u64 e = 0x_F_F\n    exit(a + b + c + d + e - 1000 - 255 + 3)\n}\n'
+lip_run lip_num_forms "" 25
+lip_src lip_num_float_forms m.kr 'fn main() {\n    f32 a = 10.5f\n    f64 b = 1_0.2_5e1\n    if a > 10.4 { if b > 102.4 { if b < 102.6 { exit(7) } } }\n    exit(1)\n}\n'
+lip_run lip_num_float_forms "" 7
+lip_src lip_num_glued_ident m.kr 'fn main() {\n    u64 x = 1\n    exit(5x)\n}\n'
+lip_err lip_num_glued_ident "m.kr:3:10: error: malformed number literal '5x': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_glued_fstr m.kr 'fn main() {\n    println(1_f"x")\n    exit(0)\n}\n'
+lip_err lip_num_glued_fstr "m.kr:2:13: error: malformed number literal '1_f': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_glued_bin m.kr 'fn main() {\n    println(0b1f"x")\n    exit(0)\n}\n'
+lip_err lip_num_glued_bin "m.kr:2:13: error: malformed number literal '0b1f': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_bin_digit m.kr 'static u64 X = 0b1012\nfn main() {\n    exit(X)\n}\n'
+lip_err lip_num_bin_digit "m.kr:1:16: error: malformed number literal '0b1012': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_glued_float m.kr 'fn main() {\n    f64 v = 10.5fx\n    exit(0)\n}\n'
+lip_err lip_num_glued_float "m.kr:2:13: error: malformed number literal '10.5fx': a number must not be followed directly by a letter, a stray digit or a quote"
+lip_src lip_num_empty_prefix m.kr 'static u64 X = 0x\nfn main() {\n    exit(X)\n}\n'
+lip_err lip_num_empty_prefix "m.kr:1:16: error: malformed number literal '0x': a base prefix needs at least one digit"
+
+# R2. The lexer stops PRINTING after 20 errors but counts them all; it now
+#     says how many it held back instead of stopping in silence. The parser
+#     prints the same note past its own cap of 20.
+lip_src lip_lex_err_cap m.kr "fn main() {\n$(for i in $(seq 1 25); do printf '    u64 a%s = 5x\\n' "$i"; done)    exit(0)\n}\n"
+lip_lines lip_lex_err_cap 21 2 "(5 more errors not shown)
+25 lex error(s)"
+lip_src lip_parse_err_cap m.kr "fn main() {\n$(for i in $(seq 1 25); do printf '    u64 v%s = 1 / / 2;\\n' "$i"; done)}\n"
+lip_lines lip_parse_err_cap 61 2 "(5 more errors not shown)
+25 parse error(s)"
+
+# 113. A mid-file `import`, even of a file that does not exist, is refused --
+#      MLRift exited 0 and wrote a binary.
+lip_src lip_import_midfile m.kr 'fn main() {\n    exit(0)\n}\nimport "nope.kr"\n'
+lip_err lip_import_midfile 'm.kr:4:1: error: `import` must precede every declaration in its file; this one was ignored, so nothing it names is in scope'
+
+# R2. `#lang` is the first line of ANY file, and the import scanner skips it
+#     exactly as the lexer does. The lexer skipped it only at byte 0 of the
+#     whole buffer while the scanner stopped at the `#`, so `#lang stable` +
+#     `import "missing"` compiled clean (the import was never read), and the
+#     same happened to an imported file that started with `#lang`.
+lip_src lip_lang_then_missing_import m.kr '#lang stable\nimport "nonexistent_zz.kr"\nfn main() {\n    exit(0)\n}\n'
+lip_err lip_lang_then_missing_import "error: cannot open import: nonexistent_zz.kr"
+lip_src lip_lang_then_import m.kr '#lang stable\nimport "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_lang_then_import/aux.kr"
+lip_run lip_lang_then_import "" 7
+#      ...in the FIRST imported file (whose `#lang` the lexer did skip; its
+#      import was dropped all the same: "undefined function 'cf'")...
+lip_src lip_lang_first_import m.kr 'import "b.kr"\nfn main() {\n    exit(bf())\n}\n'
+printf '#lang stable\nimport "c.kr"\nfn bf() -> uint64 { return cf() }\n' > "$LIP_D/lip_lang_first_import/b.kr"
+printf 'fn cf() -> uint64 { return 6 }\n' > "$LIP_D/lip_lang_first_import/c.kr"
+lip_run lip_lang_first_import "" 6
+#      ...and in a later one, where `#lang` reached the parser as junk and its
+#      import as a misplaced one.
+lip_src lip_lang_second_import m.kr 'import "a.kr"\nimport "b.kr"\nfn main() {\n    exit(af() + bf())\n}\n'
+printf 'fn af() -> uint64 { return 1 }\n' > "$LIP_D/lip_lang_second_import/a.kr"
+printf '#lang experimental\nimport "c.kr"\nfn bf() -> uint64 { return cf() }\n' > "$LIP_D/lip_lang_second_import/b.kr"
+printf 'fn cf() -> uint64 { return 4 }\n' > "$LIP_D/lip_lang_second_import/c.kr"
+lip_run lip_lang_second_import "" 5
+
+# R2. A UTF-8 byte-order mark is refused with its own message, in the file
+#     named on the command line and in an imported one. It used to end the
+#     scanner's leading run, so the file's first `import` was reported as
+#     "`import` must precede every declaration" although nothing preceded it.
+lip_src lip_bom_main m.kr '\xef\xbb\xbfimport "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_bom_main/aux.kr"
+lip_err lip_bom_main "m.kr:1:1: error: this file starts with a UTF-8 byte-order mark (bytes EF BB BF), which is not accepted; save it as UTF-8 without a BOM"
+lip_src lip_bom_import m.kr 'import "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf '\xef\xbb\xbffn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_bom_import/aux.kr"
+lip_err lip_bom_import "aux.kr:1:1: error: this file starts with a UTF-8 byte-order mark (bytes EF BB BF), which is not accepted; save it as UTF-8 without a BOM"
+
+# R2. An import that names a directory is refused as one. MLRift handed the
+#     directory's 2^63-1 "size" to alloc and died writing through the result
+#     (SIGSEGV); KernRift called it a "short read".
+lip_src lip_import_directory m.kr 'import "dd"\nfn main() {\n    exit(0)\n}\n'
+mkdir -p "$LIP_D/lip_import_directory/dd"
+lip_err lip_import_directory "error: cannot import 'dd': it is a directory or another non-regular file, not a source file"
+
+# R2. An absolute import path is used as it is. It was joined to the importing
+#     file's directory, so it worked from `krc m.kr` and failed from
+#     `krc sub/m.kr` ("cannot open import: sub//...").
+mkdir -p "$LIP_D/lip_import_absolute/sub" "$LIP_D/lip_import_absolute/lib"
+printf 'fn helper() -> uint64 { return 7 }\n' > "$LIP_D/lip_import_absolute/lib/aux.kr"
+printf 'import "%s/lib/aux.kr"\nfn main() {\n    exit(helper())\n}\n' "$(cd "$LIP_D/lip_import_absolute" && pwd)" > "$LIP_D/lip_import_absolute/sub/m.kr"
+TOTAL=$((TOTAL + 1))
+if (cd "$LIP_D/lip_import_absolute" && "$LIP_CC" $KRC_FLAGS sub/m.kr -o a.out > cc.log 2>&1) && (cd "$LIP_D/lip_import_absolute" && ./a.out); [ "$?" = "7" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: lip_import_absolute ($(head -1 "$LIP_D/lip_import_absolute/cc.log"))"
+    FAIL=$((FAIL + 1))
+fi
+
+# 114. Each imported file is lexed on its own: an unterminated literal at the
+#      end of an imported file is reported THERE, instead of swallowing the
+#      importer up to its next quote and erroring at an unrelated line.
+lip_src lip_unterm_str m.kr 'import "aux.kr"\nfn main() {\n    println("x")\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\nfn s() { println("abc) }\n' > "$LIP_D/lip_unterm_str/aux.kr"
+lip_err lip_unterm_str "aux.kr:2:18: error: unterminated string literal (no closing '\"' before the end of the file)"
+lip_src lip_unterm_char m.kr 'import "aux.kr"\nfn main() {\n    u64 c = '"'"'q'"'"'\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\nfn s() -> uint64 { return '"'"'a }\n' > "$LIP_D/lip_unterm_char/aux.kr"
+lip_err lip_unterm_char "aux.kr:2:27: error: unterminated character literal (no closing \"'\" before the end of the file)"
+lip_src lip_unterm_fstr m.kr 'import "aux.kr"\nfn main() {\n    println("x")\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\nfn s() { println(f"abc) }\n' > "$LIP_D/lip_unterm_fstr/aux.kr"
+lip_err lip_unterm_fstr "aux.kr:2:18: error: unterminated f-string literal (no closing '\"' before the end of the file)"
+lip_src lip_unterm_main m.kr 'fn main() {\n    println("abc)\n    exit(0)\n}\n'
+lip_err lip_unterm_main "m.kr:2:13: error: unterminated string literal (no closing '\"' before the end of the file)"
+#      Positive control: a `//` comment with no final newline in an imported
+#      file stays in it.
+lip_src lip_comment_eof m.kr 'import "aux.kr"\nfn main() {\n    exit(helper())\n}\n'
+printf 'fn helper() -> uint64 { return 7 }\n// no newline at the end' > "$LIP_D/lip_comment_eof/aux.kr"
+lip_run lip_comment_eof "" 7
+#      R2. The PARSER is fenced by file too: a declaration cut off at the end
+#      of an imported file is "end of file" THERE. It used to run on into the
+#      importer's tokens and be blamed on it (`m.kr:1: expected '('`).
+lip_src lip_trunc_fn m.kr 'import "aux.kr"\nfn main() {\n    exit(0)\n}\n'
+printf 'fn a1() { }\nfn tailB' > "$LIP_D/lip_trunc_fn/aux.kr"
+lip_err lip_trunc_fn "aux.kr:2:9: error: expected '(', got end of file"
+lip_src lip_trunc_struct m.kr 'import "aux.kr"\nfn main() {\n    exit(0)\n}\n'
+printf 'struct S {\n    uint64 x\n' > "$LIP_D/lip_trunc_struct/aux.kr"
+lip_err lip_trunc_struct "aux.kr:2:13: error: expected '}', got end of file"
+
+# 98. A diagnostic in an imported file names that file AND its own line: the
+#     line used to count from the start of the concatenated buffer (b:8 here).
+lip_src lip_line_after_imports m.kr 'import "a.kr"\nimport "b.kr"\nfn main() {\n    exit(fa() + fb())\n}\n'
+printf 'fn fa() -> uint64 {\n    return 1\n}\n// a3\n// a4\n' > "$LIP_D/lip_line_after_imports/a.kr"
+printf 'fn fb() -> uint64 {\n    uint64 unused_q = 3\n    return 2\n}\n' > "$LIP_D/lip_line_after_imports/b.kr"
+TOTAL=$((TOTAL + 1))
+lip_out=$(cd "$LIP_D/lip_line_after_imports" && "$LIP_CC" $KRC_FLAGS m.kr -o a.out 2>&1)
+if printf '%s\n' "$lip_out" | grep -q "^b\.kr:2:12: warning: unused variable (prefix with _ to suppress) 'unused_q'$"; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: lip_line_after_imports (want the warning at b.kr:2:12, got: $(printf '%s\n' "$lip_out" | grep unused_q))"
+    FAIL=$((FAIL + 1))
+fi
+#     R2. The same for a PARSE error (its own head function, never reached by
+#     a row: reverting its source-map lookup left the suite green).
+lip_src lip_parse_err_line m.kr 'import "a.kr"\nimport "b.kr"\nfn main() {\n    exit(fa() + fb())\n}\n'
+printf 'fn fa() -> uint64 {\n    return 1\n}\n// a3\n// a4\n' > "$LIP_D/lip_parse_err_line/a.kr"
+printf 'fn fb() -> uint64 {\n    u64 q = 1 / / 2\n    return q\n}\n' > "$LIP_D/lip_parse_err_line/b.kr"
+lip_err lip_parse_err_line "b.kr:2:17: error: unexpected '/' in expression"
+
+# R2. Diagnostics are located and quoted identically in both trees: a parse
+#     error, an undefined function and an undeclared identifier each print
+#     file:line:col, the source line and a caret. MLRift printed no column, no
+#     source, the parser's "unexpected token" for '/', and no location at all
+#     for the last two.
+lip_src lip_diag_snippet m.kr 'fn main() {\n  uint64 x = 1 / / 2\n  exit(0)\n}\n'
+lip_lines lip_diag_snippet 1 3 "m.kr:2:18: error: unexpected '/' in expression
+     2 |   uint64 x = 1 / / 2
+       |                  ^"
+lip_src lip_diag_undefined_fn m.kr 'fn main() {\n  nofn(3)\n  exit(0)\n}\n'
+lip_lines lip_diag_undefined_fn 1 3 "m.kr:2:3: error: undefined function 'nofn'
+     2 |   nofn(3)
+       |   ^~~~"
+lip_src lip_diag_undeclared m.kr 'fn main() {\n  uint64 y = zz + 1\n  exit(y)\n}\n'
+lip_lines lip_diag_undeclared 1 3 "m.kr:2:14: error: use of undeclared identifier 'zz'
+     2 |   uint64 y = zz + 1
+       |              ^~"
+
+# 115. HOME is read from the WHOLE of /proc/self/environ. Only the first 4096
+#      bytes were read, so a HOME entry straddling byte 4096 was cut (and
+#      str_len ran off the end of the buffer), and one past it was never seen:
+#      the $HOME stdlib directory silently dropped out of the search path.
+if [ -r /proc/self/environ ]; then
+    lip_h="$LIP_D/home"
+    mkdir -p "$lip_h/fake/.local/share/kernrift/std" "$lip_h/w"
+    printf 'fn zz_helper() -> uint64 { return 9 }\n' > "$lip_h/fake/.local/share/kernrift/std/zzleximp.kr"
+    printf 'import "std/zzleximp.kr"\nfn main() {\n    exit(zz_helper())\n}\n' > "$lip_h/w/m.kr"
+    for lip_pad in 4085 5000; do
+        TOTAL=$((TOTAL + 1))
+        lip_p=$(head -c $lip_pad /dev/zero | tr '\0' 'a')
+        if (cd "$lip_h/w" && env -i PAD=$lip_p HOME="$lip_h/fake" "$LIP_CC" $KRC_FLAGS m.kr -o a.out > /dev/null 2>&1) &&
+           (cd "$lip_h/w" && ./a.out); [ "$?" = "9" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: lip_home_past_4096_pad$lip_pad (the \$HOME stdlib import did not resolve)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+fi
+
+# 116. A short read of a module is refused, not compiled truncated. sysfs
+#      reports st_size 4096 for a file whose read returns a few bytes, which is
+#      exactly a short read; skipped (not counted) where that file is absent.
+lip_sysf=/sys/kernel/mm/transparent_hugepage/enabled
+if [ -r "$lip_sysf" ] && [ "$(stat -L -c %s "$lip_sysf")" -gt "$(wc -c < "$lip_sysf")" ]; then
+    lip_src lip_short_read m.kr 'import "sysf.kr"\nfn main() {\n    exit(0)\n}\n'
+    ln -s "$lip_sysf" "$LIP_D/lip_short_read/sysf.kr"
+    lip_err lip_short_read "error: short read on 'sysf.kr': the file ended before the size it reported, so this module is truncated. Refusing rather than compiling source that was never written"
+fi
+
+# R2. The compiler builds from src/main.kr through its imports, and that is the
+#     same program as the Makefile's concatenation: main.kr's import list is
+#     SRCS minus main.kr, in order, and the two builds are byte-identical.
+#     (MLRift's main.mlr imported 15 of its 30 files, so `mlrc src/main.mlr`
+#     failed, while the Makefile said SRCS was "main.mlr's import list".)
+TOTAL=$((TOTAL + 1))
+lip_srcs=$(sed -n '/^SRCS = /,/[^\\]$/p' "$LIP_ROOT/Makefile" | sed 's/^SRCS = //; s/\\$//' | tr -s ' \t\n' '\n' | grep -v '^$')
+lip_imps=$(sed -n 's/^import "\(.*\)"$/\1/p' "$LIP_ROOT/src/main.kr" | sed 's#^\.\./##; t; s#^#src/#'; echo "src/main.kr")
+if [ "$lip_srcs" != "$lip_imps" ]; then
+    echo "FAIL: lip_selfhost_via_imports (src/main.kr's imports + main.kr differ from the Makefile's SRCS)"
+    FAIL=$((FAIL + 1))
+else
+    (cd "$LIP_ROOT" && cat $lip_srcs | grep -v '^import "' > "$LIP_D/selfhost_cat.kr")
+    if (cd "$LIP_ROOT" && "$LIP_CC" $KRC_FLAGS src/main.kr -o "$LIP_D/selfhost_imp" > /dev/null 2>&1) &&
+       "$LIP_CC" $KRC_FLAGS "$LIP_D/selfhost_cat.kr" -o "$LIP_D/selfhost_cat" > /dev/null 2>&1 &&
+       cmp -s "$LIP_D/selfhost_imp" "$LIP_D/selfhost_cat"; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: lip_selfhost_via_imports (src/main.kr via imports did not build, or differs from the concatenation)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
+# R2. This block is the generator's output, byte for byte.
+if command -v python3 > /dev/null 2>&1; then
+    TOTAL=$((TOTAL + 1))
+    lip_have=$(sed -n '/^# --- lexer \/ import-scanner parity (ANCHOR LEXIMP) /,/^# --- end of lexer \/ import-scanner parity (ANCHOR LEXIMP END) ---$/p' "$DIR/run_tests.sh")
+    lip_want=$(python3 "$DIR/gen_leximp_block.py" kr)
+    if [ -n "$lip_want" ] && [ "$lip_have" = "$lip_want" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: lip_block_is_generated (run_tests.sh's LEXIMP block differs from python3 tests/gen_leximp_block.py kr)"
+        FAIL=$((FAIL + 1))
+    fi
+else
+    TOTAL=$((TOTAL + 1)); skip_row lip_block_is_generated "no python3"
+fi
+rm -rf "$LIP_D"
+# --- end of lexer / import-scanner parity (ANCHOR LEXIMP END) ---
 
 # --- Two runner runs at once: per-run exec paths ------------------------------
 # The runner used to write every extracted program to ONE fixed path
