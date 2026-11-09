@@ -20,5 +20,7 @@ c7_exec_argv_roundtrip_cp932_wine              | cp932     | c7_leaf_blobs_uncha
 pe_unwind_obj_link_windows_wine                | linkprobe | native_probe.sh: the linked COFF probe exits 7 x3 with chain walk,d3,d2,main,start,KERNEL32,NTDLL; control not 7 (Task D step 4)
 wine_crash_override_does_not_mask              | override  | Wine-only (winedbg); natively main's image is checked by cdb_chain.sh failing on it (Task D step 7)
 sys_last_errno_windows_wine                    | concurrent | native_concurrent.sh
+runner_windows_slots_are_claimed               | concurrent | native_concurrent.sh
+legacy_file_open_write_holds_the_file_wine     | concurrent | native_concurrent.sh
 sys_so_broadcast_windows_wine                  | hostrows  | native_hostrows.sh
 sys_net_ifaces_windows_wine_matches_ip_addr    | hostrows  | native_hostrows.sh

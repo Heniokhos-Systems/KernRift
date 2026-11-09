@@ -11,7 +11,8 @@ KR_WINE=tests/windows/native_exec.sh), concurrent.txt (native_concurrent.sh)
 and hostrows.txt (native_hostrows.sh). The rules, none of which can pass
 vacuously:
   * the log must be complete: it must end with the suite's
-    `=== Results: P/T passed, F failed ===` line;
+    `=== Results: P/T passed, F failed, S skipped ===` line (the
+    `, S skipped` part is optional: logs of suites before it was added);
   * every name in tests/windows/native_corpus.lst (the Windows corpus: every
     row whose name matches wine|windows|win_|_win|c7_, qemu rows excluded)
     must appear in the log EXACTLY once, and no name may be listed twice;
@@ -124,7 +125,7 @@ def main(argv):
     dup = sorted(set(n for n in corpus if corpus.count(n) > 1))
     if dup:
         bad.append('native_corpus.lst lists %s more than once' % ', '.join(dup))
-    if not any(re.match(r'^=== Results: \d+/\d+ passed, \d+ failed ===$', l) for l in log):
+    if not any(re.match(r'^=== Results: \d+/\d+ passed, \d+ failed(, \d+ skipped)? ===$', l) for l in log):
         bad.append('suite.log has no "=== Results:" line (empty or truncated run)')
     seen = {}
     for l in log:
@@ -255,6 +256,12 @@ def selftest():
         return [new if (l.startswith('  %s: ' % name)) else l for l in rows]
     cases = [
         ('complete run', 0, lambda r, s: (r, s)),
+        ('complete run, Results line with its skipped count', 0, lambda r, s: (r[:-1] + [r[-1].replace(
+            ' failed ===', ' failed, 0 skipped ===')], s)),
+        ('a Results line with a malformed skipped count', 1, lambda r, s: (r[:-1] + [r[-1].replace(
+            ' failed ===', ' failed, skipped ===')], s)),
+        ('the skipped-count form, then truncated', 1, lambda r, s: ([l.replace(' failed ===', ' failed, 0 skipped ===')
+                                                                     for l in r][:len(r) // 2], s)),
         ('empty log', 1, lambda r, s: ([], s)),
         ('truncated log (no Results line)', 1, lambda r, s: (r[:len(r) // 2], s)),
         ('every row present, only the Results line missing', 1, lambda r, s: (r[:-1], s)),
