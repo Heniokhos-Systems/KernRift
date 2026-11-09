@@ -72,3 +72,4 @@ perf_insn_count_calibration
 pe_unwind_host_rsi_control
 native_corpus_matches_suite
 m2b_mutant_applies
+native_exec_stdin_selftest

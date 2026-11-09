@@ -33585,6 +33585,11 @@ else
     if [ "$PEU_RC" = 0 ]; then pe_row_ok pe_unwind_win_frame_classes "$(tail -1 <<< "$PEU_O")"
     else pe_row_bad pe_unwind_win_frame_classes "$(head -2 <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
 fi
+# The row has read every listing it needs, so its images go now: native_exec.sh
+# stages the whole working directory ($T10_D) with every later Windows job,
+# and two of them (frames_x86_64.kr's x64 IR and --legacy PEs, c0/c1.exe) are
+# what the native laptop's antivirus quarantines. Nothing after reads peu_wfc/.
+rm -rf "$T10_D/peu_wfc"
 # Emitter coverage (#143 option C; spec 2.5.1 check 2, finding 6): every
 # moving and folded site id of tests/pe_unwind_sp_sites.lst is reached by a
 # fixture of tests/fixtures/win_sp_sites/ (manifest.txt) on its backend, with
@@ -34000,6 +34005,7 @@ fi
 #    plus every exported KR_* / MLR_* travel, with their values intact
 #    (spaces, quotes, newlines, non-ASCII), and nothing else; a value that is
 #    not UTF-8 refuses the run (exit 125).
+
 if ! command -v python3 > /dev/null 2>&1; then
     pe_row_skip native_exec_cmdline_selftest "no python3"; pe_row_skip native_env_allowlist_selftest "no python3"
 else
@@ -34026,6 +34032,17 @@ else
     if [ -z "$PEU_WHY" ]; then pe_row_ok native_env_allowlist_selftest "3 setups: NATIVE_ENV names that are set plus exported KR_*/MLR_*, values intact, nothing else; a non-UTF-8 value refuses the run (125)"
     else pe_row_bad native_env_allowlist_selftest "$PEU_WHY"; fi
 fi
+
+# native_exec.sh forwards stdin (merge-train step 8; the win_file_std* rows
+# redirect a file or pipe into the program, and natively it used to see none):
+# a regular file is forwarded as a file handle, a pipe as a pipe that is then
+# closed, a terminal or /dev/null as nothing; a pipe still open after
+# NATIVE_STDIN_TIMEOUT refuses the run; the remote runner keeps to inline
+# PowerShell (no double quote, no %) and has both stdin paths. Linux half only:
+# the laptop half runs in Task D.
+PEU_O=$(bash "$DIR/windows/native_exec.sh" --selftest-stdin 2>&1); PEU_RC=$?
+if [ "$PEU_RC" = 0 ] && grep -q ', 0 wrong$' <<< "$PEU_O"; then pe_row_ok native_exec_stdin_selftest "$(tail -1 <<< "$PEU_O")"
+else pe_row_bad native_exec_stdin_selftest "rc=$PEU_RC $(grep -m2 WRONG <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
 
 # The native corpus is complete (#143, A15-17 review finding 1): every name of
 # this file that matches the corpus pattern (PAT in native_corpus_check.py,

@@ -19,6 +19,11 @@
 # and the per-row scripts (native_concurrent.sh, native_hostrows.sh) replace
 # their rows and must PASS. The reclass list names each skipped row's native
 # proof (cdb_chain.sh, native_probe.sh).
+# KRC_RAW is the bare compiler, as `make test` sets it (the lexer/import rows
+# and compiler_builds_itself_every_target_and_mode need it).
+# The suite's stdin is /dev/null: native_exec.sh forwards its stdin to the
+# program, so only a row that redirects stdin itself (the win_file_std* rows)
+# may hand it input; an inherited open pipe would stall every job.
 # Exit: the judge's (0 when nothing FAILed).
 set -u
 SUMONLY=0; if [ "${1:-}" = --summary-only ]; then SUMONLY=1; shift; fi
@@ -28,7 +33,7 @@ mkdir -p "$OUT" || exit 2
 if [ "$SUMONLY" = 0 ]; then
 export NATIVE_SESSION="suite$$"
 printf '#!/bin/bash\nexec "%s/build/krc2" --arch=x86_64 "$@"\n' "$TREE" > "$OUT/krc-test"; chmod +x "$OUT/krc-test"
-( cd "$TREE" && KRC="$OUT/krc-test" KR_WINE="$HERE/native_exec.sh" NATIVE_SESSION="$NATIVE_SESSION" timeout 14400 bash tests/run_tests.sh ) > "$OUT/suite.log" 2>&1
+( cd "$TREE" && KRC="$OUT/krc-test" KRC_RAW="$TREE/build/krc2" KR_WINE="$HERE/native_exec.sh" NATIVE_SESSION="$NATIVE_SESSION" timeout 14400 bash tests/run_tests.sh < /dev/null ) > "$OUT/suite.log" 2>&1
 "$HERE/native_exec.sh" --end-session || echo "native_suite.sh: session cleanup failed" >&2
 bash "$HERE/native_concurrent.sh" "$TREE/build/krc2" "$TREE/tests/fixtures" > "$OUT/concurrent.txt" 2>&1
 bash "$HERE/native_hostrows.sh" "$TREE/build/krc2" "$TREE/tests/fixtures" > "$OUT/hostrows.txt" 2>&1

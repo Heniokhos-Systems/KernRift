@@ -8,6 +8,8 @@
 #   native_exec.sh --end-session            remove the session's remote tree
 #   native_exec.sh --selftest-cmdline <fixtures dir>
 #   native_exec.sh --env-forward            print NAME=<base64 value> of every variable it would forward
+#   native_exec.sh --stdin-probe            print how stdin would be forwarded (no laptop contact)
+#   native_exec.sh --selftest-stdin         stdin classification + runner-text checks (no laptop contact)
 #
 # Laptop side (user ruling, phase 5): INLINE PowerShell only. No script file is
 # ever copied to the laptop and -EncodedCommand is never used (the laptop's
@@ -44,6 +46,18 @@
 # as the laptop's own value). A value that is not UTF-8 refuses the run (125).
 # NATIVE_TEST_LAPTOP_ENV=NAME=VALUE (test hook, Task D) sets a variable in the
 # laptop's PowerShell process before the start info is built.
+#
+# Stdin (merge-train step 8, the win_file_std* rows): the wrapper forwards its
+# own stdin, keeping the KIND of handle the program sees. A regular file on
+# stdin (`< file`) -> "file": the bytes travel as stdin.bin in the job archive
+# and the program is started by Start-Process -RedirectStandardInput, so it
+# gets a FILE handle (file_size(0) works, as under `cmd /c "x.exe < f"`). A
+# pipe (`printf hi | ...`) -> "pipe": the bytes are written into the
+# program's stdin pipe, which is then closed (the last read sees the writer
+# gone: ERROR_BROKEN_PIPE). Anything else (a terminal, /dev/null, a device)
+# -> "none": stdin is a pipe closed at once, as before. A pipe is read for at
+# most NATIVE_STDIN_TIMEOUT seconds (default 60); one still open then refuses
+# the run (125), never forwards a truncated input.
 #
 # Results: the program's stdout and stderr go to this script's stdout and
 # stderr byte for byte; every file new or changed in the remote run tree (by
@@ -89,10 +103,22 @@ $p.WorkingDirectory=$Run; $p.UseShellExecute=$false; $p.RedirectStandardOutput=$
 foreach ($n in @($p.Environment.Keys)) { if (($n -like 'KR_*' -or $n -like 'MLR_*') -and -not $ev.ContainsKey($n)) { [void]$p.Environment.Remove($n) } };
 if ($kv['NAMES']) { foreach ($n in $kv['NAMES'].Split(' ')) { if ($n -and -not $ev.ContainsKey($n)) { [void]$p.Environment.Remove($n) } } };
 foreach ($n in $ev.Keys) { $p.Environment[$n]=$ev[$n] };
+$In=Join-Path $Job 'stdin.bin';
+if ($kv['STDIN'] -eq 'file') {
+foreach ($n in @([Environment]::GetEnvironmentVariables().Keys)) { if (-not $p.Environment.ContainsKey($n)) { [Environment]::SetEnvironmentVariable($n,$null) } };
+foreach ($n in @($p.Environment.Keys)) { [Environment]::SetEnvironmentVariable($n,$p.Environment[$n]) };
+$sa=@{FilePath=$p.FileName; WorkingDirectory=$Run; RedirectStandardInput=$In; RedirectStandardOutput=(Join-Path $Out 'stdout.bin'); RedirectStandardError=(Join-Path $Out 'stderr.bin'); NoNewWindow=$true; PassThru=$true};
+if ($p.Arguments) { $sa['ArgumentList']=$p.Arguments };
+$x=Start-Process @sa; $null=$x.Handle;
+if ($x.WaitForExit(1000*[int]$kv['TIMEOUT'])) { $x.WaitForExit(); $e=[string]$x.ExitCode } else { try { $x.Kill() } catch {}; $x.WaitForExit(); $e='TIMEOUT' }
+} else {
 $x=[Diagnostics.Process]::Start($p); $so=[IO.File]::Create((Join-Path $Out 'stdout.bin')); $se=[IO.File]::Create((Join-Path $Out 'stderr.bin'));
-$a=$x.StandardOutput.BaseStream.CopyToAsync($so); $b=$x.StandardError.BaseStream.CopyToAsync($se); $x.StandardInput.Close();
+$a=$x.StandardOutput.BaseStream.CopyToAsync($so); $b=$x.StandardError.BaseStream.CopyToAsync($se);
+if ($kv['STDIN'] -eq 'pipe') { $ib=[IO.File]::ReadAllBytes($In); try { $x.StandardInput.BaseStream.Write($ib,0,$ib.Length); $x.StandardInput.BaseStream.Flush() } catch {} };
+try { $x.StandardInput.Close() } catch {};
 if ($x.WaitForExit(1000*[int]$kv['TIMEOUT'])) { $x.WaitForExit(); $e=[string]$x.ExitCode } else { try { $x.Kill() } catch {}; $x.WaitForExit(); $e='TIMEOUT' };
-[void]$a.Wait(30000); [void]$b.Wait(30000); $so.Close(); $se.Close();
+[void]$a.Wait(30000); [void]$b.Wait(30000); $so.Close(); $se.Close()
+};
 [IO.File]::WriteAllText((Join-Path $Out 'exit.txt'),$e);
 $sha=[Security.Cryptography.SHA256]::Create(); $ch=New-Object Collections.Generic.List[string]; $root=(Resolve-Path $Run).Path.TrimEnd('\')+'\';
 foreach ($it in Get-ChildItem -LiteralPath $Run -Recurse -Force) { $r=$it.FullName.Substring($root.Length).Replace('\','/'); if ($it.PSIsContainer) { if (-not $Dirs.ContainsKey($r)) { $ch.Add('D '+$r) }; continue }; $f=[IO.File]::OpenRead($it.FullName); $h=[BitConverter]::ToString($sha.ComputeHash($f)).Replace('-','').ToLower(); $f.Close(); if ($Base[$r] -ne $h) { $ch.Add('F '+$r) } };
@@ -300,8 +326,46 @@ else:
 PYEOF
 }
 
+# stdin_mode: how this process's stdin is forwarded -- file | pipe | none
+stdin_mode() {
+    if [ -t 0 ]; then echo none
+    elif [ -f /dev/stdin ]; then echo file
+    elif [ -p /dev/stdin ]; then echo pipe
+    else echo none; fi
+}
+# stdin_capture MODE OUT: the bytes of stdin into OUT (file, pipe); 1 when a
+# pipe stays open past NATIVE_STDIN_TIMEOUT seconds
+stdin_capture() {
+    case "$1" in
+        file) cat > "$2" ;;
+        pipe) timeout "${NATIVE_STDIN_TIMEOUT:-60}" cat > "$2" || return 1 ;;
+        *) : ;;
+    esac
+}
+
 case "${1:-}" in
     --selftest-cmdline) py selftest-cmdline "${2:?fixtures dir}"; exit $? ;;
+    --stdin-probe)
+        m=$(stdin_mode); t=$(mktemp); stdin_capture "$m" "$t" || { rm -f "$t"; echo "mode=$m refused (still open after ${NATIVE_STDIN_TIMEOUT:-60} s)"; exit 125; }
+        echo "mode=$m bytes=$( [ "$m" = none ] && echo 0 || stat -c %s "$t") sha=$( [ "$m" = none ] && echo - || sha256sum "$t" | cut -c1-16)"; rm -f "$t"; exit 0 ;;
+    --selftest-stdin)
+        me="$0"; bad=0; n=0; d=$(mktemp -d); printf 'abcd' > "$d/f"
+        chk() { n=$((n + 1)); if [ "$2" = "$3" ]; then echo "  case $1: $2"; else echo "  case $1: got '$2' want '$3'  <-- WRONG"; bad=$((bad + 1)); fi; }
+        chk 'regular file (< file)' "$(bash "$me" --stdin-probe < "$d/f")" "mode=file bytes=4 sha=$(sha256sum < "$d/f" | cut -c1-16)"
+        chk 'pipe (printf hi |)' "$(printf hi | bash "$me" --stdin-probe)" "mode=pipe bytes=2 sha=$(printf hi | sha256sum | cut -c1-16)"
+        chk 'empty pipe' "$(printf '' | bash "$me" --stdin-probe)" "mode=pipe bytes=0 sha=$(printf '' | sha256sum | cut -c1-16)"
+        chk '/dev/null' "$(bash "$me" --stdin-probe < /dev/null)" "mode=none bytes=0 sha=-"
+        chk 'empty regular file' "$(: > "$d/e"; bash "$me" --stdin-probe < "$d/e")" "mode=file bytes=0 sha=$(sha256sum < "$d/e" | cut -c1-16)"
+        chk 'pipe left open (refused)' "$( (sleep 5) | NATIVE_STDIN_TIMEOUT=1 bash "$me" --stdin-probe; echo "rc=$?")" "mode=pipe refused (still open after 1 s)
+rc=125"
+        # the runner text: inline PowerShell constraints (single quotes only:
+        # no double quote, no %) and every stdin mode present
+        rt=$(runner 'C:\S' 'J1')
+        case "$rt" in *'"'*|*%*) chk 'runner text has no double quote and no %' bad ok ;; *) chk 'runner text has no double quote and no %' ok ok ;; esac
+        for k in "STDIN'] -eq 'file'" "STDIN'] -eq 'pipe'" 'RedirectStandardInput=$In' 'StandardInput.BaseStream.Write'; do
+            case "$rt" in *"$k"*) chk "runner has $k" ok ok ;; *) chk "runner has $k" missing ok ;; esac
+        done
+        rm -rf "$d"; echo "native_exec stdin selftest: $n cases, $bad wrong"; [ "$bad" = 0 ]; exit $? ;;
     --env-forward) py envlist; exit $? ;;
     --end-session)
         [ -n "${NATIVE_SESSION:-}" ] || die "--end-session needs NATIVE_SESSION"
@@ -339,10 +403,15 @@ while read -r h p; do
     cp "$p" "$LJ/blobs/$h"; NEW=$((NEW + 1))
 done < "$LJ/blobs.lst"
 py envlist > "$LJ/env.lst" || { cleanup_local; exit 125; }
+STDIN_MODE=$(stdin_mode)
+if [ "$STDIN_MODE" != none ]; then
+    stdin_capture "$STDIN_MODE" "$LJ/up/$JOB/stdin.bin" || { cleanup_local; die "stdin is a pipe still open after ${NATIVE_STDIN_TIMEOUT:-60} s"; }
+fi
 {
     echo "EXE=$EXEREL"
     echo "ARGS64=$ARGS64"
     echo "TIMEOUT=${NATIVE_TIMEOUT:-300}"
+    echo "STDIN=$STDIN_MODE"
     echo "NAMES=$(py envnames)"
     sed '/^$/d; s/^/ENV=/' "$LJ/env.lst"
     if [ -n "${NATIVE_TEST_LAPTOP_ENV:-}" ]; then echo "LAPTOPENV=$NATIVE_TEST_LAPTOP_ENV"; fi
