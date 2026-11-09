@@ -10,7 +10,7 @@ review findings 1 and 2). KernRift tree.
 KR_WINE=tests/windows/native_exec.sh), concurrent.txt (native_concurrent.sh)
 and hostrows.txt (native_hostrows.sh). The rules, none of which can pass
 vacuously:
-  * the log must be complete: it must end with the suite's
+  * the log must be complete: its last non-empty line must be the suite's
     `=== Results: P/T passed, F failed, S skipped ===` line (the
     `, S skipped` part is optional: logs of suites before it was added);
   * every name in tests/windows/native_corpus.lst (the Windows corpus: every
@@ -125,8 +125,9 @@ def main(argv):
     dup = sorted(set(n for n in corpus if corpus.count(n) > 1))
     if dup:
         bad.append('native_corpus.lst lists %s more than once' % ', '.join(dup))
-    if not any(re.match(r'^=== Results: \d+/\d+ passed, \d+ failed(, \d+ skipped)? ===$', l) for l in log):
-        bad.append('suite.log has no "=== Results:" line (empty or truncated run)')
+    last = next((l for l in reversed(log) if l.strip()), '')
+    if not re.match(r'^=== Results: \d+/\d+ passed, \d+ failed(, \d+ skipped)? ===$', last):
+        bad.append('suite.log does not end with its "=== Results:" line (empty or truncated run)')
     seen = {}
     for l in log:
         m = re.match(r'^\s+([A-Za-z0-9_]+): (PASS|FAIL|SKIP)\b ?(.*)$', l)
@@ -254,22 +255,31 @@ def selftest():
     plain = next(n for n in corpus if n not in reclass)
     def sub(rows, name, new):
         return [new if (l.startswith('  %s: ' % name)) else l for l in rows]
+    # a mutation adds its rows BEFORE the Results line, which must stay last,
+    # so that each case fails for its own reason
     cases = [
         ('complete run', 0, lambda r, s: (r, s)),
         ('complete run, Results line with its skipped count', 0, lambda r, s: (r[:-1] + [r[-1].replace(
             ' failed ===', ' failed, 0 skipped ===')], s)),
         ('a Results line with a malformed skipped count', 1, lambda r, s: (r[:-1] + [r[-1].replace(
             ' failed ===', ' failed, skipped ===')], s)),
-        ('the skipped-count form, then truncated', 1, lambda r, s: ([l.replace(' failed ===', ' failed, 0 skipped ===')
-                                                                     for l in r][:len(r) // 2], s)),
+        ('a skipped-count Results line with trailing text', 1, lambda r, s: (r[:-1] + [r[-1].replace(
+            ' failed ===', ' failed, 0 skipped === trailing')], s)),
+        ('a negative skipped count', 1, lambda r, s: (r[:-1] + [r[-1].replace(
+            ' failed ===', ' failed, -1 skipped ===')], s)),
+        ('a skipped count with more after it', 1, lambda r, s: (r[:-1] + [r[-1].replace(
+            ' failed ===', ' failed, 0 skipped, 2 more ===')], s)),
+        ('rows after the Results line (it is not the last)', 1, lambda r, s: (r[:-1] + [r[-1].replace(
+            ' failed ===', ' failed, 0 skipped ==='), '  some_late_row: PASS'], s)),
+        ('trailing blank lines after the Results line', 0, lambda r, s: (r + ['', '   '], s)),
         ('empty log', 1, lambda r, s: ([], s)),
         ('truncated log (no Results line)', 1, lambda r, s: (r[:len(r) // 2], s)),
         ('every row present, only the Results line missing', 1, lambda r, s: (r[:-1], s)),
         ('a corpus row missing', 1, lambda r, s: ([l for l in r if not l.startswith('  %s: ' % plain)], s)),
-        ('a corpus row twice', 1, lambda r, s: (r + ['  %s: PASS' % plain], s)),
+        ('a corpus row twice', 1, lambda r, s: (r[:-1] + ['  %s: PASS' % plain] + r[-1:], s)),
         ('a corpus row SKIPs', 1, lambda r, s: (sub(r, plain, '  %s: SKIP (no wine)' % plain), s)),
-        ('a non-corpus row FAILs', 1, lambda r, s: (r + ['  some_other_row: FAIL (x)'], s)),
-        ('a non-corpus FAIL in the FAIL: form', 1, lambda r, s: (r + ['FAIL: some_other_row (x)'], s)),
+        ('a non-corpus row FAILs', 1, lambda r, s: (r[:-1] + ['  some_other_row: FAIL (x)'] + r[-1:], s)),
+        ('a non-corpus FAIL in the FAIL: form', 1, lambda r, s: (r[:-1] + ['FAIL: some_other_row (x)'] + r[-1:], s)),
         ('a fault row with the wrong exit code', 1, lambda r, s: (sub(r, fault,
             "  %s: FAIL (rc=0 stdout 'armed|f3|' want rc=5 'armed|f3|'; FAIL: no RtlVirtualUnwind type 1 walk "
             "starting in the image; checker C0-C6 + C3b + C4b PASS)" % fault), s)),
@@ -287,7 +297,7 @@ def selftest():
         ('a known red that PASSes', 1, lambda r, s: (sub(r, red, '  %s: PASS (rsi survives)' % red), s)),
         ('a known red that SKIPs', 1, lambda r, s: (sub(r, red, '  %s: SKIP (the control failed)' % red), s)),
         ('a known red absent', 1, lambda r, s: ([l for l in r if not l.startswith('  %s: ' % red)], s)),
-        ('a known red twice', 1, lambda r, s: (r + ['  %s: FAIL %s' % (red, red_why)], s)),
+        ('a known red twice', 1, lambda r, s: (r[:-1] + ['  %s: FAIL %s' % (red, red_why)] + r[-1:], s)),
         ('a known red failing for another reason', 1, lambda r, s: (sub(r, red,
             '  %s: FAIL (build/link failed)' % red), s)),
         ('a known red with another exit code', 1, lambda r, s: (sub(r, red,
