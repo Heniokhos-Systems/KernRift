@@ -2,7 +2,7 @@ name: cross-platform
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "ci/**" ]
   pull_request:
 
 permissions:
