@@ -1047,11 +1047,13 @@ prefer them unless you have a reason to use `unsafe` blocks.
 ### Volatile: MMIO-safe loads and stores
 
 For memory-mapped I/O, the compiler must not reorder, elide, or cache the
-access, and the memory operation must complete before anything after it.
+access. How strongly the access is ordered against its neighbours, and
+whether it is waited for, depends on the architecture and the backend (the
+list below).
 
 ```kr
-u32 v = vload32(mmio_addr)     // volatile load, barrier after
-vstore32(mmio_addr, 0x01)      // volatile store, barrier before
+u32 v = vload32(mmio_addr)     // volatile load
+vstore32(mmio_addr, 0x01)      // volatile store
 ```
 
 All widths are available:
@@ -1059,29 +1061,59 @@ All widths are available:
 
 What is emitted depends on the architecture **and the backend**:
 
-- **x86_64**, both backends: `mfence` (full memory fence) alongside a
-  width-correct `mov`.
-- **ARM64, IR backend (the default)**: no barrier instruction at all. The
-  access itself becomes an acquire/release form — `LDARB`/`LDARH`/`LDAR` and
-  `STLRB`/`STLRH`/`STLR`. That gives **ordering, not completion**.
-- **ARM64, `--legacy`**: a plain `LDR`/`STR` bracketed by `DSB SY`, which does
-  wait for completion.
+On x86_64 (both backends) and ARM64 `--legacy` a load has a full barrier after
+it and a store one on each side, so the access has completed before anything
+after it. ARM64's IR backend makes a load an acquire, which orders it but does
+not wait for it, and follows a store with `DSB SY`. The barrier after a store
+is what keeps `vstore64(x, 1); r = vload64(y)` in order: without it x86 lets
+the load pass the store in the store buffer, and two CPUs running the mirror
+image both read 0 (the `store_buffering_litmus` rows measure it). riscv32
+emits no fence at all and xtensa only a `MEMW` before each access; see their
+entries.
+
+- **x86_64**, both backends: `mfence` after a load, `mfence` before and after
+  a store, alongside a width-correct `mov`.
+- **ARM64, IR backend (the default)**: a load is an acquire form
+  (`LDARB`/`LDARH`/`LDAR`), which orders but does not wait; a store is a
+  release form (`STLRB`/`STLRH`/`STLR`) followed by `DSB SY`.
+- **ARM64, `--legacy`**: a plain `LDR` followed by `DSB SY`; a plain `STR`
+  bracketed by `DSB SY`.
+- **riscv32**: a plain access, no fence. The ordering above is NOT provided
+  by a fence there: the backend relies on the target's single in-order hart
+  (see `src/ir_riscv.kr`), so the promise holds only for that hart's own
+  program order, not against another hart or a bus master.
+- **xtensa**: `MEMW` before each access (a load or a store), none after: a
+  volatile store is ordered before a later VOLATILE access (whose `MEMW`
+  waits for it), not before a later plain one.
+
+The two exceptions are measured on the same program: riscv32 emits a plain
+`lw`/`sw` with no `fence` (IR and `--legacy` alike), and xtensa emits one
+`memw` immediately before each `l32i`/`s32i` and none after it.
 
 Measured by compiling `vload32` + `vstore32` and counting in `--emit=asm`:
-x86_64 IR 2 × `mfence`, x86_64 legacy 2 × `mfence`, **arm64 IR 0 × `DSB`**
-(`LDAR W20,[X19]` / `STLR W21,[X19]`), arm64 legacy 2 × `DSB SY`.
+x86_64 IR 3 × `mfence`, x86_64 legacy 3 × `mfence`, arm64 IR 1 × `DSB SY`
+(`LDAR W20,[X19]` / `STLR W21,[X19]` then `DSB SY`), arm64 legacy 3 × `DSB SY`.
 
-If you are on ARM64 with the default backend and you need the access to have
-*completed* — the usual requirement when poking a device register and then
-waiting on its effect — add an explicit `dsb()`. Do not assume the volatile
-form does it for you.
+A volatile LOAD on ARM64 with the default backend is ordered, not waited
+for; if you need a device read to have completed before something that is
+not itself a memory access, add an explicit `dsb()`.
 
-Note when checking this yourself: the `--emit=asm` disassembler prints the
-`LDAR`/`STLR` encodings with a blank mnemonic, so grepping the listing for
-`stlr` reports nothing. Decode the raw words (`88dffe74`, `889ffe75`).
+Note when checking this yourself: the `--emit=asm` listing prints these as
+`ldar` / `stlr` (with `b`/`h` for the narrow widths). Listings from compilers
+before the decoder fix printed the `LDAR`/`STLR` encodings with a blank
+mnemonic, so grepping one of those for `stlr` reports nothing; decode the raw
+words (`88dffe..`, `889ffe..`) instead.
 
 `volatile { *(addr as u32) = val }` is the equivalent block form and does
-the same thing.
+the same thing, at the width of its `as TYPE` (`u8`..`u64`, `f32`, `f64`),
+with the same barriers as the builtins on every backend (on ARM64 `--legacy`
+a block store used to get `DMB ISH` instead of the builtin's `DSB SY`).
+
+**A volatile access must be naturally aligned** — a u16 at an even
+address, a u32/f32 at a multiple of 4, a u64/f64 at a multiple of 8 — as
+hardware MMIO registers are. A misaligned volatile access is undefined
+behaviour on every backend (UNDEFINED_BEHAVIOR.md): ARM64's `LDAR`/`STLR`
+fault on it, and nothing checks it.
 
 ### Atomic operations
 
@@ -2577,7 +2609,7 @@ none of which exist here.
 UART directly and return; none of them calls a boot service. Two things this
 paragraph used to name as blockers are gone. The x86_64 entry function now
 receives `ImageHandle` in rcx and `SystemTable` in rdx under the Win64 ABI
-(`src/main.kr:4419`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
+(`src/main.kr:5119`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
 no longer drops every argument past the sixth: its argument array is
 `uint64[64]` (`src/ir.kr:3391`), and `call_ptr(p, 1, 2, 4, 8, 16, 32, 64)`
 into a seven-parameter callee returns **127** on x86_64, on arm64 and on the

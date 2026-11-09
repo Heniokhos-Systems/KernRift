@@ -1682,7 +1682,7 @@ fn xt_relax_function(uint64 code_start, uint64 line_start) {
 // --- Inline-asm mnemonic assembler --------------------------------------
 // Assembles ONE quoted asm string token into the code stream. Mirrors
 // asm_emit_rv (ir_riscv.kr:1007) but for Xtensa. Scope is deliberately tight
-// (audit: constraint-binding hardcodes x86 reg codes upstream, ir.kr:5456):
+// (audit: constraint-binding hardcodes x86 reg codes upstream, ir.kr:5481):
 // operand-less nullary mnemonics only — the register conventions the boot
 // test exercises. Xtensa has no intra-instruction compression pass, so unlike
 // riscv there is no non-compressible range to mark (rv_mark_noc has no analog).
@@ -2366,7 +2366,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11268, mirror of ir_riscv.kr:1796-1847): dest =
+    // Semantics (ir.kr:95/11293, mirror of ir_riscv.kr:1796-1847): dest =
     // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
     // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
     // the one emit site, ir.kr:2122). Assume-equal result preset AFTER the
@@ -2720,11 +2720,11 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_ASM_BLOCK (96): inline asm passthrough -----
-    // Mirror of ir_riscv.kr:2237 / ir_aarch64.kr:2712: walk the AsmBlock node's
+    // Mirror of ir_riscv.kr:2237 / ir_aarch64.kr:2717: walk the AsmBlock node's
     // string children (data1 = single-line `asm("...")` form; child list =
     // multi-line `asm { "..."; ... }` form) and hand each to asm_emit_xt. I/O
     // constraints are NOT handled here (the block is operand-less by scope — the
-    // upstream binding hardcodes x86 reg codes, ir.kr:5456). The asm text is
+    // upstream binding hardcodes x86 reg codes, ir.kr:5481). The asm text is
     // opaque passthrough. No non-compressible marking is needed (Xtensa has no
     // intra-instruction compression pass, so the emitted words are never
     // rewritten after the fact — unlike riscv's rv_compress_function).
@@ -2858,7 +2858,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     }
 
     // 4a. Outgoing-argument overflow reserve — sized to THIS function.
-    //     Port of ir_aarch64.kr:3697-3760 (a64_ovf_slots). Scan the lowered +
+    //     Port of ir_aarch64.kr:3702-3765 (a64_ovf_slots). Scan the lowered +
     //     optimised IR for IR_ARG(51) whose imm selects the overflow path:
     //     imm < XT_NUM_ARG_REGS is a register arg (a2..a7) and imm >= 100 is a
     //     direct physical AR (ASM I/O constraints) — only 6..99 reaches the
@@ -2866,7 +2866,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     //     A function with no such arg (every leaf, and every caller passing
     //     <= 6 args) now reserves ZERO bytes instead of the historical 64.
     //
-    //     ASM ESCAPE HATCH, mirroring ir_aarch64.kr:3758: an IR_ASM_BLOCK body
+    //     ASM ESCAPE HATCH, mirroring ir_aarch64.kr:3763: an IR_ASM_BLOCK body
     //     is opaque to this scan and can store outgoing stack args itself, so
     //     an asm-containing function keeps at least the full historical 64-byte
     //     reserve. (aarch64 assigns its 128 flat; here it is a floor, so an asm

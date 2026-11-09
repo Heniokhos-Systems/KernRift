@@ -67,7 +67,7 @@ ApexRift was and why.
 
 **(Historic) arm64 `in`/`out` asm constraints are documented, not
 implemented.** Found porting ApexRift's crash record to native arm64 (not an
-embedded target, but the same IR). `docs/LANGUAGE.md:1276` lists `x0`…`x30` as
+embedded target, but the same IR). `docs/LANGUAGE.md:1308` lists `x0`…`x30` as
 valid ARM64 register names for `in`/`out` clauses, and that section's own
 Limitations list does not exclude them — but `krc2 --arch=arm64` rejects any
 such constraint with `unknown inline-asm constraint register 'x0' (want rax
@@ -343,7 +343,7 @@ nonsense.
 The `in(...)`/`out(...)` constraints do not help: x86 register names are the
 only names accepted on any target (`in(a -> rax)` above compiles clean for
 arm64, and `x0` is rejected for arm64 — the mirror-image complaint already
-recorded in `docs/LANGUAGE.md:1276` vs. what the compiler implements). So there
+recorded in `docs/LANGUAGE.md:1308` vs. what the compiler implements). So there
 is no way to write a raw-hex asm block that refuses to build for the wrong
 architecture.
 

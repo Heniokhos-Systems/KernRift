@@ -24,6 +24,7 @@ import "../std/sha256.kr"
 import "format_espimage.kr"
 import "runtime.kr"
 import "formatter.kr"
+import "x86_len_tables.kr"
 
 // KernRift self-hosted compiler — main
 
@@ -1246,32 +1247,618 @@ fn write_x86_reg64(uint64 fd, uint64 r) {
 }
 
 // Decode and print an x86_64 memory operand from a ModR/M byte.
-// `bp_modrm` points to the ModR/M byte; disp/SIB bytes follow.
-// `base_hi` is 1 if REX.B is set (base register is r8..r15).
+// `bp_modrm` points to the ModR/M byte; SIB/disp bytes follow.
+// `rex_xb` carries two REX bits: bit 0 is REX.B (the r/m or SIB base
+// register is r8..r15), bit 1 is REX.X (the SIB index register is r8..r15).
+// Prints [base+index*scale+disp], after `fs:`/`gs:` and with 32-bit address
+// registers when x86_lst_prefixes saw 0x64/0x65/0x67. A SIB index of 100 without REX.X means no
+// index; with REX.X it is r12. A SIB with mod=00 and base=101 has no base
+// register and a disp32, whatever REX.B says; mod=00 r/m=101 is RIP-relative.
 // Returns the number of bytes consumed after the ModR/M (SIB + disp).
-fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 base_hi) -> uint64 {
+// Segment and address-size prefixes of the x86_64 instruction being listed:
+// x86_lst_prefixes sets them for one line and write_x86_mem reads them. 0x64
+// prints `fs:`, 0x65 `gs:` in front of the memory operand; 0x67 makes the
+// address registers 32-bit (eax..edi, r8d..r15d, eip). Both are 0 on a line
+// without such a prefix.
+static uint64 x86_lst_seg = 0
+static uint64 x86_lst_a32 = 0
+
+// An address register: 64-bit, or 32-bit under a 0x67 prefix.
+fn write_x86_areg(uint64 fd, uint64 r) {
+    if x86_lst_a32 == 0 {
+        write_x86_reg64(fd, r)
+        return
+    }
+    uint8[4] rb
+    if r == 0 { write(fd, "eax", 3) }
+    else if r == 1 { write(fd, "ecx", 3) }
+    else if r == 2 { write(fd, "edx", 3) }
+    else if r == 3 { write(fd, "ebx", 3) }
+    else if r == 4 { write(fd, "esp", 3) }
+    else if r == 5 { write(fd, "ebp", 3) }
+    else if r == 6 { write(fd, "esi", 3) }
+    else if r == 7 { write(fd, "edi", 3) }
+    else {
+        write(fd, "r", 1)
+        uint64 rl = fmt_uint(rb, r)
+        write(fd, rb, rl)
+        write(fd, "d", 1)
+    }
+}
+
+// Prefixes 0x64 (fs), 0x65 (gs) and 0x67 (32-bit addressing) in front of an
+// instruction the listing decodes with a memory operand: REX.W 69/6B (any
+// REX.W), 4C 89/8B, and 48 89/8B/01/29/31/87/8D/0F AF. `avail` is the number
+// of bytes left in the function. Returns the number of prefix bytes and sets
+// x86_lst_seg / x86_lst_a32, or returns 0 and sets nothing when what follows
+// is not such an instruction, its ModR/M names a register, a prefix repeats,
+// or the line is cut short; the prefix then dumps as one raw byte, as before.
+fn x86_lst_prefixes(uint64 bp, uint64 avail) -> uint64 {
+    uint64 n = 0
+    uint64 seg = 0
+    uint64 a32 = 0
+    while n < avail {
+        uint64 pp = bp + n
+        uint64 pb = 0
+        unsafe { *(pp as uint8) -> pb }
+        if pb == 0x64 || pb == 0x65 {
+            if seg != 0 { return 0 }
+            seg = pb
+        } else if pb == 0x67 {
+            if a32 != 0 { return 0 }
+            a32 = 1
+        } else {
+            break
+        }
+        n = n + 1
+    }
+    if n == 0 { return 0 }
+    if n + 3 > avail { return 0 }
+    uint64 p0 = bp + n
+    uint64 p1 = bp + n + 1
+    uint64 p2 = bp + n + 2
+    uint64 r = 0
+    uint64 b1 = 0
+    uint64 modrm = 0
+    unsafe { *(p0 as uint8) -> r }
+    unsafe { *(p1 as uint8) -> b1 }
+    unsafe { *(p2 as uint8) -> modrm }
+    uint64 ok = 0
+    if (r & 0xF8) == 0x48 && (b1 == 0x69 || b1 == 0x6B) { ok = 1 }
+    else if r == 0x4C && (b1 == 0x89 || b1 == 0x8B) { ok = 1 }
+    else if r == 0x48 && (b1 == 0x89 || b1 == 0x8B || b1 == 0x01 || b1 == 0x29 || b1 == 0x31 || b1 == 0x87 || b1 == 0x8D) { ok = 1 }
+    else if r == 0x48 && b1 == 0x0F && modrm == 0xAF && n + 4 <= avail {
+        uint64 p3 = bp + n + 3
+        unsafe { *(p3 as uint8) -> modrm }
+        ok = 1
+    }
+    if ok == 0 { return 0 }
+    if (modrm >> 6) == 3 { return 0 }
+    x86_lst_seg = seg
+    x86_lst_a32 = a32
+    return n
+}
+
+// One byte of the code buffer, for the x86_64 length decoder.
+fn x86_lb(uint64 p) -> uint64 {
+    uint64 v = 0
+    unsafe { *(p as uint8) -> v }
+    return v
+}
+
+// 1 when `b` is an x86_64 legacy prefix (66 67 64 65 F2 F3 2E 3E 26 36 F0).
+fn x86_is_legacy_prefix(uint64 b) -> uint64 {
+    if b == 0x66 || b == 0x67 || b == 0x64 || b == 0x65 || b == 0xF2 || b == 0xF3 { return 1 }
+    if b == 0x2E || b == 0x3E || b == 0x26 || b == 0x36 || b == 0xF0 { return 1 }
+    return 0
+}
+
+// The STRUCTURAL length of one x86_64 instruction at `bp`, for the encodings
+// x86_insn_len's measured table marks `F` (most valid ones): any number of
+// legacy prefixes (66 67 64 65 F2 F3 2E 3E 26 36 F0) in any order, an
+// optional REX (40-4F), the one-byte map, 0F, 0F 38, 0F 3A, 3DNow! (0F 0F
+// /r ib), the ModR/M with its SIB and displacement (x86_modrm_extra) and the
+// immediate. `avail` is the number of bytes left; 0 only when they run out.
+// It follows objdump's AMD reading of 0x66 on a near branch (66 E8/E9/0F 8x/
+// C7 F8 take a rel16). What it cannot know -- which opcodes objdump rejects,
+// and how many bytes it then takes -- is the table's job (x86_insn_len).
+//
+// The immediate follows the operand size: imm16/32 (05..3D, 68, 69, 81, A9,
+// C7, F7 /0-/1, E8, E9, 0F 80-8F) is 2 bytes under a 0x66 prefix without
+// REX.W, else 4; B8-BF under REX.W is an imm64; A0-A3 carry an 8-byte
+// absolute address (moffs), 4 under 0x67. imm8: 6A 6B 70-7F 80 83 A8 B0-B7
+// C0 C1 C6 CD E0-E7 EB F6 /0-/1, 04..3C; C2/CA imm16; C8 imm16+imm8; 0F 70-73
+// A4 AC BA C2 C4-C6, every 0F 3A, 0F 0F; 66/F2 0F 78 two imm8s. 0F 20-23 (mov
+// cr/dr) ignore the ModR/M mod field: never a SIB or displacement. A REX
+// followed by another prefix or REX is objdump's lone `rex`: 1 byte.
+static uint64 x86_insn_kind = 0
+fn x86_formula_len(uint64 bp, uint64 avail) -> uint64 {
+    x86_insn_kind = 0
+    uint64 n = 0
+    uint64 osz = 0
+    uint64 asz = 0
+    uint64 rep = 0
+    uint64 b = 0
+    while n < avail {
+        b = x86_lb(bp + n)
+        if x86_is_legacy_prefix(b) == 0 { break }
+        if b == 0x66 { osz = 1 }
+        if b == 0x67 { asz = 1 }
+        if b == 0xF2 || b == 0xF3 { rep = b }
+        n = n + 1
+    }
+    if n >= avail { return 0 }
+    uint64 rexw = 0
+    uint64 rex2m = 0
+    b = x86_lb(bp + n)
+    if b == 0xD5 {
+        // REX2 (APX): D5 then a payload byte whose bit 7 (M0) selects the
+        // 0F map for the opcode that follows (no 0F byte) and bit 3 is W.
+        // objdump reads D5 so in 64-bit mode; it is never AAD here.
+        if n + 2 >= avail { return 0 }
+        uint64 r2p = x86_lb(bp + n + 1)
+        rexw = (r2p >> 3) & 1
+        rex2m = (r2p >> 7) & 1
+        n = n + 2
+    } else if (b & 0xF0) == 0x40 {
+        rexw = (b >> 3) & 1
+        n = n + 1
+        if n >= avail { return 0 }
+        uint64 after_rex = x86_lb(bp + n)
+        if x86_is_legacy_prefix(after_rex) != 0 || (after_rex & 0xF0) == 0x40 { return n }
+    }
+    uint64 immz = 4
+    if osz != 0 && rexw == 0 { immz = 2 }
+    uint64 op = x86_lb(bp + n)
+    n = n + 1
+    if rex2m != 0 {
+        // REX2 map 1: the byte just read is the 0F-map opcode
+        op = 0x0F
+        n = n - 1
+    }
+    uint64 imm = 0
+    uint64 has_modrm = 0
+    uint64 noea = 0
+    uint64 xop = 0
+    if op == 0x8F && n < avail {
+        if (x86_lb(bp + n) & 0x1F) >= 8 { xop = 1 }
+    }
+    if op == 0xC4 || op == 0xC5 || op == 0x62 || xop != 0 {
+        // VEX C5 R.vvvv.L.pp / C4 RXB.mmmmm W.vvvv.L.pp, XOP 8F like C4 with
+        // map 8-A, EVEX 62 P0 P1 P2 (map = P0 & 7): then opcode, ModR/M
+        // (always, but for VEX map-1 77) and the map's immediate. An EVEX
+        // disp8*N is still one displacement byte.
+        uint64 vpfx = 2
+        uint64 vmap = 1
+        if op == 0xC5 {
+            vpfx = 1
+            x86_insn_kind = 1
+        } else if op == 0x62 {
+            vpfx = 3
+            x86_insn_kind = 2
+        } else if xop != 0 {
+            x86_insn_kind = 3
+        } else {
+            x86_insn_kind = 1
+        }
+        if n + vpfx >= avail { return 0 }
+        if op == 0xC4 || xop != 0 { vmap = x86_lb(bp + n) & 0x1F }
+        if op == 0x62 { vmap = x86_lb(bp + n) & 0x07 }
+        n = n + vpfx
+        uint64 vop = x86_lb(bp + n)
+        n = n + 1
+        has_modrm = 1
+        if xop != 0 {
+            if vmap == 8 { imm = 1 }
+            if vmap == 10 { imm = 4 }
+        } else if vmap == 3 {
+            imm = 1
+        } else if vmap == 1 {
+            if op != 0x62 && vop == 0x77 { has_modrm = 0 }
+            if (vop >= 0x70 && vop <= 0x73) || vop == 0xC2 || vop == 0xC4 || vop == 0xC5 || vop == 0xC6 { imm = 1 }
+        }
+    } else if op == 0x0F {
+        if n >= avail { return 0 }
+        uint64 op2 = x86_lb(bp + n)
+        n = n + 1
+        if op2 == 0x38 {
+            if n >= avail { return 0 }
+            n = n + 1
+            has_modrm = 1
+        } else if op2 == 0x3A {
+            if n >= avail { return 0 }
+            n = n + 1
+            has_modrm = 1
+            imm = 1
+        } else if op2 == 0x0F {
+            // 3DNow!: 0F 0F /r, the opcode byte after the operand
+            has_modrm = 1
+            imm = 1
+        } else if op2 >= 0x20 && op2 <= 0x23 {
+            has_modrm = 1
+            noea = 1
+        } else if op2 >= 0x80 && op2 <= 0x8F {
+            imm = immz
+        } else if op2 == 0x04 || (op2 >= 0x05 && op2 <= 0x0C) || op2 == 0x0E {
+            // syscall clts sysret invd wbinvd ud2 femms, and (bad) 04 0A 0C
+        } else if (op2 >= 0x24 && op2 <= 0x27) || (op2 >= 0x30 && op2 <= 0x3F) {
+            // wrmsr rdtsc rdmsr rdpmc sysenter sysexit getsec, (bad) 24-27 36 39 3B-3F
+        } else if op2 == 0x77 || op2 == 0x7A || op2 == 0x7B || op2 == 0xA7 {
+            // emms; (bad) 7A 7B A7
+        } else if op2 == 0xA0 || op2 == 0xA1 || op2 == 0xA2 || op2 == 0xA8 || op2 == 0xA9 || op2 == 0xAA {
+            // push/pop fs/gs, cpuid, rsm
+        } else if op2 >= 0xC8 && op2 <= 0xCF {
+            // bswap
+        } else if op2 == 0xB8 && rep != 0xF3 {
+            // 0F B8 is popcnt only under F3; objdump: (bad), two bytes
+        } else {
+            has_modrm = 1
+            if (op2 >= 0x70 && op2 <= 0x73) || op2 == 0xA4 || op2 == 0xAC || op2 == 0xBA || op2 == 0xC2 || op2 == 0xC4 || op2 == 0xC5 || op2 == 0xC6 { imm = 1 }
+            if op2 == 0x78 && (osz != 0 || rep == 0xF2) {
+                // extrq/insertq xmm, imm8, imm8
+                imm = 2
+            }
+        }
+    } else if op < 0x40 {
+        uint64 low = op & 7
+        if low <= 3 { has_modrm = 1 }
+        else if low == 4 { imm = 1 }
+        else if low == 5 { imm = immz }
+    } else if op == 0x63 || (op >= 0x84 && op <= 0x8F) || (op >= 0xD0 && op <= 0xD3) || (op >= 0xD8 && op <= 0xDF) || op == 0xFE || op == 0xFF {
+        has_modrm = 1
+    } else if op == 0x68 || op == 0xA9 || op == 0xE8 || op == 0xE9 {
+        imm = immz
+    } else if op == 0x69 || op == 0x81 || op == 0xC7 {
+        has_modrm = 1
+        imm = immz
+    } else if op == 0x6B || op == 0x80 || op == 0x83 || op == 0xC0 || op == 0xC1 || op == 0xC6 {
+        has_modrm = 1
+        imm = 1
+    } else if op == 0x6A || (op >= 0x70 && op <= 0x7F) || op == 0xA8 || (op >= 0xB0 && op <= 0xB7) || op == 0xCD || (op >= 0xE0 && op <= 0xE7) || op == 0xEB {
+        imm = 1
+    } else if op >= 0xA0 && op <= 0xA3 {
+        imm = 8
+        if asz != 0 { imm = 4 }
+    } else if op >= 0xB8 && op <= 0xBF {
+        imm = immz
+        if rexw != 0 { imm = 8 }
+    } else if op == 0xC2 || op == 0xCA {
+        imm = 2
+    } else if op == 0xC8 {
+        imm = 3
+    } else if op == 0xF6 || op == 0xF7 {
+        has_modrm = 1
+        if n >= avail { return 0 }
+        if ((x86_lb(bp + n) >> 3) & 7) <= 1 {
+            if op == 0xF6 { imm = 1 } else { imm = immz }
+        }
+    }
+    if has_modrm == 0 { return n + imm }
+    if n >= avail { return 0 }
+    if noea != 0 { return n + 1 + imm }
+    return n + 1 + x86_modrm_extra(bp + n) + imm
+}
+
+// 1 when `b` is a REX prefix (40-4F).
+fn x86_is_rex(uint64 b) -> uint64 {
+    if (b & 0xF0) == 0x40 { return 1 }
+    return 0
+}
+
+// One hex digit (0-9, a-f) or one base-36 digit (0-9, a-z) of a table string.
+fn x86t_digit(uint64 c) -> uint64 {
+    if c >= 97 { return c - 87 }
+    return c - 48
+}
+
+// The length code x86_len_tables records for (space, opcode, dims, ModR/M
+// class): high nibble = kind (0 formula, 1 ModR/M + displacement, 2 raw, 3
+// prefix-relative), low nibble = the count. See x86_len_tables.
+fn x86t_code(uint64 space, uint64 op, uint64 di, uint64 mi) -> uint64 {
+    uint64 g = (space * 256 + op) * 3
+    uint64 pat = x86t_digit(x86t_oppat_c(g)) * 256 + x86t_digit(x86t_oppat_c(g + 1)) * 16 + x86t_digit(x86t_oppat_c(g + 2))
+    uint64 po = pat * 4
+    uint64 off = x86t_digit(x86t_patoff_c(po)) * 4096 + x86t_digit(x86t_patoff_c(po + 1)) * 256 + x86t_digit(x86t_patoff_c(po + 2)) * 16 + x86t_digit(x86t_patoff_c(po + 3))
+    uint64 eo = (off + di) * 2
+    uint64 row = x86t_digit(x86t_patent_c(eo)) * 16 + x86t_digit(x86t_patent_c(eo + 1))
+    uint64 ci = x86t_digit(x86t_row_c(row * 80 + mi))
+    return x86t_kind_c(ci)
+}
+
+// x86_insn_len, VEX/EVEX/XOP part: `n` is the offset of the C4/C5/62/8F byte.
+// Sets x86_vx_space (6.. in x86_len_tables' order), x86_vx_di, x86_vx_t (the
+// end of the opcode) and returns 1, or returns 0 with x86_vx_t set to the
+// whole length of a header objdump rejects ((bad) of that many bytes), or
+// returns 2 when the bytes run out.
+static uint64 x86_vx_space = 0
+static uint64 x86_vx_di = 0
+static uint64 x86_vx_t = 0
+fn x86_vx_parse(uint64 bp, uint64 n, uint64 avail) -> uint64 {
+    uint64 x = x86_lb(bp + n)
+    if n + 1 >= avail { return 2 }
+    uint64 p0 = x86_lb(bp + n + 1)
+    if x == 0xC4 {
+        uint64 cm = p0 & 0x1F
+        if cm != 1 && cm != 2 && cm != 3 && cm != 7 { x86_vx_t = n + 1; return 0 }
+    }
+    if x == 0x8F {
+        uint64 xm = p0 & 0x1F
+        if xm != 8 && xm != 9 && xm != 10 { x86_vx_t = n + 1; return 0 }
+    }
+    uint64 pp = 0
+    uint64 vl = 0
+    uint64 vw = 0
+    uint64 vz = 0
+    if x == 0xC5 {
+        if n + 3 > avail { return 2 }
+        pp = p0 & 3
+        vl = (p0 >> 2) & 1
+        if ((p0 >> 3) & 15) != 15 { vz = 1 }
+        x86_vx_space = 6
+        x86_vx_di = ((pp * 2 + vl) * 2 + vw) * 2 + vz
+        x86_vx_t = n + 3
+        x86_insn_kind = 1
+        return 1
+    }
+    if x == 0x62 {
+        if n + 5 > avail { return 2 }
+        uint64 mp = p0 & 7
+        if mp == 0 { x86_vx_t = n + 1; return 0 }
+        uint64 e1 = x86_lb(bp + n + 2)
+        uint64 e2 = x86_lb(bp + n + 3)
+        pp = e1 & 3
+        vw = e1 >> 7
+        if ((e1 >> 3) & 15) != 15 { vz = 1 }
+        if mp == 4 {
+            // APX map 4: objdump's header checks, measured exhaustively over
+            // P1 x P2 (opcode-independent): ND=0 needs aaa/V'/L'L/z/vvvv =
+            // 00/1/00/0/1111 or the first 3 bytes are (bad); ND=1 needs
+            // aaa/L'L/z = 00/00/0, else (bad) of 3 bytes when vvvv = 1111
+            // and of 1 byte when it is not.
+            uint64 nd = (e2 >> 4) & 1
+            uint64 lo = e2 & 3
+            uint64 vp = (e2 >> 3) & 1
+            uint64 ll = (e2 >> 5) & 3
+            uint64 zz = e2 >> 7
+            if nd == 0 {
+                if lo != 0 || vp != 1 || ll != 0 || zz != 0 || vz != 0 { x86_vx_t = n + 3; return 0 }
+            } else {
+                if lo != 0 || ll != 0 || zz != 0 {
+                    if vz == 0 { x86_vx_t = n + 3 } else { x86_vx_t = n + 1 }
+                    return 0
+                }
+            }
+            x86_vx_di = (((pp * 2 + vw) * 2 + nd) * 2 + ((e2 >> 2) & 1)) * 2 + vz
+        } else {
+            x86_vx_di = (((pp * 2 + vw) * 4 + ((e2 >> 5) & 3)) * 2 + ((e2 >> 4) & 1)) * 2 + vz
+        }
+        x86_vx_space = 12 + mp
+        x86_vx_t = n + 5
+        x86_insn_kind = 2
+        return 1
+    }
+    // C4 (VEX, maps 1 2 3 7) or 8F (XOP, maps 8 9 A)
+    if n + 4 > avail { return 2 }
+    uint64 v1 = x86_lb(bp + n + 2)
+    pp = v1 & 3
+    vl = (v1 >> 2) & 1
+    vw = v1 >> 7
+    if ((v1 >> 3) & 15) != 15 { vz = 1 }
+    uint64 m = p0 & 0x1F
+    if x == 0xC4 {
+        if m == 7 { x86_vx_space = 9 } else { x86_vx_space = 5 + m }
+        x86_insn_kind = 1
+    } else {
+        x86_vx_space = 2 + m
+        x86_insn_kind = 3
+    }
+    x86_vx_di = ((pp * 2 + vl) * 2 + vw) * 2 + vz
+    x86_vx_t = n + 4
+    return 1
+}
+
+// Length of one x86_64 instruction at `bp`, exactly as GNU objdump
+// (-mi386:x86-64) splits the stream: valid encodings and (bad) ones, so a
+// (bad) encoding never swallows the code after it. `avail` is the number of
+// bytes left in the function; 0 only when they run out first. Structure
+// (prefixes, fwait, REX, REX2, VEX/EVEX/XOP headers and their validity, the
+// 15-byte limit) is decoded here; which opcode objdump knows in which map,
+// under which mandatory prefix, W, L, b and vvvv, and how many bytes it then
+// takes, is the measured table x86_len_tables (regenerated by
+// scripts/gen-x86-len-tables.py). x86_insn_kind is 1 for VEX, 2 for EVEX, 3
+// for XOP, else 0.
+fn x86_insn_len(uint64 bp, uint64 avail) -> uint64 {
+    uint64 l = x86_insn_len0(bp, avail)
+    if l > 15 { return 15 }
+    return l
+}
+
+fn x86_insn_len0(uint64 bp, uint64 avail) -> uint64 {
+    x86_insn_kind = 0
+    // fwait (9B) is a prefix of an x87 instruction (D8-DF) reached through
+    // legacy prefixes, more 9Bs and a REX; otherwise a 1-byte fwait.
+    uint64 k = 0
+    while k < avail && (x86_is_legacy_prefix(x86_lb(bp + k)) != 0 || x86_lb(bp + k) == 0x9B) { k = k + 1 }
+    if k < avail && x86_is_rex(x86_lb(bp + k)) != 0 { k = k + 1 }
+    uint64 x87 = 0
+    if k < avail && x86_lb(bp + k) >= 0xD8 && x86_lb(bp + k) <= 0xDF { x87 = 1 }
+    uint64 n = 0
+    if x87 == 0 {
+        while n < k {
+            if x86_lb(bp + n) == 0x9B { return n + 1 }
+            n = n + 1
+        }
+        n = 0
+    }
+    uint64 osz = 0
+    uint64 rep = 0
+    uint64 nine = 0
+    while n < avail {
+        uint64 pb = x86_lb(bp + n)
+        if pb == 0x9B && x87 != 0 {
+            nine = nine + 1
+        } else if x86_is_legacy_prefix(pb) != 0 {
+            if pb == 0x66 { osz = 1 }
+            if pb == 0xF2 || pb == 0xF3 { rep = pb }
+        } else {
+            break
+        }
+        n = n + 1
+    }
+    uint64 np = n
+    if n >= avail { return 0 }
+    uint64 ps = 0
+    if rep == 0xF3 { ps = 2 }
+    if rep == 0xF2 { ps = 3 }
+    if osz != 0 { if ps == 0 { ps = 1 } else { ps = ps + 2 } }
+    uint64 rexw = 0
+    uint64 space = 0
+    uint64 op = 0
+    uint64 t = 0
+    uint64 di = 0
+    uint64 vx = 0
+    uint64 x = x86_lb(bp + n)
+    if x == 0xD5 {
+        if n + 2 >= avail { return 0 }
+        uint64 r2 = x86_lb(bp + n + 1)
+        rexw = (r2 >> 3) & 1
+        n = n + 2
+        op = x86_lb(bp + n)
+        if (r2 >> 7) == 0 && op == 0xD5 { return n + 1 }
+        if (r2 >> 7) == 0 && (op == 0xC4 || op == 0xC5 || op == 0x62 || (op == 0x8F && n + 1 < avail && (x86_lb(bp + n + 1) & 0x38) != 0)) {
+            // REX2 (M0=0) in front of a VEX/EVEX/XOP: that, the REX2 a prefix
+            vx = 1
+        } else {
+            space = 4 + (r2 >> 7)
+            t = n + 1
+            di = ps * 2 + rexw
+        }
+    } else {
+        if x86_is_rex(x) != 0 {
+            rexw = (x >> 3) & 1
+            n = n + 1
+            if n >= avail { return 0 }
+            x = x86_lb(bp + n)
+            // a REX followed by another prefix or REX is a lone `rex`
+            if x86_is_legacy_prefix(x) != 0 || x86_is_rex(x) != 0 { return n }
+        }
+        if x == 0xC4 || x == 0xC5 || x == 0x62 || (x == 0x8F && n + 1 < avail && (x86_lb(bp + n + 1) & 0x38) != 0) {
+            vx = 1
+        } else {
+            op = x
+            n = n + 1
+            space = 0
+            if op == 0x0F {
+                if n >= avail { return 0 }
+                op = x86_lb(bp + n)
+                n = n + 1
+                space = 1
+                if op == 0x38 || op == 0x3A {
+                    if n >= avail { return 0 }
+                    if op == 0x38 { space = 2 } else { space = 3 }
+                    op = x86_lb(bp + n)
+                    n = n + 1
+                }
+            }
+            t = n
+            di = ps * 2 + rexw
+        }
+    }
+    if vx != 0 {
+        uint64 vr = x86_vx_parse(bp, n, avail)
+        if vr == 2 { return 0 }
+        if vr == 0 {
+            x86_insn_kind = 0
+            return x86_vx_t
+        }
+        space = x86_vx_space
+        di = x86_vx_di
+        t = x86_vx_t
+        op = x86_lb(bp + t - 1)
+    }
+    if t >= avail { return 0 }
+    // ModR/M class: 0-7 memory by reg, 8-71 register by reg/rm, 72-79 memory
+    // with a SIB byte by reg (a VSIB gather or an AMX tile op needs one)
+    uint64 mr = x86_lb(bp + t)
+    uint64 mi = (mr >> 3) & 7
+    if (mr >> 6) == 3 { mi = 8 + ((mr >> 3) & 7) * 8 + (mr & 7) }
+    else if (mr & 7) == 4 { mi = 72 + ((mr >> 3) & 7) }
+    uint64 code = x86t_code(space, op, di, mi)
+    uint64 cls = code >> 4
+    uint64 cv = code & 15
+    if cls == 1 {
+        if cv == 0 { return t }
+        return t + cv + x86_modrm_extra(bp + t)
+    }
+    if cls == 2 { return t + cv }
+    if cls == 3 { return np + cv }
+    // the structural formula; fwait prefixes are not part of it
+    if nine == 0 { return x86_formula_len(bp, avail) }
+    uint8[32] fb
+    uint64 fi = 0
+    uint64 fn_n = 0
+    while fi < avail && fn_n < 32 {
+        uint64 fv = x86_lb(bp + fi)
+        if fi >= np || fv != 0x9B {
+            uint64 fp = fb + fn_n
+            uint8 fv8 = fv
+            unsafe { *(fp as uint8) = fv8 }
+            fn_n = fn_n + 1
+        }
+        fi = fi + 1
+    }
+    uint64 fl = x86_formula_len(fb, fn_n)
+    if fl == 0 { return 0 }
+    return fl + nine
+}
+
+fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 rex_xb) -> uint64 {
     uint64 modrm = 0
     unsafe { *(bp_modrm as uint8) -> modrm }
     uint64 mod_f = (modrm >> 6) & 3
     uint64 rm_f  = modrm & 7
-    uint64 base_r = rm_f | (base_hi << 3)
+    uint64 base_r = rm_f | ((rex_xb & 1) << 3)
+    uint64 has_base = 1
+    uint64 has_index = 0
+    uint64 index_r = 0
+    uint64 scale_f = 0
     uint64 disp_ofs = 1
-    uint64 has_sib = 0
-    uint64 sib_base = 0
+    uint64 disp32 = 0
+    if mod_f == 2 { disp32 = 1 }
+    if mod_f == 0 && rm_f == 5 { disp32 = 1 }
     if mod_f != 3 && rm_f == 4 {
         uint64 bp_s = bp_modrm + 1
         uint64 sib_b = 0
         unsafe { *(bp_s as uint8) -> sib_b }
-        sib_base = (sib_b & 7) | (base_hi << 3)
-        base_r = sib_base
-        has_sib = 1
+        scale_f = (sib_b >> 6) & 3
+        index_r = ((sib_b >> 3) & 7) | (((rex_xb >> 1) & 1) << 3)
+        if index_r != 4 { has_index = 1 }
+        base_r = (sib_b & 7) | ((rex_xb & 1) << 3)
+        if mod_f == 0 && (sib_b & 7) == 5 {
+            has_base = 0
+            disp32 = 1
+        }
         disp_ofs = 2
     }
+    if x86_lst_seg == 0x64 { write(fd, "fs:", 3) }
+    else if x86_lst_seg == 0x65 { write(fd, "gs:", 3) }
     write(fd, "[", 1)
+    uint64 sep = 0
     if mod_f == 0 && rm_f == 5 {
-        write(fd, "rip", 3)
-    } else {
-        write_x86_reg64(fd, base_r)
+        if x86_lst_a32 != 0 { write(fd, "eip", 3) } else { write(fd, "rip", 3) }
+        sep = 1
+    } else if has_base != 0 {
+        write_x86_areg(fd, base_r)
+        sep = 1
+    }
+    if has_index != 0 {
+        if sep != 0 { write(fd, "+", 1) }
+        write_x86_areg(fd, index_r)
+        if scale_f == 0 { write(fd, "*1", 2) }
+        else if scale_f == 1 { write(fd, "*2", 2) }
+        else if scale_f == 2 { write(fd, "*4", 2) }
+        else { write(fd, "*8", 2) }
+        sep = 1
     }
     uint64 consumed = disp_ofs - 1
     if mod_f == 1 {
@@ -1281,7 +1868,7 @@ fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 base_hi) -> uint64 {
         write(fd, "+0x", 3)
         write_hex8(fd, d8v)
         consumed = consumed + 1
-    } else if mod_f == 2 || (mod_f == 0 && rm_f == 5) {
+    } else if disp32 != 0 {
         uint64 bp_d0 = bp_modrm + disp_ofs
         uint64 bp_d1 = bp_modrm + disp_ofs + 1
         uint64 bp_d2 = bp_modrm + disp_ofs + 2
@@ -1295,7 +1882,7 @@ fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 base_hi) -> uint64 {
         unsafe { *(bp_d2 as uint8) -> d32_2 }
         unsafe { *(bp_d3 as uint8) -> d32_3 }
         uint64 d32 = d32_0 | (d32_1 << 8) | (d32_2 << 16) | (d32_3 << 24)
-        write(fd, "+0x", 3)
+        if sep != 0 { write(fd, "+0x", 3) } else { write(fd, "0x", 2) }
         write_hex32(fd, d32)
         consumed = consumed + 4
     }
@@ -1304,13 +1891,25 @@ fn write_x86_mem(uint64 fd, uint64 bp_modrm, uint64 base_hi) -> uint64 {
 }
 
 // Length of an x86_64 ModR/M operand (SIB + displacement), not counting the
-// ModR/M byte itself. Mirrors the consumed-bytes computation in write_x86_mem.
-fn x86_modrm_extra(uint64 modrm) -> uint64 {
+// ModR/M byte itself; `bp_modrm` points to the ModR/M byte, because a SIB
+// with mod=00 and base=101 carries a disp32 that only the SIB byte reveals.
+// Mirrors the consumed-bytes computation in write_x86_mem.
+fn x86_modrm_extra(uint64 bp_modrm) -> uint64 {
+    uint64 modrm = 0
+    unsafe { *(bp_modrm as uint8) -> modrm }
     uint64 mod_f = (modrm >> 6) & 3
     uint64 rm_f  = modrm & 7
     if mod_f == 3 { return 0 }
     uint64 extra = 0
-    if rm_f == 4 { extra = extra + 1 }
+    if rm_f == 4 {
+        extra = extra + 1
+        if mod_f == 0 {
+            uint64 bp_s = bp_modrm + 1
+            uint64 sib_b = 0
+            unsafe { *(bp_s as uint8) -> sib_b }
+            if (sib_b & 7) == 5 { extra = extra + 4 }
+        }
+    }
     if mod_f == 1 { extra = extra + 1 }
     if mod_f == 2 { extra = extra + 4 }
     if mod_f == 0 && rm_f == 5 { extra = extra + 4 }
@@ -1841,35 +2440,43 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     write(fd, ", ", 2)
                     write_a64_xreg(fd, rd)
                 }
-                // LDXR/LDAR
-                else if (wi & 0x3FE00000) == 0x08400000 {
-                    if (wi & 0x00800000) != 0 {
-                        write(fd, "ldar ", 5)
+                // Load/store exclusive and load-acquire/store-release, the
+                // single-register forms (o1 = 0): size[31:30] 001000 o2[23]
+                // L[22] o1[21] Rs[20:16] o0[15] Rt2[14:10] Rn Rt. o2 = 0 is
+                // LDXR/LDAXR (L = 1) and STXR/STLXR (L = 0, status in Ws =
+                // Rs); o2 = 1 is LDLAR/LDAR (L = 1) and STLLR/STLR (L = 0).
+                // o0 = 1 picks the acquire/release form; size 0/1/2/3 is
+                // b/h/w/x. The old mask 0x3FE00000 included o2, so the
+                // LDAR/STLR arms could never match (every volatile access
+                // printed as nothing), LDAXR printed as ldxr, STLXR as stxr
+                // without its status register, and no b/h suffix printed.
+                else if (wi & 0x3F200000) == 0x08000000 {
+                    uint64 ex_o2 = (wi >> 23) & 1
+                    uint64 ex_l = (wi >> 22) & 1
+                    uint64 ex_o0 = (wi >> 15) & 1
+                    uint64 ex_sz = (wi >> 30) & 3
+                    if ex_o2 == 0 && ex_l != 0 {
+                        if ex_o0 != 0 { write(fd, "ldaxr", 5) } else { write(fd, "ldxr", 4) }
+                    } else if ex_o2 == 0 {
+                        if ex_o0 != 0 { write(fd, "stlxr", 5) } else { write(fd, "stxr", 4) }
+                    } else if ex_l != 0 {
+                        if ex_o0 != 0 { write(fd, "ldar", 4) } else { write(fd, "ldlar", 5) }
                     } else {
-                        write(fd, "ldxr ", 5)
+                        if ex_o0 != 0 { write(fd, "stlr", 4) } else { write(fd, "stllr", 5) }
                     }
-                    uint64 is_64 = (wi >> 30) & 1
-                    if is_64 != 0 {
-                        write_a64_xreg(fd, rd)
-                    } else {
+                    if ex_sz == 0 { write(fd, "b", 1) }
+                    if ex_sz == 1 { write(fd, "h", 1) }
+                    write(fd, " ", 1)
+                    if ex_o2 == 0 && ex_l == 0 {
+                        write_a64_wreg(fd, rm)
+                        write(fd, ", ", 2)
+                    }
+                    if ex_sz != 3 {
                         write_a64_wreg(fd, rd)
-                    }
-                    write(fd, ", [", 3)
-                    write_a64_xreg(fd, rn)
-                    write(fd, "]", 1)
-                }
-                // STXR/STLR
-                else if (wi & 0x3FE00000) == 0x08000000 {
-                    if (wi & 0x00800000) != 0 {
-                        write(fd, "stlr ", 5)
+                    } else if rd == 31 {
+                        write(fd, "xzr", 3)
                     } else {
-                        write(fd, "stxr ", 5)
-                    }
-                    uint64 is_64 = (wi >> 30) & 1
-                    if is_64 != 0 {
                         write_a64_xreg(fd, rd)
-                    } else {
-                        write_a64_wreg(fd, rd)
                     }
                     write(fd, ", [", 3)
                     write_a64_xreg(fd, rn)
@@ -1887,11 +2494,76 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 uint64 bp = out_buf + pos
                 uint64 b0 = 0
                 unsafe { *(bp as uint8) -> b0 }
+                // fs/gs/addr32 prefixes in front of a decoded memory operand:
+                // print them on this line and decode what follows with them.
+                // Anything else keeps the old one-raw-byte line per prefix.
+                x86_lst_seg = 0
+                x86_lst_a32 = 0
+                if b0 == 0x64 || b0 == 0x65 || b0 == 0x67 {
+                    uint64 pfx_n = x86_lst_prefixes(bp, fn_end - pos)
+                    uint64 pfx_i = 0
+                    while pfx_i < pfx_n {
+                        uint64 pfx_p = bp + pfx_i
+                        uint64 pfx_b = 0
+                        unsafe { *(pfx_p as uint8) -> pfx_b }
+                        write_hex8(fd, pfx_b)
+                        write(fd, " ", 1)
+                        pfx_i = pfx_i + 1
+                    }
+                    bp = bp + pfx_n
+                    pos = pos + pfx_n
+                    unsafe { *(bp as uint8) -> b0 }
+                }
+                // The opcode byte after a REX.W prefix (48-4F), read up front
+                // for the three-operand imul arm below.
+                uint64 rexw_b1 = 0
+                if (b0 & 0xF8) == 0x48 && pos + 3 <= fn_end {
+                    uint64 bp_rw1 = bp + 1
+                    unsafe { *(bp_rw1 as uint8) -> rexw_b1 }
+                }
+                // The byte after a 48 (REX.W), for cqo/cdqe below.
+                uint64 b1_w = 0
+                if b0 == 0x48 && pos + 2 <= fn_end { b1_w = x86_lb(bp + 1) }
+                // VEX / EVEX / XOP: x86_insn_kind after this call.
+                uint64 vex_len = 0
+                if b0 == 0xC4 || b0 == 0xC5 || b0 == 0x62 || b0 == 0x8F { vex_len = x86_insn_len(bp, fn_end - pos) }
                 // Decode some common patterns
                 if b0 == 0xC3 {
                     write_hex8(fd, b0)
                     write(fd, "                 ret", 20)
                     pos = pos + 1
+                } else if vex_len != 0 && x86_insn_kind != 0 && pos + vex_len <= fn_end {
+                    // VEX (C4/C5), EVEX (62), XOP (8F map 8-A): not decoded,
+                    // but the line holds exactly the instruction's bytes, so
+                    // nothing after it desyncs. It used to print a made-up
+                    // mnemonic from the first bytes and swallow the next
+                    // instruction.
+                    uint64 vx_i = 0
+                    while vx_i < vex_len {
+                        write_hex8(fd, x86_lb(bp + vx_i))
+                        if vx_i + 1 < vex_len { write(fd, " ", 1) }
+                        vx_i = vx_i + 1
+                    }
+                    if x86_insn_kind == 2 { write(fd, "  (evex)", 8) }
+                    else if x86_insn_kind == 3 { write(fd, "  (xop)", 7) }
+                    else { write(fd, "  (vex)", 7) }
+                    pos = pos + vex_len
+                } else if b0 == 0x98 || b0 == 0x99 {
+                    // cwde / cdq: sign-extend eax (a signed 32-bit division)
+                    write_hex8(fd, b0)
+                    if b0 == 0x98 { write(fd, "                 cwde", 21) }
+                    else { write(fd, "                 cdq", 20) }
+                    pos = pos + 1
+                } else if b0 == 0x48 && (b1_w == 0x98 || b1_w == 0x99) {
+                    // cdqe / cqo: REX.W 98 / 99, before every signed 64-bit
+                    // division. The REX.W arm used to dump 48 99 and the
+                    // next byte as one three-byte line.
+                    write_hex8(fd, b0)
+                    write(fd, " ", 1)
+                    write_hex8(fd, b1_w)
+                    if b1_w == 0x98 { write(fd, "              cdqe", 18) }
+                    else { write(fd, "              cqo", 17) }
+                    pos = pos + 2
                 } else if b0 == 0x0F {
                     uint64 bp1 = bp + 1
                     uint64 b1 = 0
@@ -1916,12 +2588,18 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             write(fd, wmsg_1461, str_len(wmsg_1461))
                             pos = pos + 3
                         } else {
-                            write_hex8(fd, b0)
-                            write(fd, " ", 1)
-                            write_hex8(fd, b1)
-                            write(fd, " ", 1)
-                            write_hex8(fd, b2)
-                            pos = pos + 3
+                            // lfence/sfence/clflush/fxsave/ldmxcsr/...: the
+                            // whole instruction (a memory ModR/M carries a
+                            // SIB/displacement), not a fixed three bytes
+                            uint64 ae_n = x86_insn_len(bp, fn_end - pos)
+                            if ae_n == 0 || pos + ae_n > fn_end { ae_n = fn_end - pos }
+                            uint64 ae_i = 0
+                            while ae_i < ae_n {
+                                write_hex8(fd, x86_lb(bp + ae_i))
+                                write(fd, " ", 1)
+                                ae_i = ae_i + 1
+                            }
+                            pos = pos + ae_n
                         }
                     } else if b1 >= 0x80 && b1 <= 0x8F && pos + 6 <= fn_end {
                         // jcc rel32: 0F 80-8F + imm32
@@ -1970,8 +2648,12 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         write_hex32(fd, jcc32_imm)
                         pos = pos + 6
                     } else {
-                        // Dump up to 4 bytes
-                        uint64 cnt = 2
+                        // Any other 0F opcode: the whole instruction
+                        // (x86_insn_len decodes every length), or the rest
+                        // of the function when it is cut short
+                        uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                        if cnt == 0 { cnt = fn_end - pos }
+                        if cnt + pos > fn_end { cnt = fn_end - pos }
                         uint64 di = 0
                         while di < cnt {
                             uint64 dp = bp + di
@@ -1984,45 +2666,63 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         pos = pos + cnt
                     }
                 } else if b0 == 0xF0 {
-                    // LOCK prefix
-                    write_hex8(fd, b0)
-                    write(fd, " ", 1)
-                    // A Windows listing prints EVERY byte this line consumes
-                    // (below): the #143 checker reads the byte column as the
-                    // image (rule C0), and this walker also lands here on an
-                    // 0xF0 that is part of a displacement or immediate, after
-                    // which it skipped up to 7 bytes unprinted. Other targets
-                    // keep the old line (their listings stay byte-identical).
-                    if target_os != 2 {
-                        uint64 wmsg_1535 = "...          lock ..."
-                        write(fd, wmsg_1535, str_len(wmsg_1535))
-                    }
-                    // Dump rest of instruction (up to 7 more bytes)
-                    uint64 li = 1
-                    while li < 8 && pos + li < fn_end {
-                        uint64 lp = bp + li
-                        uint64 lb = 0
-                        unsafe { *(lp as uint8) -> lb }
-                        if lb == 0x48 || lb == 0x0F || (lb >= 0x80 && lb <= 0xCF) {
-                            li = li + 1
-                        } else {
-                            li = li + 1
-                            break
+                    // LOCK prefix: the whole instruction when x86_insn_len
+                    // knows it (lock add/sub/and/or/xor, xadd, cmpxchg,
+                    // xchg), its bytes then `lock ...`. Otherwise the old
+                    // line: f0 and a guess at the rest.
+                    uint64 lk_len = x86_insn_len(bp, fn_end - pos)
+                    if lk_len != 0 && pos + lk_len <= fn_end {
+                        uint64 lk_i = 0
+                        while lk_i < lk_len {
+                            uint64 lk_p = bp + lk_i
+                            uint64 lk_b = 0
+                            unsafe { *(lk_p as uint8) -> lk_b }
+                            write_hex8(fd, lk_b)
+                            if lk_i + 1 < lk_len { write(fd, " ", 1) }
+                            lk_i = lk_i + 1
                         }
-                    }
-                    if target_os == 2 {
-                        uint64 lk = 1
-                        while lk < li {
-                            uint64 lkp = bp + lk
-                            uint64 lkb = 0
-                            unsafe { *(lkp as uint8) -> lkb }
-                            write_hex8(fd, lkb)
-                            write(fd, " ", 1)
-                            lk = lk + 1
+                        write(fd, "  lock ...", 10)
+                        pos = pos + lk_len
+                    } else {
+                        write_hex8(fd, b0)
+                        write(fd, " ", 1)
+                        // A Windows listing prints EVERY byte this line consumes
+                        // (below): the #143 checker reads the byte column as the
+                        // image (rule C0), and this walker also lands here on an
+                        // 0xF0 that is part of a displacement or immediate, after
+                        // which it skipped up to 7 bytes unprinted. Other targets
+                        // keep the old line (their listings stay byte-identical).
+                        if target_os != 2 {
+                            uint64 wmsg_1535 = "...          lock ..."
+                            write(fd, wmsg_1535, str_len(wmsg_1535))
                         }
-                        write(fd, "         lock ...", 17)
+                        // Dump rest of instruction (up to 7 more bytes)
+                        uint64 li = 1
+                        while li < 8 && pos + li < fn_end {
+                            uint64 lp = bp + li
+                            uint64 lb = 0
+                            unsafe { *(lp as uint8) -> lb }
+                            if lb == 0x48 || lb == 0x0F || (lb >= 0x80 && lb <= 0xCF) {
+                                li = li + 1
+                            } else {
+                                li = li + 1
+                                break
+                            }
+                        }
+                        if target_os == 2 {
+                            uint64 lk = 1
+                            while lk < li {
+                                uint64 lkp = bp + lk
+                                uint64 lkb = 0
+                                unsafe { *(lkp as uint8) -> lkb }
+                                write_hex8(fd, lkb)
+                                write(fd, " ", 1)
+                                lk = lk + 1
+                            }
+                            write(fd, "         lock ...", 17)
+                        }
+                        pos = pos + li
                     }
-                    pos = pos + li
                 } else if b0 >= 0x50 && b0 <= 0x57 {
                     // push reg (0x50-0x57)
                     write_hex8(fd, b0)
@@ -2051,23 +2751,17 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     else if pop_r == 6 { write(fd, "rsi", 3) }
                     else { write(fd, "rdi", 3) }
                     pos = pos + 1
-                } else if b0 == 0xF3 && pos + 2 <= fn_end {
+                } else if b0 == 0xF3 && pos + 2 <= fn_end && x86_lb(bp + 1) == 0x90 {
                     // PAUSE is F3 90. Without this case the F3 dumps as a bare
                     // byte and the 90 decodes as "nop", which reads as a plain
-                    // no-op when it is a spin hint.
-                    uint64 pz1 = bp + 1
-                    uint64 pzb = 0
-                    unsafe { *(pz1 as uint8) -> pzb }
-                    if pzb == 0x90 {
-                        write_hex8(fd, b0)
-                        write(fd, " ", 1)
-                        write_hex8(fd, pzb)
-                        write(fd, "              pause", 19)
-                        pos = pos + 2
-                    } else {
-                        write_hex8(fd, b0)
-                        pos = pos + 1
-                    }
+                    // no-op when it is a spin hint. Any other F3 goes to the
+                    // generic arm, which keeps F3 0F B8 (popcnt) and a 16-bit
+                    // operand under a later 66 on one line.
+                    write_hex8(fd, b0)
+                    write(fd, " ", 1)
+                    write_hex8(fd, 0x90)
+                    write(fd, "              pause", 19)
+                    pos = pos + 2
                 } else if b0 == 0x90 {
                     // nop
                     write_hex8(fd, b0)
@@ -2193,6 +2887,59 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     uint64 mov_eax_imm = m0 | (m1 << 8) | (m2 << 16) | (m3 << 24)
                     write_hex32(fd, mov_eax_imm)
                     pos = pos + 5
+                } else if rexw_b1 == 0x69 || rexw_b1 == 0x6B {
+                    // imul r64, r/m64, imm: REX.W 69 /r id (imm32) or REX.W
+                    // 6B /r ib (imm8, sign-extended). IR_MUL_IMM emits both
+                    // under 48/49/4C/4D. Without this arm the REX.W path
+                    // dumped three bytes and decoded the immediate as code:
+                    // x * 1000 (e8 03 00 00) printed a bogus `call`. REX.R
+                    // extends the reg field, REX.B the r/m or SIB base field,
+                    // REX.X the SIB index; the immediate prints as 32 bits,
+                    // an imm8 sign-extended.
+                    uint64 bp_ii = bp + 2
+                    uint64 modrm_ii = 0
+                    unsafe { *(bp_ii as uint8) -> modrm_ii }
+                    uint64 imm_ofs_ii = 3 + x86_modrm_extra(bp_ii)
+                    uint64 imm_len_ii = 4
+                    if rexw_b1 == 0x6B { imm_len_ii = 1 }
+                    uint64 tlen_ii = imm_ofs_ii + imm_len_ii
+                    uint64 whole_ii = 1
+                    if pos + tlen_ii > fn_end {
+                        tlen_ii = fn_end - pos
+                        whole_ii = 0
+                    }
+                    uint64 dbi_ii = 0
+                    while dbi_ii < tlen_ii {
+                        uint64 dp_ii = bp + dbi_ii
+                        uint64 db_ii = 0
+                        unsafe { *(dp_ii as uint8) -> db_ii }
+                        write_hex8(fd, db_ii)
+                        if dbi_ii + 1 < tlen_ii { write(fd, " ", 1) }
+                        dbi_ii = dbi_ii + 1
+                    }
+                    if whole_ii != 0 {
+                        write(fd, "  imul ", 7)
+                        write_x86_reg64(fd, ((modrm_ii >> 3) & 7) | (((b0 >> 2) & 1) << 3))
+                        write(fd, ", ", 2)
+                        if (modrm_ii >> 6) == 3 {
+                            write_x86_reg64(fd, (modrm_ii & 7) | ((b0 & 1) << 3))
+                        } else {
+                            write_x86_mem(fd, bp_ii, b0 & 3)
+                        }
+                        uint64 imm_ii = 0
+                        uint64 ib_ii = 0
+                        while ib_ii < imm_len_ii {
+                            uint64 ip_ii = bp + imm_ofs_ii + ib_ii
+                            uint64 iv_ii = 0
+                            unsafe { *(ip_ii as uint8) -> iv_ii }
+                            imm_ii = imm_ii | (iv_ii << (ib_ii * 8))
+                            ib_ii = ib_ii + 1
+                        }
+                        if imm_len_ii == 1 && imm_ii >= 0x80 { imm_ii = imm_ii | 0xFFFFFF00 }
+                        write(fd, ", 0x", 4)
+                        write_hex32(fd, imm_ii)
+                    }
+                    pos = pos + tlen_ii
                 } else if (b0 == 0x4C) && pos + 3 <= fn_end {
                     // REX.WR prefix (r8-r15 in reg field) + mov r/m,r or mov r,r/m
                     uint64 bp1_c = bp + 1
@@ -2205,7 +2952,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         uint64 mod_c = (modrm_c >> 6) & 3
                         uint64 rm_c  = modrm_c & 7
                         uint64 reg_c = (modrm_c >> 3) & 7
-                        uint64 extra_c = x86_modrm_extra(modrm_c)
+                        uint64 extra_c = x86_modrm_extra(bp2c)
                         uint64 tlen_c = 3 + extra_c
                         if pos + tlen_c > fn_end { tlen_c = fn_end - pos }
                         uint64 dbic = 0
@@ -2244,8 +2991,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         }
                         pos = pos + tlen_c
                     } else {
-                        // Unknown 4C-prefixed — dump 3 bytes raw
-                        uint64 cnt_c = 3
+                        // Any other 4C-prefixed instruction: dump it raw at
+                        // its length (the rest of the function if cut short)
+                        uint64 cnt_c = x86_insn_len(bp, fn_end - pos)
+                        if cnt_c == 0 { cnt_c = fn_end - pos }
                         if cnt_c + pos > fn_end { cnt_c = fn_end - pos }
                         uint64 dic = 0
                         while dic < cnt_c {
@@ -2344,9 +3093,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             write_hex32(fd, mov_imm)
                             pos = pos + 7
                         } else {
-                            // C7 with non-register modrm, dump 7 bytes raw
-                            uint64 cnt = 7
-                            if cnt + pos > fn_end { cnt = fn_end - pos }
+                            // C7 with non-register modrm: dump it raw, at its
+                            // real length (SIB/disp + imm32)
+                            uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                            if cnt == 0 || cnt + pos > fn_end { cnt = fn_end - pos }
                             uint64 di = 0
                             while di < cnt {
                                 uint64 dp = bp + di
@@ -2398,9 +3148,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             write_hex32(fd, sub_imm32)
                             pos = pos + 7
                         } else {
-                            // 81 with other modrm, dump 7 bytes raw
-                            uint64 cnt = 7
-                            if cnt + pos > fn_end { cnt = fn_end - pos }
+                            // 81 with other modrm: dump it raw, at its real
+                            // length (SIB/disp + imm32)
+                            uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                            if cnt == 0 || cnt + pos > fn_end { cnt = fn_end - pos }
                             uint64 di = 0
                             while di < cnt {
                                 uint64 dp = bp + di
@@ -2436,9 +3187,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             write_hex8(fd, si8)
                             pos = pos + 4
                         } else {
-                            // 83 with other modrm, dump 4 bytes raw
-                            uint64 cnt = 4
-                            if cnt + pos > fn_end { cnt = fn_end - pos }
+                            // 83 with other modrm: dump it raw, at its real
+                            // length (SIB/disp + imm8)
+                            uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                            if cnt == 0 || cnt + pos > fn_end { cnt = fn_end - pos }
                             uint64 di = 0
                             while di < cnt {
                                 uint64 dp = bp + di
@@ -2451,43 +3203,70 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             pos = pos + cnt
                         }
                     } else if b1 == 0x31 && pos + 3 <= fn_end {
-                        // REX.W xor reg, reg: 48 31 XX
+                        // REX.W xor r/m, reg: 48 31 XX. A memory operand (mod != 3) goes
+                        // through x86_modrm_extra/write_x86_mem; it used to be read as
+                        // two registers and three bytes, so its SIB/disp decoded as code.
                         uint64 bp2 = bp + 2
                         uint64 modrm_xor = 0
                         unsafe { *(bp2 as uint8) -> modrm_xor }
-                        write_hex8(fd, b0)
-                        write(fd, " ", 1)
-                        write_hex8(fd, b1)
-                        write(fd, " ", 1)
-                        write_hex8(fd, modrm_xor)
-                        write(fd, "           xor ", 15)
-                        // rm field = modrm & 0x07, reg field = (modrm >> 3) & 0x07
-                        uint64 xor_rm = modrm_xor & 0x07
-                        uint64 xor_reg = (modrm_xor >> 3) & 0x07
-                        if xor_rm == 0 { write(fd, "rax", 3) }
-                        else if xor_rm == 1 { write(fd, "rcx", 3) }
-                        else if xor_rm == 2 { write(fd, "rdx", 3) }
-                        else if xor_rm == 3 { write(fd, "rbx", 3) }
-                        else if xor_rm == 4 { write(fd, "rsp", 3) }
-                        else if xor_rm == 5 { write(fd, "rbp", 3) }
-                        else if xor_rm == 6 { write(fd, "rsi", 3) }
-                        else { write(fd, "rdi", 3) }
-                        write(fd, ", ", 2)
-                        if xor_reg == 0 { write(fd, "rax", 3) }
-                        else if xor_reg == 1 { write(fd, "rcx", 3) }
-                        else if xor_reg == 2 { write(fd, "rdx", 3) }
-                        else if xor_reg == 3 { write(fd, "rbx", 3) }
-                        else if xor_reg == 4 { write(fd, "rsp", 3) }
-                        else if xor_reg == 5 { write(fd, "rbp", 3) }
-                        else if xor_reg == 6 { write(fd, "rsi", 3) }
-                        else { write(fd, "rdi", 3) }
-                        pos = pos + 3
+                        if (modrm_xor >> 6) != 3 {
+                            uint64 tlen_xm = 3 + x86_modrm_extra(bp2)
+                            uint64 whole_xm = 1
+                            if pos + tlen_xm > fn_end {
+                                tlen_xm = fn_end - pos
+                                whole_xm = 0
+                            }
+                            uint64 dbi_xm = 0
+                            while dbi_xm < tlen_xm {
+                                uint64 dp_xm = bp + dbi_xm
+                                uint64 db_xm = 0
+                                unsafe { *(dp_xm as uint8) -> db_xm }
+                                write_hex8(fd, db_xm)
+                                if dbi_xm + 1 < tlen_xm { write(fd, " ", 1) }
+                                dbi_xm = dbi_xm + 1
+                            }
+                            if whole_xm != 0 {
+                                write(fd, "  xor ", 6)
+                                write_x86_mem(fd, bp2, 0)
+                                write(fd, ", ", 2)
+                                write_x86_reg64(fd, (modrm_xor >> 3) & 7)
+                            }
+                            pos = pos + tlen_xm
+                        } else {
+                            write_hex8(fd, b0)
+                            write(fd, " ", 1)
+                            write_hex8(fd, b1)
+                            write(fd, " ", 1)
+                            write_hex8(fd, modrm_xor)
+                            write(fd, "           xor ", 15)
+                            // rm field = modrm & 0x07, reg field = (modrm >> 3) & 0x07
+                            uint64 xor_rm = modrm_xor & 0x07
+                            uint64 xor_reg = (modrm_xor >> 3) & 0x07
+                            if xor_rm == 0 { write(fd, "rax", 3) }
+                            else if xor_rm == 1 { write(fd, "rcx", 3) }
+                            else if xor_rm == 2 { write(fd, "rdx", 3) }
+                            else if xor_rm == 3 { write(fd, "rbx", 3) }
+                            else if xor_rm == 4 { write(fd, "rsp", 3) }
+                            else if xor_rm == 5 { write(fd, "rbp", 3) }
+                            else if xor_rm == 6 { write(fd, "rsi", 3) }
+                            else { write(fd, "rdi", 3) }
+                            write(fd, ", ", 2)
+                            if xor_reg == 0 { write(fd, "rax", 3) }
+                            else if xor_reg == 1 { write(fd, "rcx", 3) }
+                            else if xor_reg == 2 { write(fd, "rdx", 3) }
+                            else if xor_reg == 3 { write(fd, "rbx", 3) }
+                            else if xor_reg == 4 { write(fd, "rsp", 3) }
+                            else if xor_reg == 5 { write(fd, "rbp", 3) }
+                            else if xor_reg == 6 { write(fd, "rsi", 3) }
+                            else { write(fd, "rdi", 3) }
+                            pos = pos + 3
+                        }
                     } else if b1 == 0x87 && pos + 3 <= fn_end {
                         // xchg reg, r/m
                         uint64 bp2x = bp + 2
                         uint64 modrm_x = 0
                         unsafe { *(bp2x as uint8) -> modrm_x }
-                        uint64 extra_x = x86_modrm_extra(modrm_x)
+                        uint64 extra_x = x86_modrm_extra(bp2x)
                         uint64 tlen_x = 3 + extra_x
                         if pos + tlen_x > fn_end { tlen_x = fn_end - pos }
                         uint64 dbi_x = 0
@@ -2514,7 +3293,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         uint64 bp2a = bp + 2
                         uint64 modrm_a = 0
                         unsafe { *(bp2a as uint8) -> modrm_a }
-                        uint64 extra_a = x86_modrm_extra(modrm_a)
+                        uint64 extra_a = x86_modrm_extra(bp2a)
                         uint64 tlen_a = 3 + extra_a
                         if pos + tlen_a > fn_end { tlen_a = fn_end - pos }
                         uint64 dbi_a = 0
@@ -2546,7 +3325,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             uint64 bp3o = bp + 3
                             uint64 modrm_im = 0
                             unsafe { *(bp3o as uint8) -> modrm_im }
-                            uint64 extra_im = x86_modrm_extra(modrm_im)
+                            uint64 extra_im = x86_modrm_extra(bp3o)
                             uint64 tlen_im = 4 + extra_im
                             if pos + tlen_im > fn_end { tlen_im = fn_end - pos }
                             uint64 dbi2 = 0
@@ -2569,8 +3348,10 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             }
                             pos = pos + tlen_im
                         } else {
-                            // Other 0F xx under REX.W — dump 4 bytes raw
-                            uint64 cnt_o = 4
+                            // Other 0F xx under REX.W: dump it raw at its
+                            // length (the rest of the function if cut short)
+                            uint64 cnt_o = x86_insn_len(bp, fn_end - pos)
+                            if cnt_o == 0 { cnt_o = fn_end - pos }
                             if cnt_o + pos > fn_end { cnt_o = fn_end - pos }
                             uint64 di_o = 0
                             while di_o < cnt_o {
@@ -2586,27 +3367,24 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     } else if (b1 == 0x89 || b1 == 0x8B) && pos + 3 <= fn_end {
                         // REX.W mov  — 0x89 = mov r/m, reg (store direction)
                         //               0x8B = mov reg, r/m (load direction)
-                        // ModR/M: mod:2, reg:3, rm:3.
-                        // mod==3 → reg-reg (3 bytes total)
-                        // mod!=3 → memory operand; rm==4 adds SIB;
-                        //          mod==1 adds disp8; mod==2 adds disp32;
-                        //          mod==0 && rm==5 is RIP-relative disp32.
+                        // The length and the memory operand come from
+                        // x86_modrm_extra and write_x86_mem, like every other
+                        // ModR/M arm. This arm used to decode the SIB by hand:
+                        // it printed the base only (`48 8b 04 c8` read as
+                        // `mov rax, [rax]`, not [rax+rcx*8]) and counted no
+                        // disp32 for a SIB with mod=00 and base=101.
                         uint64 bp2 = bp + 2
                         uint64 modrm_mov = 0
                         unsafe { *(bp2 as uint8) -> modrm_mov }
                         uint64 mod_f = (modrm_mov >> 6) & 3
                         uint64 rm_f  = modrm_mov & 7
                         uint64 reg_f = (modrm_mov >> 3) & 7
-                        // Compute number of bytes after ModR/M
-                        uint64 extra = 0
-                        if mod_f != 3 {
-                            if rm_f == 4 { extra = extra + 1 }   // SIB
-                            if mod_f == 1 { extra = extra + 1 }  // disp8
-                            if mod_f == 2 { extra = extra + 4 }  // disp32
-                            if mod_f == 0 && rm_f == 5 { extra = extra + 4 }  // rip+disp32
+                        uint64 total_len = 3 + x86_modrm_extra(bp2)
+                        uint64 whole_mov = 1
+                        if pos + total_len > fn_end {
+                            total_len = fn_end - pos
+                            whole_mov = 0
                         }
-                        uint64 total_len = 3 + extra
-                        if pos + total_len > fn_end { total_len = fn_end - pos }
                         // Dump raw bytes (space-separated)
                         uint64 dbi = 0
                         while dbi < total_len {
@@ -2617,100 +3395,27 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                             if dbi + 1 < total_len { write(fd, " ", 1) }
                             dbi = dbi + 1
                         }
-                        write(fd, "  mov ", 6)
-                        if mod_f == 3 {
-                            // reg-reg: "mov <rm>, <reg>" for 0x89; "mov <reg>, <rm>" for 0x8B
-                            uint64 left = rm_f
-                            uint64 right = reg_f
-                            if b1 == 0x8B { left = reg_f; right = rm_f }
-                            if left == 0 { write(fd, "rax", 3) }
-                            else if left == 1 { write(fd, "rcx", 3) }
-                            else if left == 2 { write(fd, "rdx", 3) }
-                            else if left == 3 { write(fd, "rbx", 3) }
-                            else if left == 4 { write(fd, "rsp", 3) }
-                            else if left == 5 { write(fd, "rbp", 3) }
-                            else if left == 6 { write(fd, "rsi", 3) }
-                            else { write(fd, "rdi", 3) }
-                            write(fd, ", ", 2)
-                            if right == 0 { write(fd, "rax", 3) }
-                            else if right == 1 { write(fd, "rcx", 3) }
-                            else if right == 2 { write(fd, "rdx", 3) }
-                            else if right == 3 { write(fd, "rbx", 3) }
-                            else if right == 4 { write(fd, "rsp", 3) }
-                            else if right == 5 { write(fd, "rbp", 3) }
-                            else if right == 6 { write(fd, "rsi", 3) }
-                            else { write(fd, "rdi", 3) }
-                        } else {
-                            // Memory operand. Resolve base register (SIB if rm==4).
-                            uint64 base_r = rm_f
-                            uint64 disp_ofs = 3
-                            if rm_f == 4 {
-                                uint64 bp_s = bp + 3
-                                uint64 sib_b = 0
-                                unsafe { *(bp_s as uint8) -> sib_b }
-                                base_r = sib_b & 7
-                                disp_ofs = 4
-                            }
-                            if b1 == 0x89 {
-                                // store: mov [base+disp], reg
-                                write(fd, "[", 1)
+                        if whole_mov != 0 {
+                            write(fd, "  mov ", 6)
+                            if mod_f == 3 {
+                                // reg-reg: "mov <rm>, <reg>" for 0x89; "mov <reg>, <rm>" for 0x8B
+                                if b1 == 0x89 {
+                                    write_x86_reg64(fd, rm_f)
+                                    write(fd, ", ", 2)
+                                    write_x86_reg64(fd, reg_f)
+                                } else {
+                                    write_x86_reg64(fd, reg_f)
+                                    write(fd, ", ", 2)
+                                    write_x86_reg64(fd, rm_f)
+                                }
+                            } else if b1 == 0x89 {
+                                write_x86_mem(fd, bp2, 0)
+                                write(fd, ", ", 2)
+                                write_x86_reg64(fd, reg_f)
                             } else {
-                                // load: mov reg, [base+disp]
-                                if reg_f == 0 { write(fd, "rax", 3) }
-                                else if reg_f == 1 { write(fd, "rcx", 3) }
-                                else if reg_f == 2 { write(fd, "rdx", 3) }
-                                else if reg_f == 3 { write(fd, "rbx", 3) }
-                                else if reg_f == 4 { write(fd, "rsp", 3) }
-                                else if reg_f == 5 { write(fd, "rbp", 3) }
-                                else if reg_f == 6 { write(fd, "rsi", 3) }
-                                else { write(fd, "rdi", 3) }
-                                write(fd, ", [", 3)
-                            }
-                            if mod_f == 0 && rm_f == 5 {
-                                write(fd, "rip", 3)
-                            } else if base_r == 0 { write(fd, "rax", 3) }
-                            else if base_r == 1 { write(fd, "rcx", 3) }
-                            else if base_r == 2 { write(fd, "rdx", 3) }
-                            else if base_r == 3 { write(fd, "rbx", 3) }
-                            else if base_r == 4 { write(fd, "rsp", 3) }
-                            else if base_r == 5 { write(fd, "rbp", 3) }
-                            else if base_r == 6 { write(fd, "rsi", 3) }
-                            else { write(fd, "rdi", 3) }
-                            if mod_f == 1 {
-                                write(fd, "+0x", 3)
-                                uint64 bp_d = bp + disp_ofs
-                                uint64 d8v = 0
-                                unsafe { *(bp_d as uint8) -> d8v }
-                                write_hex8(fd, d8v)
-                            } else if mod_f == 2 || (mod_f == 0 && rm_f == 5) {
-                                write(fd, "+0x", 3)
-                                uint64 bp_d0 = bp + disp_ofs
-                                uint64 bp_d1 = bp + disp_ofs + 1
-                                uint64 bp_d2 = bp + disp_ofs + 2
-                                uint64 bp_d3 = bp + disp_ofs + 3
-                                uint64 d32_0 = 0
-                                uint64 d32_1 = 0
-                                uint64 d32_2 = 0
-                                uint64 d32_3 = 0
-                                unsafe { *(bp_d0 as uint8) -> d32_0 }
-                                unsafe { *(bp_d1 as uint8) -> d32_1 }
-                                unsafe { *(bp_d2 as uint8) -> d32_2 }
-                                unsafe { *(bp_d3 as uint8) -> d32_3 }
-                                uint64 d32 = d32_0 | (d32_1 << 8) | (d32_2 << 16) | (d32_3 << 24)
-                                write_hex32(fd, d32)
-                            }
-                            if b1 == 0x89 {
-                                write(fd, "], ", 3)
-                                if reg_f == 0 { write(fd, "rax", 3) }
-                                else if reg_f == 1 { write(fd, "rcx", 3) }
-                                else if reg_f == 2 { write(fd, "rdx", 3) }
-                                else if reg_f == 3 { write(fd, "rbx", 3) }
-                                else if reg_f == 4 { write(fd, "rsp", 3) }
-                                else if reg_f == 5 { write(fd, "rbp", 3) }
-                                else if reg_f == 6 { write(fd, "rsi", 3) }
-                                else { write(fd, "rdi", 3) }
-                            } else {
-                                write(fd, "]", 1)
+                                write_x86_reg64(fd, reg_f)
+                                write(fd, ", ", 2)
+                                write_x86_mem(fd, bp2, 0)
                             }
                         }
                         pos = pos + total_len
@@ -2719,7 +3424,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         uint64 bp2 = bp + 2
                         uint64 modrm_lea = 0
                         unsafe { *(bp2 as uint8) -> modrm_lea }
-                        uint64 extra_lea = x86_modrm_extra(modrm_lea)
+                        uint64 extra_lea = x86_modrm_extra(bp2)
                         uint64 total_len = 3 + extra_lea
                         if pos + total_len > fn_end { total_len = fn_end - pos }
                         uint64 dbi = 0
@@ -2738,10 +3443,11 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         write_x86_mem(fd, bp2, 0)
                         pos = pos + total_len
                     } else {
-                        // Other REX.W instructions — dump with byte count heuristic
-                        uint64 cnt = 3
-                        if b1 == 0x8B { cnt = 3 }
-                        else if b1 >= 0x00 && b1 <= 0x3F { cnt = 3 }
+                        // Other REX.W instructions (moffs, string ops,
+                        // iretq, ...): dump raw at the length x86_insn_len
+                        // gives (the rest of the function if cut short)
+                        uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                        if cnt == 0 { cnt = fn_end - pos }
                         if cnt + pos > fn_end { cnt = fn_end - pos }
                         uint64 di = 0
                         while di < cnt {
@@ -2755,22 +3461,16 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         pos = pos + cnt
                     }
                 } else {
-                    // Generic: dump 1 byte per line for simple format
-                    uint64 cnt = 1
-                    // REX prefix? Read more bytes
-                    if b0 >= 0x40 && b0 <= 0x4F { cnt = 2 }
-                    if b0 == 0x49 {
-                        uint64 bp1 = bp + 1
-                        uint64 b1 = 0
-                        unsafe { *(bp1 as uint8) -> b1 }
-                        if b1 == 0xC7 { cnt = 7 }
-                        else if b1 == 0x89 || b1 == 0x8B { cnt = 3 }
-                        else if b1 == 0x81 { cnt = 7 }
-                        else if b1 == 0x83 { cnt = 4 }
-                        else if b1 == 0x31 { cnt = 3 }
-                        else { cnt = 3 }
-                    }
-                    if b0 == 0xB9 || b0 == 0xBA { cnt = 5 }
+                    // Generic: one raw line holding one whole instruction,
+                    // its legacy prefixes included (`f3 aa` rep stosb, `f2 0f
+                    // 5e ca` divsd), at the length x86_insn_len gives -- the
+                    // length objdump gives, (bad) encodings included -- so
+                    // the next line starts where the next instruction does.
+                    // A prefix used to be a line of its own here, which split
+                    // 265 instructions of the compiler's own listing in two.
+                    // Cut short by the end of the function: the rest of it.
+                    uint64 cnt = x86_insn_len(bp, fn_end - pos)
+                    if cnt == 0 { cnt = fn_end - pos }
                     if cnt + pos > fn_end { cnt = fn_end - pos }
                     uint64 di = 0
                     while di < cnt {
@@ -4015,7 +4715,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // --emit=image: raw headerless flat binary. header_size = 0 FROM THE
         // START — the rv_raw shape (:3490-3494) — never truncation of an
         // emitted ELF. a64_compute_va maps file offset -> 0x400000 + offset
-        // (codegen_aarch64.kr:7101) and the ADRP page arithmetic is baked
+        // (codegen_aarch64.kr:7128) and the ADRP page arithmetic is baked
         // from that map, so chopping a 0x78-byte header off a finished ELF
         // shifts every offset by a non-page amount and leaves every baked
         // page_off 0x78 too large — the image boots to SILENCE at any
@@ -4175,7 +4875,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
     // that ordering is the entire design. a64_compute_va maps a file offset
     // to 0x400000 + offset with no notion of a header
-    // (codegen_aarch64.kr:7101), and every ADRP page computation is baked
+    // (codegen_aarch64.kr:7128), and every ADRP page computation is baked
     // from that map DURING codegen. Emitting the prefix first therefore moves
     // the payload and re-bakes the page arithmetic around it in one step, with
     // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
@@ -4472,7 +5172,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // codegen so no local stub/symbol is emitted; the call
                     // site records an R_RISCV_CALL_PLT relocation instead
                     // (mirror of gen_function/gen_function_a64's extern
-                    // early-return, codegen.kr:14738 / codegen_aarch64.kr:6310).
+                    // early-return, codegen.kr:14778 / codegen_aarch64.kr:6337).
                     uint32 rv_ann_flags = ast_data4(wchild)
                     uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at

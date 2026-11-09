@@ -769,7 +769,7 @@ EOF
 expect_only body_unbalanced_path C4b 'inconsistent stack depth' --arch x86_64 "$W/unbalanced.obj"
 
 # the fmt_uint digit loops, byte for byte as KR's IR backend emits them
-# (ir.kr:10294-10364, measured from a --target=windows image)
+# (ir.kr:10319-10389, measured from a --target=windows image)
 cat > "$W/loopbody.s" <<'EOF'
         .byte 0x48,0x31,0xc9
         .byte 0x41,0xba,0x0a,0x00,0x00,0x00

@@ -4171,6 +4171,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore8)
             emit_a64(0xD5033F9F)
             emit_a64_strb(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore16", 8) != 0 {
@@ -4186,6 +4187,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore16)
             emit_a64(0xD5033F9F)
             emit_a64_strh(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore32", 8) != 0 {
@@ -4201,6 +4203,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore32)
             emit_a64(0xD5033F9F)
             emit_a64_str32(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore64", 8) != 0 {
@@ -4216,6 +4219,7 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_load_x0(pk0_vstore64)
             emit_a64(0xD5033F9F)
             emit_a64_str(1, 0, 0)
+            emit_a64(0xD5033F9F)   // DSB SY after: the store completes first
             return
         }
 
@@ -5790,9 +5794,22 @@ fn gen_stmt_a64(uint64 node) {
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
         gen_expr_a64(wa)
-        if wts == 1 { emit_a64_ldrb(0, 0, 0) }
-        else if wts == 2 { emit_a64_ldrh(0, 0, 0) }
-        else if wts == 4 { emit_a64_ldr32(0, 0, 0) }
+        // data4 = the `as TYPE` keyword when it is a signed integer (84..87,
+        // see parser.kr), else 0: a signed cast sign-extends from its width.
+        uint32 pl_sk32_a = ast_data4(node)
+        uint64 pl_sk_a = pl_sk32_a
+        if wts == 1 {
+            // LDRSB Xt, [Xn] / LDRB Wt, [Xn]
+            if pl_sk_a != 0 { emit_a64(0x39800000) } else { emit_a64_ldrb(0, 0, 0) }
+        }
+        else if wts == 2 {
+            // LDRSH Xt, [Xn] / LDRH Wt, [Xn]
+            if pl_sk_a != 0 { emit_a64(0x79800000) } else { emit_a64_ldrh(0, 0, 0) }
+        }
+        else if wts == 4 {
+            // LDRSW Xt, [Xn] / LDR Wt, [Xn]
+            if pl_sk_a != 0 { emit_a64(0xB9800000) } else { emit_a64_ldr32(0, 0, 0) }
+        }
         else { emit_a64_ldr(0, 0, 0) }
         // Volatile barrier after load (DSB SY — ensures device read completes)
         // data3 packs the float kind in bits 0..3 and volatile in bit 4 (see
@@ -5830,6 +5847,8 @@ fn gen_stmt_a64(uint64 node) {
         }
         if wpl_fk_a == 1 { var_type_register(dest_tok, 96) }
         if wpl_fk_a == 2 { var_type_register(dest_tok, 95) }
+        // A signed cast types dest signed (see the x86 twin in codegen.kr).
+        if pl_sk_a != 0 { var_type_register(dest_tok, pl_sk_a) }
         emit_a64_store_x0(doff)
         return
     }
@@ -5878,15 +5897,21 @@ fn gen_stmt_a64(uint64 node) {
         }
         emit_a64_mov(10, 0)
         emit_a64_load_x0(ps_val_slot_a)
-        // Volatile barrier before store (DSB SY — ensures device write commits)
+        // Volatile barrier before store: DSB SY, the same barrier the
+        // vstore8..64 builtins use (it waits for completion). This used to be
+        // a DMB ISH (ordering only), so the block form and vstoreN disagreed
+        // on arm64 --legacy.
         // volatile is data3 bit 4 — see the load path above.
         uint32 vol_flag2 = ast_data3(node)
         uint64 wvf2 = vol_flag2
-        if (wvf2 & 16) != 0 { emit_a64(0xD5033BBF) }
+        if (wvf2 & 16) != 0 { emit_a64(0xD5033F9F) }
         if wts == 1 { emit_a64_strb(0, 10, 0) }
         else if wts == 2 { emit_a64_strh(0, 10, 0) }
         else if wts == 4 { emit_a64_str32(0, 10, 0) }
         else { emit_a64_str(0, 10, 0) }
+        // ...and DSB SY after it, as vstoreN: the store completes before
+        // anything after it (LANGUAGE.md).
+        if (wvf2 & 16) != 0 { emit_a64(0xD5033F9F) }
         return
     }
 
@@ -6111,6 +6136,8 @@ fn gen_stmt_a64(uint64 node) {
                         else if dev_sz_wa == 2 { emit_a64_strh(1, 0, 0) }
                         else if dev_sz_wa == 4 { emit_a64_str32(1, 0, 0) }
                         else { emit_a64_str(1, 0, 0) }
+                        // DSB SY after store, as vstoreN
+                        emit_a64(0xD5033F9F)
                         return
                     }
                 }

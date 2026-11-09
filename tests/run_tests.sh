@@ -3,6 +3,13 @@
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
+# A relative compiler path ("./build/krc2", "build/krc3") is made absolute
+# here: several rows cd before calling $KRC (self_import_mode_matches_concat
+# runs from src/), and a relative path then names nothing.
+case "$KRC" in
+    /*) ;;
+    */*) KRC="$(cd "$(dirname "$KRC")" && pwd)/$(basename "$KRC")" ;;
+esac
 
 # THE COMPILER UNDER TEST MUST BE NEWER THAN THE COMPILER'S SOURCE.
 #
@@ -1495,7 +1502,7 @@ vbind_run() { # <arch> <flags> <src> <runner-or-empty>
         VBIND_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     VBIND_RAN=$((VBIND_RAN + 1))
     [ "$_rc" = "2" ] || { VBIND_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 2"; }
@@ -1603,7 +1610,7 @@ ceval_run() { # <arch> <flags> <src> <runner-or-empty>
         CEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     CEVAL_RAN=$((CEVAL_RAN + 1))
     # 7 = reached the end with every assertion satisfied. 1 = wrong evaluation
@@ -1726,7 +1733,7 @@ sha_run() { # <arch> <flags> <src> <runner-or-empty>
         SHA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     SHA_RAN=$((SHA_RAN + 1))
     # 7 = every assertion satisfied. Anything else names the assertion that
@@ -1904,7 +1911,7 @@ feval_run() { # <arch> <flags> <src> <runner-or-empty>
         FEVAL_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     FEVAL_RAN=$((FEVAL_RAN + 1))
     # 7 = reached the end with every assertion satisfied. Anything else names
@@ -2032,7 +2039,7 @@ tslot_run() { # <arch> <flags> <src> <runner-or-empty>
         TSLOT_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     TSLOT_RAN=$((TSLOT_RAN + 1))
     # 77 = the value actually reached memory. 1 = the parked value was replaced
@@ -2160,7 +2167,7 @@ eord_run() { # <arch> <flags> <src> <runner-or-empty>
         EORD_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     EORD_RAN=$((EORD_RAN + 1))
     # 7 = order and value both correct. 1 = wrong order, 2 = wrong value.
@@ -2587,7 +2594,7 @@ aslot_run() { # <arch> <flags> <src> <runner-or-empty>
         return
     fi
     local _out
-    if [ -n "$4" ]; then _out=$($4 "$_bin" 2>"$_eo"); else _out=$("$_bin" 2>"$_eo"); fi
+    if [ -n "$4" ]; then _out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" 2>"$_eo"); else _out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" 2>"$_eo"); fi
     local _err="$(cat "$_eo")"
     local _wo="$(aslot_want_out "$3")"
     local _we="$(aslot_want_err "$3")"
@@ -2743,7 +2750,7 @@ dma_run() { # <arch> <flags> <src> <runner-or-empty>
         DMA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     DMA_RAN=$((DMA_RAN + 1))
     # 7 = every assertion satisfied. Anything else names the assertion that
@@ -3105,16 +3112,21 @@ else
 fi
 rm -f "$ANA_SRC" "$ANA_BIN"
 
-# 3. arm64 volatile emits NO completion barrier. On the default IR backend
-#    vload32/vstore32 become LDAR/STLR -- acquire/release ORDERING, not a DSB.
-#    docs/LANGUAGE.md and README.md both carry the measured table this pins:
-#      x86_64 IR 2 x mfence | arm64 IR 0 x DSB (LDAR/STLR) | arm64 legacy 2 x DSB SY
+# 3. The volatile barrier counts. On the default IR backend vload32 becomes
+#    LDAR (acquire ORDERING, no completion barrier) and vstore32 becomes STLR
+#    followed by one DSB SY, so the store has completed before anything after
+#    it. docs/LANGUAGE.md and README.md both carry the measured table this pins:
+#      x86_64 IR 3 x mfence | arm64 IR 1 x DSB SY (LDAR, STLR, DSB) | arm64 legacy 3 x DSB SY
+#    (The row was called arm64_volatile_no_dsb while arm64 emitted no DSB; it
+#    asserts one now, so it is named for what it checks.)
 #
-#    MATCH ON THE ENCODING, NEVER THE MNEMONIC. The `--emit=asm` decoder prints
-#    the LDAR/STLR encodings with a BLANK mnemonic field, so `grep -i stlr` finds
-#    nothing on a tree that emits STLR perfectly. That is precisely how the false
-#    "arm64 volatile emits DSB SY" claim survived: someone grepped for `stlr`,
-#    saw zero, and concluded the barrier form must be in use.
+#    MATCH ON THE ENCODING, NEVER THE MNEMONIC. The `--emit=asm` decoder used to
+#    print the LDAR/STLR encodings with a BLANK mnemonic field, so `grep -i stlr`
+#    found nothing on a tree that emitted STLR perfectly. That is precisely how
+#    the false "arm64 volatile emits DSB SY" claim survived: someone grepped for
+#    `stlr`, saw zero, and concluded the barrier form must be in use. The decoder
+#    now prints them (arm64_asm_listing_exclusive_forms pins the text), but the
+#    word is what the hardware runs, so this row still matches the word.
 #      88dffe.. = LDAR Wt,[Xn]    889ffe.. = STLR Wt,[Xn]
 #
 #    Compile-only (the listing is inspected, never executed), so pinning arches
@@ -3146,14 +3158,14 @@ vol_check() { # <label> <arch> <extra-flags> <pattern> <want-count>
 }
 vol_check "arm64 IR LDAR"     arm64  ""          '88dffe' 1
 vol_check "arm64 IR STLR"     arm64  ""          '889ffe' 1
-vol_check "arm64 IR no DSB"   arm64  ""          'dsb'    0
-vol_check "x86_64 IR mfence"  x86_64 ""          'mfence' 2
-vol_check "arm64 legacy DSB"  arm64  "--legacy"  'dsb'    2
+vol_check "arm64 IR DSB"      arm64  ""          'dsb'    1
+vol_check "x86_64 IR mfence"  x86_64 ""          'mfence' 3
+vol_check "arm64 legacy DSB"  arm64  "--legacy"  'dsb'    3
 if [ "$VOL_OK" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  arm64_volatile_no_dsb: PASS (LDAR+STLR, 0 DSB; x86 2 mfence; legacy 2 DSB)"
+    PASS=$((PASS + 1)); echo "  volatile_barrier_counts: PASS (LDAR+STLR, 1 DSB after the store; x86 3 mfence; legacy 3 DSB)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: arm64_volatile_no_dsb"
+    echo "FAIL: volatile_barrier_counts"
     echo "  the volatile lowering changed -- update the barrier tables in docs/LANGUAGE.md"
     echo "  and README.md in the same commit; grep the ENCODING, not the mnemonic"
 fi
@@ -3340,7 +3352,7 @@ sstr_run() { # <arch> <flags> <src> <runner-or-empty> <expected>
         SSTR_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     SSTR_RAN=$((SSTR_RAN + 1))
     [ "$_rc" = "$5" ] || { SSTR_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want $5"; }
@@ -3487,7 +3499,7 @@ if [ -n "$FNFAR_RUN" ]; then
                 if [ "$_n" = "200" ] && [ "$_sz" -le 1100000 ]; then
                     FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: image only $_sz bytes -- the gap is not past 1 MB"
                 fi
-                if [ "$FNFAR_RUN" = "native" ]; then "$_bin" >/dev/null 2>&1; else "$FNFAR_RUN" "$_bin" >/dev/null 2>&1; fi
+                if [ "$FNFAR_RUN" = "native" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$FNFAR_RUN" "$_bin" >/dev/null 2>&1; fi
                 _rc=$?
                 FNFAR_RAN=$((FNFAR_RAN + 1))
                 [ "$_rc" = "42" ] || { FNFAR_OK=0; echo "  fnfar $_m/$_n ${_be:-IR}: got $_rc, want 42"; }
@@ -3885,8 +3897,10 @@ if [ "$ARCH" != "aarch64" ]; then
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("rdmsr") }\n' > /tmp/krc_test_$$.kr
     if $KRC $KRC_FLAGS /tmp/krc_test_$$.kr -o /tmp/krc_test_$$ > /dev/null 2>&1; then
         chmod +x /tmp/krc_test_$$
-        /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
-        if [ "$got" = "42" ]; then
+        RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
+        if rb_timed_out "$got" "$RT_T0"; then
+            echo "FAIL: msr_compile (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "42" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: msr_compile (expected 42, got $got)"
@@ -3902,8 +3916,10 @@ if [ "$ARCH" != "aarch64" ]; then
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("wrmsr") }\n' > /tmp/krc_test_$$.kr
     if $KRC $KRC_FLAGS /tmp/krc_test_$$.kr -o /tmp/krc_test_$$ > /dev/null 2>&1; then
         chmod +x /tmp/krc_test_$$
-        /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
-        if [ "$got" = "42" ]; then
+        RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1; got=$?
+        if rb_timed_out "$got" "$RT_T0"; then
+            echo "FAIL: msr_wrmsr_compile (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "42" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: msr_wrmsr_compile (expected 42, got $got)"
@@ -4022,7 +4038,7 @@ if $KRC $KRC_FLAGS /tmp/krc_dce_unused_$$.kr -o /tmp/krc_dce_small_$$ > /dev/nul
     large_size=$(wc -c < /tmp/krc_dce_large_$$)
     # Verify the unused-function binary is smaller (DCE removed dead code)
     # Also verify the unused-function binary runs correctly
-    /tmp/krc_dce_small_$$ > /dev/null 2>&1; small_exit=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_dce_small_$$ > /dev/null 2>&1; small_exit=$?
     if [ "$small_size" -lt "$large_size" ] && [ "$small_exit" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  dce_eliminates_unused: PASS (unused=$small_size < used=$large_size bytes, exit=$small_exit)"
@@ -4628,7 +4644,7 @@ if [ -n "$QEMU_A64" ]; then
     if $KRC /tmp/krc_c2_$$.kr -o /tmp/krc_c2_$$.krbo >/dev/null 2>&1 \
        && $KRC --arch=arm64 /tmp/krc_c2run_$$.kr -o /tmp/krc_c2run_$$ >/dev/null 2>&1; then
         chmod +x /tmp/krc_c2run_$$
-        $QEMU_A64 /tmp/krc_c2run_$$ /tmp/krc_c2_$$.krbo >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $QEMU_A64 /tmp/krc_c2run_$$ /tmp/krc_c2_$$.krbo >/dev/null 2>&1
         c2got=$?
         if [ "$c2got" = "9" ]; then
             PASS=$((PASS + 1))
@@ -5625,7 +5641,7 @@ if [ -n "$QEMU_A64" ] && [ "$ARCH" = "x86_64" ]; then
         if $KRC --arch=arm64 /tmp/krc_a64_$$.kr -o /tmp/krc_a64_$$ > /dev/null 2>&1; then
             chmod +x /tmp/krc_a64_$$
             local got=0
-            $QEMU_A64 /tmp/krc_a64_$$ > /dev/null 2>&1 && got=0 || got=$?
+            timeout -k 5 "$RUN_TEST_TIMEOUT" $QEMU_A64 /tmp/krc_a64_$$ > /dev/null 2>&1 && got=0 || got=$?
             if [ "$got" = "$expected" ]; then
                 PASS=$((PASS + 1))
             else
@@ -6054,9 +6070,10 @@ run_test "vstore_narrow_no_clobber" 'fn main() {
 # barrier would keep them green while dropping the ordering guarantee MMIO
 # depends on. Pin the emitted words for all eight forms.
 #
-# Asserts the hex column, NOT a mnemonic -- main.kr has no STLR/LDAR decoder at
-# any width, so these listing lines have a blank mnemonic column and a grep for
-# "stlrb" would silently never fire.
+# Asserts the hex column, NOT a mnemonic. main.kr's STLR/LDAR decoder used to
+# miss every width (a blank mnemonic column, so a grep for "stlrb" silently
+# never fired); the text is now pinned separately by
+# arm64_asm_listing_exclusive_forms, and this row pins the words.
 #
 # Five hex digits only: word = base | (Rn << 5) | Rt, so bits 11:8 are
 # 0xC | ((Rn >> 3) & 3) and the 6th digit varies with the address register.
@@ -6112,6 +6129,2016 @@ else
     FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_venc_$$.kr /tmp/krc_venc_out_$$ "$VENC_LISTING"
+
+# The arm64 --emit=asm decoder matched the exclusive/acquire-release class
+# with mask 0x3FE00000, which includes o2 (bit 23): its ldar/stlr arms could
+# never match, so every LDAR/STLR printed with a blank mnemonic, LDAXR printed
+# as ldxr, STLXR as stxr without its status register, and no b/h size suffix
+# ever printed. Two rows. The first feeds every single-register form at every
+# size (b/h/w/x) through raw asm words and compares the listing text with
+# llvm-mc's disassembly of the same words (LDXP 0xC87F0C20 is a pair form the
+# decoder does not claim, so it stays blank). The second pins what the backend
+# itself emits: the volatile B/H/W/X stores and loads and an atomic_add's
+# LDAXR/STLXR. Parent compiler: both red. Listing text only; no binary changes.
+AXF_WORDS="085F7C20 485F7C20 885F7C20 C85F7C20 085FFC20 485FFC20 885FFC20 C85FFC20 08027C20 48027C20 88027C20 C8027C20 0802FC20 4802FC20 8802FC20 C802FC20 08DFFC20 48DFFC20 88DFFC20 C8DFFC20 089FFC20 489FFC20 889FFC20 C89FFC20 08DF7C20 089F7C20 885FFFE0 C89FFC3F C87F0C20"
+AXF_WANT="ldxrb w0, [x1]|ldxrh w0, [x1]|ldxr w0, [x1]|ldxr x0, [x1]|ldaxrb w0, [x1]|ldaxrh w0, [x1]|ldaxr w0, [x1]|ldaxr x0, [x1]|stxrb w2, w0, [x1]|stxrh w2, w0, [x1]|stxr w2, w0, [x1]|stxr w2, x0, [x1]|stlxrb w2, w0, [x1]|stlxrh w2, w0, [x1]|stlxr w2, w0, [x1]|stlxr w2, x0, [x1]|ldarb w0, [x1]|ldarh w0, [x1]|ldar w0, [x1]|ldar x0, [x1]|stlrb w0, [x1]|stlrh w0, [x1]|stlr w0, [x1]|stlr x0, [x1]|ldlarb w0, [x1]|stllrb w0, [x1]|ldaxr w0, [sp]|stlr xzr, [x1]||"
+{
+    echo 'fn main() {'
+    echo '    asm {'
+    for AXF_W in $AXF_WORDS; do echo "        \"0x$AXF_W\""; done
+    echo '    }'
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_axf_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_axf_$$.s
+AXF_GOT="(listing not produced)"
+if $KRC --arch=arm64 --emit=asm /tmp/krc_axf_$$.kr -o /tmp/krc_axf_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_axf_$$.s ]; then
+    AXF_GOT=""
+    for AXF_W in $AXF_WORDS; do
+        AXF_LW=$(echo "$AXF_W" | tr 'A-F' 'a-f')
+        AXF_T=$(grep -aE "^  [0-9a-f]{8}: $AXF_LW  " /tmp/krc_axf_$$.s | head -1 | sed -E "s/^  [0-9a-f]{8}: $AXF_LW  //")
+        AXF_GOT="$AXF_GOT$AXF_T|"
+    done
+fi
+if [ "$AXF_GOT" = "$AXF_WANT" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: arm64_asm_listing_exclusive_forms"
+    echo "    want: $AXF_WANT"
+    echo "    got:  $AXF_GOT"
+    FAIL=$((FAIL + 1))
+fi
+AXF_SRC='fn main() {
+    u64 p = alloc(64)
+    vstore8(p, 1)
+    vstore16(p, 2)
+    vstore32(p, 3)
+    vstore64(p, 4)
+    u64 a = vload8(p)
+    u64 b = vload16(p)
+    u64 c = vload32(p)
+    u64 d = vload64(p)
+    u64 e = atomic_add(p, 1)
+    exit(a + b + c + d + e)
+}'
+AXF_WANT2="stlrb w stlrh w stlr w stlr x ldarb w ldarh w ldar w ldar x ldaxr x stlxr w x "
+printf '%s\n' "$AXF_SRC" > /tmp/krc_axf_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_axf_$$.s
+AXF_GOT2="(listing not produced)"
+if $KRC --arch=arm64 --emit=asm /tmp/krc_axf_$$.kr -o /tmp/krc_axf_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_axf_$$.s ]; then
+    AXF_GOT2=$(grep -aoE '  (ld|st)[a-z]*(ar|lr|xr)[bh]? [wx][0-9]+(, [wx][0-9]+)?, \[' /tmp/krc_axf_$$.s \
+        | sed -E 's/^  //; s/[0-9]+//g; s/, \[$//; s/,//g' | tr '\n' ' ')
+fi
+if [ "$AXF_GOT2" = "$AXF_WANT2" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: arm64_asm_listing_volatile_atomic_mnemonics"
+    echo "    want: $AXF_WANT2"
+    echo "    got:  $AXF_GOT2"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_axf_$$.kr /tmp/krc_axf_$$.s
+
+# The x86_64 --emit=asm decoder had no arm for the three-operand imul,
+# REX.W 69 /r id or REX.W 6B /r ib, which IR_MUL_IMM emits under 48/49/4C/4D.
+# The REX.W path dumped three bytes and then decoded the immediate as code:
+# `x * 1000` printed `e8 03 00 00 ..  call 0x48000003`. Two rows. The first
+# sends both forms through raw asm bytes -- REX.R and REX.B registers, a
+# negative imm8, [rbp+d8], [rsp] and [r12+d8] operands -- and compares the
+# listing text with what objdump -M intel decodes for the same bytes (the
+# immediate printed as 32 bits, an imm8 sign-extended). The second pins what
+# the backend emits for `x * 1000 + x * 3`. Parent compiler: both red.
+# Listing text only; no binary changes.
+XIM_SEQS="48_69_C0_E8_03_00_00 48_6B_C9_03 4C_69_C0_40_42_0F_00 49_6B_C1_F8 4D_69_D3_00_CA_9A_3B 48_69_45_08_E8_03_00_00 48_6B_04_24_05 4D_6B_4C_24_10_07 4C_6B_7D_F0_81"
+XIM_WANT="imul rax, rax, 0x000003e8|imul rcx, rcx, 0x00000003|imul r8, rax, 0x000f4240|imul rax, r9, 0xfffffff8|imul r10, r11, 0x3b9aca00|imul rax, [rbp+0x08], 0x000003e8|imul rax, [rsp], 0x00000005|imul r9, [r12+0x10], 0x00000007|imul r15, [rbp+0xf0], 0xffffff81|"
+{
+    echo 'fn main() {'
+    for XIM_S in $XIM_SEQS; do echo "    asm(\"0x${XIM_S//_/ 0x}\")"; done
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_xim_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_xim_$$.s
+XIM_GOT="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_xim_$$.kr -o /tmp/krc_xim_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_xim_$$.s ]; then
+    XIM_GOT=""
+    for XIM_S in $XIM_SEQS; do
+        XIM_B=$(echo "$XIM_S" | tr 'A-F_' 'a-f ')
+        XIM_T=$(grep -aE "^  [0-9a-f]{8}: $XIM_B  " /tmp/krc_xim_$$.s | head -1 | sed -E "s/^  [0-9a-f]{8}: $XIM_B  //")
+        XIM_GOT="$XIM_GOT$XIM_T|"
+    done
+fi
+if [ "$XIM_GOT" = "$XIM_WANT" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_imul_imm_forms"
+    echo "    want: $XIM_WANT"
+    echo "    got:  $XIM_GOT"
+    FAIL=$((FAIL + 1))
+fi
+printf 'fn scale(u64 x) -> u64 {\n    return x * 1000 + x * 3\n}\nfn main() {\n    exit(scale(7) & 255)\n}\n' > /tmp/krc_xim_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_xim_$$.s
+XIM_GOT2="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_xim_$$.kr -o /tmp/krc_xim_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_xim_$$.s ]; then
+    XIM_GOT2=$(sed -n '/^scale:/,/^main:/p' /tmp/krc_xim_$$.s | grep -aoE '  (imul [a-z0-9]+, [a-z0-9]+, 0x[0-9a-f]{8}|call .*)$' | sed 's/^  //' | sed -E 's/imul [a-z0-9]+, [a-z0-9]+,/imul/' | tr '\n' '|')
+fi
+if [ "$XIM_GOT2" = "imul 0x000003e8|imul 0x00000003|" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_imul_backend (got '$XIM_GOT2', want two imul lines and no call)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_xim_$$.kr /tmp/krc_xim_$$.s
+
+# write_x86_mem dropped the SIB index register (and REX.X, which makes it
+# r8..r15), and x86_modrm_extra counted no disp32 for a SIB with mod=00 and
+# base=101 (no base register), so the listing lost four bytes and decoded the
+# displacement as code. Raw asm bytes go through every caller of the two
+# helpers (imul 69/6B, lea, the REX.WR mov, add, xchg, imul 0F AF), and each
+# line is compared with what objdump -M intel decodes for the same bytes: an
+# index with and without REX.X, index 100 with REX.X (r12), no base with and
+# without an index, and REX.B on a no-base SIB (still no base). The listing
+# prints scale 1 as `*1` as objdump does, a disp8 as 2 unsigned hex digits and
+# a disp32 as 8. Parent compiler: red. Listing text only; no binary changes.
+# Round 5: the REX.W 89/8B arm decoded the SIB by hand (base only, and no
+# disp32 for a no-base SIB), so `48 8b 04 c8` listed as `mov rax, [rax]`; the
+# REX.W 31 arm read a memory ModR/M as two registers. Both now go through the
+# helpers, and the cases below cover them. Prefixes 0x64/0x65 print `fs:`/`gs:`
+# and 0x67 makes the address registers 32-bit (eax.., r12d, eip); before, each
+# printed as a raw byte and the rest decoded unprefixed. Each expected line
+# is objdump -M intel's, in the listing's spelling (fs:0x11223344 is
+# fs:[0x11223344]).
+SIB_SEQS="4F_69_9C_A2_94_23_55_51_82_56_8B_96 4D_69_04_EF_A0_CC_20_20 4B_6B_34_C5_90_09_50_66_A7 49_69_24_ED_BE_69_00_FF_43_5B_C3_01 4F_6B_1C_A5_B1_2E_02_6D_A3 48_69_34_25_18_D9_BB_4A_0A_17_2C_80 48_8D_44_88_10 48_8D_04_8D_00_01_00_00 4C_8B_04_C8 48_01_04_24 48_87_0C_5D_08_00_00_00 48_0F_AF_04_25_44_33_22_11 48_8B_04_C8 48_89_0C_3D_31_20_AB_F5 48_8B_04_4D_3C_90_EC_18 48_89_54_FE_0C 48_8B_84_45_92_46_57_98 48_31_04_24 48_31_8C_88_00_01_00_00 64_48_8B_04_25_44_33_22_11 65_67_48_89_44_24_08 67_4C_8B_44_8D_10 67_48_8B_05_10_00_00_00 65_48_69_04_25_00_01_00_00_10_00_00_00 67_4E_6B_04_A5_10_00_00_00_05"
+SIB_WANT="imul r11, [r10+r12*4+0x51552394], 0x968b5682|imul r8, [r15+rbp*8], 0x2020cca0|imul rsi, [r8*8+0x66500990], 0xffffffa7|imul rsp, [rbp*8+0xff0069be], 0x01c35b43|imul r11, [r12*4+0x6d022eb1], 0xffffffa3|imul rsi, [0x4abbd918], 0x802c170a|lea rax, [rax+rcx*4+0x10]|lea rax, [rcx*4+0x00000100]|mov r8, [rax+rcx*8]|add [rsp], rax|xchg rcx, [rbx*2+0x00000008]|imul rax, [0x11223344]|mov rax, [rax+rcx*8]|mov [rdi*1+0xf5ab2031], rcx|mov rax, [rcx*2+0x18ec903c]|mov [rsi+rdi*8+0x0c], rdx|mov rax, [rbp+rax*2+0x98574692]|xor [rsp], rax|xor [rax+rcx*4+0x00000100], rcx|mov rax, fs:[0x11223344]|mov gs:[esp+0x08], rax|mov r8, [ebp+ecx*4+0x10]|mov rax, [eip+0x00000010]|imul rax, gs:[0x00000100], 0x00000010|imul r8, [r12d*4+0x00000010], 0x00000005|"
+{
+    echo 'fn main() {'
+    for SIB_S in $SIB_SEQS; do echo "    asm(\"0x${SIB_S//_/ 0x}\")"; done
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_sib_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_sib_$$.s
+SIB_GOT="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_sib_$$.kr -o /tmp/krc_sib_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_sib_$$.s ]; then
+    SIB_GOT=""
+    for SIB_S in $SIB_SEQS; do
+        SIB_B=$(echo "$SIB_S" | tr 'A-F_' 'a-f ')
+        SIB_T=$(grep -aE "^  [0-9a-f]{8}: $SIB_B  " /tmp/krc_sib_$$.s | head -1 | sed -E "s/^  [0-9a-f]{8}: $SIB_B  //")
+        SIB_GOT="$SIB_GOT$SIB_T|"
+    done
+fi
+if [ "$SIB_GOT" = "$SIB_WANT" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_sib_operands"
+    echo "    want: $SIB_WANT"
+    echo "    got:  $SIB_GOT"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_sib_$$.kr /tmp/krc_sib_$$.s
+
+# The arms that dump a REX-prefixed instruction raw used fixed byte counts
+# (2 for most REX bytes, 3 for 49 89/8B, 7 for 48 C7 / 81, 4 for 48 83), so a
+# ModR/M naming memory left SIB/disp/imm bytes to be decoded as the next
+# instructions. x86_insn_len counts REX + opcode + ModR/M + SIB/disp + imm
+# for the ModR/M opcodes the listing knows. Each case is followed by a nop:
+# the case must be one raw line holding exactly its bytes, and the nop must
+# start the next line. Parent compiler: every case splits. Listing text only.
+RAWL_SEQS="4D_89_44_24_08 48_C7_04_24_01_00_00_00 49_81_44_24_08_01_00_00_00 4A_83_2C_95_CB_CD_58_2D_77 41_8B_84_24_00_01_00_00 4C_01_04_24"
+{
+    echo 'fn main() {'
+    for RAWL_S in $RAWL_SEQS; do echo "    asm(\"0x${RAWL_S//_/ 0x}\")"; echo '    asm("0x90")'; done
+    echo '    exit(0)'
+    echo '}'
+} > /tmp/krc_rawl_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_rawl_$$.s
+RAWL_BAD="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm /tmp/krc_rawl_$$.kr -o /tmp/krc_rawl_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_rawl_$$.s ]; then
+    RAWL_BAD=""
+    for RAWL_S in $RAWL_SEQS; do
+        RAWL_B=$(echo "$RAWL_S" | tr 'A-F_' 'a-f ')
+        if ! grep -aA1 -E "^  [0-9a-f]{8}: $RAWL_B ?$" /tmp/krc_rawl_$$.s | grep -qaE '^  [0-9a-f]{8}: 90 +nop$'; then
+            RAWL_BAD="$RAWL_BAD $RAWL_S"
+        fi
+    done
+fi
+if [ -z "$RAWL_BAD" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_raw_lengths (not one whole raw line followed by the nop:$RAWL_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_rawl_$$.kr /tmp/krc_rawl_$$.s
+
+# x86_insn_len sizes every raw line (round 6). A 0x66 prefix makes the
+# immediate of 69/81/C7/F7 /0 and B8-BF two bytes, not four, unless a REX.W
+# follows it (REX.W overrides 66); the listing printed the 66 on a line of its
+# own and sized the rest as if it were absent, so the line after it ran two
+# bytes into the next instruction. A line that starts with prefixes now holds
+# the whole instruction -- since review round 7 every prefix does (a 66
+# before REX.W, F3 26 45 0F B7, F2 0F 10 used to stay lines of their own). A
+# LOCK line holds its whole instruction too. Each case lists its expected
+# lines (`|` between lines) and is followed by a nop that must start the
+# next line; lines are compared by their bytes (a mnemonic after them is
+# ignored). Parent compiler: red on every case but 66 48 C7 (the 66 already
+# stood alone and REX.W made the rest the right length) and 48 3D (decoded
+# by its own cmp arm). Listing text only; no binary changes.
+XL_ROWS="x86_asm_listing_prefix_lengths x86_asm_listing_opcode_lengths"
+for XL_ROW in $XL_ROWS; do
+    case $XL_ROW in
+        x86_asm_listing_prefix_lengths)
+            XL_SEQS="66_45_C7_00_34_12 66_41_81_C0_34_12 66_45_69_C0_34_12 66_41_F7_C0_34_12 66_C7_04_24_34_12 66_81_44_24_08_34_12 66_69_04_24_34_12 3E_66_45_63_4E_8D 66_64_44_3B_52_47 66_89_04_24 66_41_B8_34_12 66_48_C7_04_24_78_56_34_12 F3_26_45_0F_B7_F0 F0_48_0F_C1_04_24 F0_66_41_81_00_34_12 F0_66_45_0F_B1_08" ;;
+        # The ModR/M opcodes x86_insn_len added (63 movsxd, 85 test, D3/D1/C1/C0
+        # shifts, 39/3B cmp, 0F B6/B7 movzx, F7/F6 with and without an
+        # immediate by /reg, FF/FE, C6/80 imm8, 84/88/8A/8F, cmovcc, setcc, the
+        # 0F 1F nop, SSE under F2 and 66 0F 3A, 0F 38) and the immediate-only
+        # forms (accumulator 05/3D/A9, B8-BF with imm32 and REX.W imm64, 68, 6A).
+        x86_asm_listing_opcode_lengths)
+            XL_SEQS="48_63_04_24 48_85_04_24 48_D3_24_24 48_39_44_24_08 48_3B_04_24 48_0F_B6_04_24 48_0F_B7_44_24_08 48_F7_04_24_78_56_34_12 48_F7_5C_24_08 48_FF_04_24 48_C1_24_24_03 41_C0_00_03 41_C6_00_07 41_80_00_07 48_84_04_24 41_88_00 41_8A_00 41_8F_00 48_D1_24_24 41_FE_00 41_F6_00_07 48_0F_44_04_24 41_0F_94_00 0F_1F_44_00_00 0F_B6_04_24 85_04_24 F2_0F_10_04_24 66_0F_3A_0F_C1_08 0F_38_F0_04_24 48_05_78_56_34_12 48_3D_00_F0_FF_FF 48_A9_78_56_34_12 48_B8_88_77_66_55_44_33_22_11 BB_78_56_34_12 41_BB_78_56_34_12 68_78_56_34_12 6A_07" ;;
+    esac
+    {
+        echo 'fn main() {'
+        for XL_S in $XL_SEQS; do echo "    asm(\"0x$(echo "$XL_S" | sed 's/[_|]/ 0x/g')\")"; echo '    asm("0x90")'; done
+        echo '    exit(0)'
+        echo '}'
+    } > /tmp/krc_xl_$$.kr
+    TOTAL=$((TOTAL + 1))
+    rm -f /tmp/krc_xl_$$.s
+    XL_BAD="(listing not produced)"
+    if $KRC --arch=x86_64 --emit=asm /tmp/krc_xl_$$.kr -o /tmp/krc_xl_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_xl_$$.s ]; then
+        XL_BAD=""
+        # every line's bytes, `/` between lines
+        XL_ALL="/$(sed -nE 's/^  [0-9a-f]{8}: ([0-9a-f]{2}( [0-9a-f]{2})*).*/\1/p' /tmp/krc_xl_$$.s | tr '\n' '/')"
+        for XL_S in $XL_SEQS; do
+            XL_W="/$(echo "$XL_S" | tr 'A-F_|' 'a-f /')/90/"
+            case "$XL_ALL" in *"$XL_W"*) ;; *) XL_BAD="$XL_BAD $XL_S" ;; esac
+        done
+    fi
+    if [ -z "$XL_BAD" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $XL_ROW (not the expected lines followed by the nop:$XL_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_xl_$$.kr /tmp/krc_xl_$$.s
+
+# Every x86_64 instruction stays on a line boundary (review round 6, finding
+# 5). The listing mis-sized cqo/cdqe, VEX/EVEX (fabricated mnemonics that
+# swallowed the next instruction), moffs A0-A3, F3 0F B8 popcnt, int imm8,
+# iretq, 0F 01, port I/O, REX2 (D5) and many prefixed forms. x86_insn_len now
+# sizes every encoding the way objdump -mi386:x86-64 does, and whatever the
+# mnemonic arms do not decode is dumped at exactly that length (VEX/EVEX with
+# a "(vex)"/"(evex)" tag). XL2_CASES is one instruction per line, each
+# checked offline against objdump as exactly one instruction of that many
+# bytes; every one is followed by a nop that must be a "nop" row at the
+# summed offset, and every case must BE a row: its legacy prefixes on the
+# same row as its instruction (`f3 aa` rep stosb, `f2 0f 5e ca` divsd -- the
+# compiler's own listing split 265 instructions that way, review round 7).
+# Also cases objdump calls (bad), each followed by the nop that must stay its
+# own row: `c6`/`c7` with a ModR/M reg field other than /0 (the nop's 90 is
+# /2), an EVEX with map 0, an 8F that is neither pop nor XOP; and the APX
+# map-4 EVEX with an imm8 (62 9c 95 1c 2c 2c 43 40, 8 bytes) and a VEX
+# gather with a SIB (c4 62 ed 92 14 20).
+# The two return forms, iretq (48 cf) and ret imm16 (c2 08 00), sit in a
+# @naked function: an assembly return in a non-@naked function is refused
+# once legacy-naked is merged, and the listing check is the same there.
+# Also pinned: the listing header is a whole line, an mfence row has no stray
+# byte after it, and a LOCK line ends "lock ..." (the fallback wrote 20 bytes
+# of a 21-byte string, "lock .."; xl2_lockend reached it on the parent).
+# Parent compiler: 43 of the 109 sentinels missed. (KernRift's header, mfence
+# and LOCK writes were already the right length; MLRift's were not. Pinned
+# here too, so the two listings cannot drift.)
+XL2_CASES='0xC4 0xE2 0x7D 0x19 0x09
+0xC5 0xFD 0x10 0x04 0xC7
+0xC5 0xFD 0x11 0x07
+0xC4 0xE2 0xF5 0xBC 0xC0
+0xC5 0xF8 0x77
+0x62 0xF1 0x7C 0x48 0x10 0x07
+0x62 0xF2 0x7D 0x48 0xB8 0xC1
+0xC5 0xFA 0x10 0x44 0x24 0x08
+0xC4 0xE3 0x7D 0x19 0xC1 0x01
+0xF3 0x48 0x0F 0xB8 0xC1
+0xF3 0x0F 0xB8 0xC1
+0x0F 0x0B
+0x0F 0x05
+0x0F 0xA2
+0x0F 0x31
+0x0F 0x01 0xF9
+0x0F 0x30
+0x0F 0x32
+0xFA
+0xFB
+0xF4
+0xCC
+0xCD 0x80
+0x0F 0x20 0xD8
+0x0F 0x22 0xD8
+0x0F 0x01 0x10
+0x0F 0x01 0x18
+0x0F 0x00 0xD8
+0xE4 0x60
+0xE6 0x80
+0xEC
+0xEE
+0x66 0xED
+0x66 0xEF
+0x0F 0x09
+0x0F 0xAE 0xF0
+0x0F 0xAE 0xE8
+0x0F 0xAE 0xF8
+0x0F 0xAE 0x38
+0x48 0x0F 0xC7 0xF0
+0x0F 0xC7 0x0F
+0xF3 0x48 0xAB
+0xF3 0xA4
+0x9C
+0x9D
+0x48 0x99
+0x48 0x98
+0x87 0xC8
+0x48 0xA1 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
+0xA0 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
+0x48 0xA3 0x01 0x02 0x03 0x04 0x05 0x06 0x07 0x08
+0xC8 0x10 0x00 0x00
+0x6A 0x05
+0x68 0x01 0x02 0x03 0x04
+0x66 0x68 0x01 0x02
+0x0F 0x18 0x08
+0x0F 0x1F 0x44 0x00 0x00
+0x66 0x0F 0x1F 0x44 0x00 0x00
+0x0F 0x0D 0x08
+0x48 0x0F 0xBA 0xE0 0x05
+0x0F 0xA4 0xC1 0x03
+0xF0 0x48 0x0F 0xB1 0x0F
+0xF0 0x48 0x0F 0xC1 0x07
+0xF0 0x48 0xFF 0x07
+0xF0 0x83 0x07 0x01
+0x66 0x0F 0x3A 0x0F 0xC1 0x08
+0x66 0x0F 0x38 0x00 0xC1
+0xF2 0x0F 0x2C 0xC0
+0xF2 0x48 0x0F 0x2C 0xC0
+0x66 0x48 0x0F 0x6E 0xC0
+0xF3 0x0F 0x7E 0xC1
+0x66 0x0F 0xD6 0x07
+0x0F 0x28 0xC1
+0x66 0x0F 0xEF 0xC0
+0xF3 0x0F 0x1E 0xFA
+0xD9 0xE8
+0xDD 0x07
+0xDF 0x3F
+0x48 0x8C 0xD8
+0x8E 0xD8
+0x48 0x0F 0xB7 0x07
+0x48 0x63 0xC1
+0x66 0x3E 0x4C 0xD3 0xB2 0x14 0x2E 0x82 0x33
+0x4A 0x69 0x90 0xE2 0xBA 0x13 0x0E 0xA1 0xD5 0x53 0x14
+0x2E 0x4C 0x63 0x08
+0x46 0x01 0x5D 0x88
+0xD5 0xAC 0x6E 0x97 0x10 0x03 0xBF 0x8B
+0xD5 0xF3 0x47 0x29
+0xF2 0xD5 0x9A 0xBB 0xD1
+0x66 0xF3 0xF0 0xD5 0x44 0x05 0x04 0xFE
+0xF3 0x65 0x02 0x99 0x78 0x1B 0xA5 0x21
+0x45 0x0F 0xC0 0xAD 0x4F 0xB5 0xE0 0xE7
+0xC4 0x41 0xED 0xED 0x21
+0xF3 0x4D 0xC2 0x7C 0xC4
+0x0F 0x84 0xEC 0x43 0x9D 0x04
+0x36 0x0F 0xC8
+0x67 0xA0 0x01 0x02 0x03 0x04
+0xF0 0x0F 0x3A 0xCC 0x6B 0xD7 0xAA
+0xE5 0x40
+0xE7 0x40
+0x66 0xE5 0x40
+0xED
+0xEF
+0x48 0x99
+0x99
+0x48 0x98
+0x98
+0xF3 0xAA
+0xF2 0x0F 0x5E 0xCA
+0x66 0x48 0x0F 0x7E 0xD3
+0xF2 0x49 0x0F 0x2A 0xD6
+0xF0 0x48 0x0F 0xB1 0x0F
+0x2E 0x3E 0x48 0x8B 0x05 0x00 0x00 0x00 0x00
+0x62 0x9C 0x95 0x1C 0x2C 0x2C 0x43 0x40
+0xC4 0x62 0xED 0x92 0x14 0x20
+0xC6
+0xC7
+0x62
+0x8F'
+TOTAL=$((TOTAL + 1))
+XL2_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_xl2.XXXXXX")
+{
+    printf 'fn main() {\n    asm("0x0F 0x0B")\n'
+    printf '%s\n' "$XL2_CASES" | while IFS= read -r XL2_C; do printf '    asm("%s")\n    asm("0x90")\n' "$XL2_C"; done
+    printf '    exit(0)\n}\n@naked fn xl2_lockend() {\n    asm("0xC3")\n    asm("0xF0")\n}\n'
+    printf '@naked fn xl2_rets() {\n    asm("0x0F 0x0B")\n    asm("0x48 0xCF")\n    asm("0x90")\n    asm("0xC2 0x08 0x00")\n    asm("0x90")\n}\n'
+} > "$XL2_T/x.kr"
+XL2_BAD="(listing not produced)"
+if $KRC --arch=x86_64 --emit=asm "$XL2_T/x.kr" -o "$XL2_T/x.s" > /dev/null 2>&1 && [ -f "$XL2_T/x.s" ]; then
+    XL2_LENS=$(printf '%s\n' "$XL2_CASES" | awk '{print NF}' | tr '\n' ' ')
+    XL2_BAD=$(LC_ALL=C awk -v lens="$XL2_LENS" '
+        function hx(s,   i, v) { v = 0; for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1; return v }
+        /^main:/ { inm = 1; next }
+        inm && /^[A-Za-z_][A-Za-z0-9_.$]*:[ \t]*$/ { inm = 0 }
+        inm && /^  [0-9a-f]{8}: / {
+            a = hx(substr($1, 1, 8)); by = ""; n = 0; t = ""
+            for (i = 2; i <= NF; i++) { if (n == i - 2 && $i ~ /^[0-9a-f][0-9a-f]$/) { by = by (n ? " " : "") $i; n++ } else { t = t (t == "" ? "" : " ") $i } }
+            rb[a] = by; rt[a] = t; rn[a] = n
+            if (base == "" && by == "0f 0b") base = a + 2
+        }
+        END {
+            if (base == "") { print " no-ud2-marker"; exit }
+            split(lens, L, " "); at = base; bad = ""
+            for (k = 1; k in L; k++) {
+                if (!(at in rb)) {
+                    bad = bad " case" k ":no-row"
+                }
+                else if (rn[at] != L[k]) bad = bad " case" k ":row-of-" rn[at] "-bytes"
+                at += L[k]
+                if (!(at in rb) || rb[at] != "90" || rt[at] != "nop") bad = bad " case" k ":sentinel"
+                at += 1
+            }
+            print bad
+        }' "$XL2_T/x.s")
+    # the two return forms in xl2_rets: each one whole row, then a nop row
+    XL2_R=$(sed -n '/^xl2_rets:/,$p' "$XL2_T/x.s" | sed -nE 's/^  [0-9a-f]{8}: //p' | sed -E 's/ +$//; s/ {2,}/|/' | tr '\n' '/')
+    case "$XL2_R" in "0f 0b/48 cf/90|nop/c2 08 00/90|nop/"*) ;; *) XL2_BAD="$XL2_BAD xl2_rets:[$(printf '%s' "$XL2_R" | cut -c1-60)]" ;; esac
+    grep -qx '; KernRift assembly listing' "$XL2_T/x.s" || XL2_BAD="$XL2_BAD header"
+    [ "$(tr -d '\000' < "$XL2_T/x.s" | wc -c)" = "$(wc -c < "$XL2_T/x.s")" ] || XL2_BAD="$XL2_BAD NUL-byte"
+    # a LOCK at the very end of a function: its line must end "lock ...", never "lock .."
+    sed -n '/^xl2_lockend:/,$p' "$XL2_T/x.s" | grep -q ' lock \.\.\.$' || XL2_BAD="$XL2_BAD lock-line"
+    grep -q 'lock \.\.$' "$XL2_T/x.s" && XL2_BAD="$XL2_BAD lock-fallback-short"
+    grep -q ': 0f ae f0 *mfence$' "$XL2_T/x.s" || XL2_BAD="$XL2_BAD mfence-row"
+fi
+if [ -z "$XL2_BAD" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: x86_asm_listing_sync_vs_objdump_lengths ($(echo "$XL2_BAD" | cut -c1-300))"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$XL2_T"
+
+# Makefile's build/krc.kr is SRCS concatenated with main.kr's `import` lines
+# stripped; `krc src/main.kr` follows those imports instead, and the Makefile
+# promises both build the same compiler. A source file added to SRCS but not
+# to main.kr's imports (x86_len_tables.kr, review round 8) breaks only the
+# second: "undefined function 'x86t_oppat_c'".
+TOTAL=$((TOTAL + 1))
+SIM_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_sim.XXXXXX")
+# Run from src/ so main.kr's relative imports resolve; $KRC is absolute (the
+# top of this file makes it so), so the cd cannot lose the compiler.
+SIM_A=$(cd "$DIR/../src" && $KRC main.kr -o "$SIM_T/imp" 2>&1); SIM_AR=$?
+SIM_B=$($KRC "$DIR/../build/krc.kr" -o "$SIM_T/cat" 2>&1); SIM_BR=$?
+sim_state() { # <rc> <output> <artifact>
+    if [ "$1" != "0" ]; then printf 'exit %s, %s' "$1" "$(printf '%s\n' "$2" | grep -m1 . | cut -c1-160)"
+    elif [ ! -s "$3" ]; then printf 'exit 0 but no artifact'
+    else printf 'built %s B' "$(stat -c %s "$3")"; fi
+}
+if [ "$SIM_AR" = "0" ] && [ "$SIM_BR" = "0" ] && [ -s "$SIM_T/imp" ] && [ -s "$SIM_T/cat" ] && cmp -s "$SIM_T/imp" "$SIM_T/cat"; then
+    PASS=$((PASS + 1)); echo "  self_import_mode_matches_concat: PASS (krc src/main.kr == krc build/krc.kr, $(stat -c %s "$SIM_T/imp") B)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: self_import_mode_matches_concat (import mode: $(sim_state "$SIM_AR" "$SIM_A" "$SIM_T/imp"); concat: $(sim_state "$SIM_BR" "$SIM_B" "$SIM_T/cat"); both built and differ if neither says otherwise)"
+fi
+rm -rf "$SIM_T"
+
+# The compiler's own listing against objdump, row by row (review round 7's
+# lsync4): list the compiler itself, hand every function's bytes up to its
+# last `ret` row to objdump -D -b binary, and require every row to START at
+# an instruction boundary and to hold exactly that instruction's bytes. The
+# round-7 compiler failed 265 rows here (legacy prefixes on their own row).
+TOTAL=$((TOTAL + 1))
+if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    skip_row x86_asm_listing_self_vs_objdump "needs objdump and python3"
+else
+    XLS_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_xls.XXXXXX")
+    XLS_OUT="no listing"
+    if [ -f "$DIR/../build/krc.kr" ] && $KRC --arch=x86_64 --emit=asm "$DIR/../build/krc.kr" -o "$XLS_T/self.s" > /dev/null 2>&1; then
+        XLS_OUT=$(cd "$XLS_T" && timeout -k 5 600 python3 - "$XLS_T/self.s" <<'PYEOF'
+import sys, re, subprocess, os, tempfile
+L = open(sys.argv[1], errors="replace").read().split("\n")
+funcs = []; cur = None
+for ln in L:
+    if re.match(r"^[A-Za-z_][\w.$]*:\s*$", ln): cur = [ln[:-1], []]; funcs.append(cur); continue
+    m = re.match(r"^  ([0-9a-f]{8}): ((?:[0-9a-f]{2} )*[0-9a-f]{2})(?: +(\S.*?))?\s*$", ln)
+    if m and cur is not None: cur[1].append((int(m.group(1), 16), bytes.fromhex(m.group(2).replace(" ", ""))))
+off = mis = rows = fns = 0; ex = []
+for name, rs in funcs:
+    lr = [i for i, r in enumerate(rs) if r[1] == b"\xc3"]
+    if not lr: continue
+    rs = rs[:lr[-1] + 1]; base = rs[0][0]; fns += 1
+    fd, p = tempfile.mkstemp(dir="."); os.write(fd, b"".join(b for _, b in rs)); os.close(fd)
+    o = subprocess.run(["objdump", "-D", "-b", "binary", "-mi386:x86-64", "-w", p], capture_output=True, text=True).stdout; os.unlink(p)
+    st = sorted(int(m.group(1), 16) for m in re.finditer(r"(?m)^\s+([0-9a-f]+):\t", o))
+    nx = {st[i]: st[i + 1] for i in range(len(st) - 1)}; ss = set(st)
+    for a, b in rs:
+        rows += 1; r = a - base
+        if r not in ss: off += 1; ex.append("%s+%x %s" % (name, r, b.hex(" ")))
+        elif r in nx and nx[r] - r != len(b): mis += 1; ex.append("%s+%x %s" % (name, r, b.hex(" ")))
+print("%d %d %d %d %s" % (fns, rows, off, mis, "; ".join(ex[:4])))
+PYEOF
+)
+    fi
+    read -r XLS_F XLS_R XLS_O XLS_M XLS_E <<< "$XLS_OUT"
+    if [ -n "$XLS_M" ] && [ "$XLS_F" -gt 1000 ] 2>/dev/null && [ "$XLS_O" = 0 ] && [ "$XLS_M" = 0 ]; then
+        PASS=$((PASS + 1)); echo "  x86_asm_listing_self_vs_objdump: PASS ($XLS_F functions, $XLS_R rows, every row an objdump instruction)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: x86_asm_listing_self_vs_objdump (functions rows off-boundary len-mismatch: $XLS_OUT)"
+    fi
+    rm -rf "$XLS_T"
+fi
+
+# A barrier must stop CSE of a static load. isb/dcache_flush/icache_invalidate/
+# dsb/dmb (IR ops 126-130) were missing from ir_opt_cse_invalidates, so
+# `a = g; dmb(); b = g` emitted ONE load of g and the barrier ordered nothing:
+# a value another core or a device published behind the barrier was never
+# re-read. Observing that at run time needs a second agent writing g, so pin
+# the code instead: exactly two loads of g, on both IR backends that implement
+# the barriers (riscv32 and xtensa reject ops 126-130 loudly; their fences
+# exist only as inline asm, which already invalidates). The listing goes to
+# the -o path.
+for BAR in "isb()" "dsb()" "dmb()" "dcache_flush(0)" "icache_invalidate(0)"; do
+    for BARCH in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        printf 'static u64 g = 5\nfn main() {\n    u64 a = g\n    %s\n    u64 b = g\n    exit(a + b)\n}\n' "$BAR" > /tmp/krc_bcse_$$.kr
+        rm -f /tmp/krc_bcse_$$.s
+        BCSE_N="no listing"
+        if $KRC --arch=$BARCH --emit=asm /tmp/krc_bcse_$$.kr -o /tmp/krc_bcse_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_bcse_$$.s ]; then
+            if [ "$BARCH" = "x86_64" ]; then
+                BCSE_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_bcse_$$.s)
+            else
+                BCSE_N=$(grep -acE 'ldr x[0-9]+, \[x16' /tmp/krc_bcse_$$.s)
+            fi
+        fi
+        if [ "$BCSE_N" = "2" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: barrier_stops_static_cse $BARCH $BAR (static loads: $BCSE_N, want 2)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_bcse_$$.kr /tmp/krc_bcse_$$.s
+
+# fmt_uint writes through a caller-supplied pointer, but ir_opt_cse_invalidates
+# did not list it (IR op 74), so `a = g; fmt_uint(p, 9); b = g` with p aliasing
+# the static g CSE'd the second read into the first and returned the stale 7.
+# The program places g behind an 8-byte static array and proves that layout
+# (exit 99 if p does not alias g, so a layout change cannot pass vacuously),
+# then exits b - a + 50: 100 when the second read sees the '9' (57) fmt_uint
+# wrote, 50 when it was CSE'd. Parent compiler: 50 on x86_64 and arm64.
+# Without qemu-aarch64 the arm64 half is a SKIP, never a pass.
+FCSE_SRC='static u8[8] gbuf
+static u64 g = 7
+fn probe_layout() -> u64 {
+    u64 p = gbuf + 8
+    unsafe { *(p as u64) = 1234 }
+    return g
+}
+fn main() {
+    if probe_layout() != 1234 { exit(99) }
+    g = 7
+    u64 a = g
+    fmt_uint(gbuf + 8, 9)
+    u64 b = g
+    exit(b - a + 50)
+}'
+for FCSE_ARCH in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    FCSE_RUN=""
+    if [ "$FCSE_ARCH" = "arm64" ]; then
+        if [ -z "$QEMU_A64" ]; then
+            skip_row "fmt_uint_stops_static_cse arm64" "no qemu-aarch64"
+            continue
+        fi
+        FCSE_RUN="$QEMU_A64"
+    fi
+    printf '%s\n' "$FCSE_SRC" > /tmp/krc_fcse_$$.mlr
+    rm -f /tmp/krc_fcse_$$
+    FCSE_GOT="no binary"
+    if $KRC --arch=$FCSE_ARCH /tmp/krc_fcse_$$.mlr -o /tmp/krc_fcse_$$ > /dev/null 2>&1 && [ -f /tmp/krc_fcse_$$ ]; then
+        chmod +x /tmp/krc_fcse_$$
+        FCSE_GOT=0
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $FCSE_RUN /tmp/krc_fcse_$$ > /dev/null 2>&1 || FCSE_GOT=$?
+    fi
+    if [ "$FCSE_GOT" = "100" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: fmt_uint_stops_static_cse $FCSE_ARCH (exit $FCSE_GOT, want 100; 50 = stale g reused, 99 = layout probe failed)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_fcse_$$.mlr /tmp/krc_fcse_$$
+
+# memcpy, memset and a plain pointer store write memory too (IR ops 72, 76
+# and 31). This row runs the compiled program, so an exemption made anywhere
+# (in the predicates, at a call site, in a new pass) is caught by its effect;
+# cse_invalidate_set_pinned only reads the source. Without qemu-aarch64 the
+# arm64 half is a SKIP, never a pass. Same layout probe as fmt_uint_stops_static_cse: g sits
+# behind gbuf, and the program exits 99 if gbuf + 8 does not alias g. Each
+# program sets g = 7, reads a = g, writes the byte 9 into g through the alias,
+# reads b = g and exits b - a + 50: 52 when the second read sees the write,
+# 50 when it was CSE'd into the first. A wrapper at the CSE call site that
+# exempts 72/76/124/125 gives 50 for memcpy and memset; `op != 31 &&` in front
+# of the call gives 50 for the store. The parent compiler is correct (52).
+for WB_KIND in memset memcpy store; do
+    case $WB_KIND in
+        memset) WB_STMT='    memset(gbuf + 8, 9, 1)' ;;
+        memcpy) WB_STMT='    memcpy(gbuf + 8, sbuf, 1)' ;;
+        store)  WB_STMT='    u64 q = gbuf + 8
+    u8 nine = 9
+    unsafe { *(q as u8) = nine }' ;;
+    esac
+    for WB_ARCH in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        WB_RUN=""
+        if [ "$WB_ARCH" = "arm64" ]; then
+            if [ -z "$QEMU_A64" ]; then
+                skip_row "write_builtins_stop_static_cse $WB_KIND arm64" "no qemu-aarch64"
+                continue
+            fi
+            WB_RUN="$QEMU_A64"
+        fi
+        printf 'static u8[8] sbuf\nstatic u8[8] gbuf\nstatic u64 g = 7\nfn probe_layout() -> u64 {\n    u64 p = gbuf + 8\n    unsafe { *(p as u64) = 1234 }\n    return g\n}\nfn main() {\n    if probe_layout() != 1234 { exit(99) }\n    g = 7\n    memset(sbuf, 9, 1)\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$WB_STMT" > /tmp/krc_wbcse_$$.kr
+        rm -f /tmp/krc_wbcse_$$
+        WB_GOT="no binary"
+        if $KRC --arch=$WB_ARCH /tmp/krc_wbcse_$$.kr -o /tmp/krc_wbcse_$$ > /dev/null 2>&1 && [ -f /tmp/krc_wbcse_$$ ]; then
+            chmod +x /tmp/krc_wbcse_$$
+            WB_GOT=0
+            timeout -k 5 "$RUN_TEST_TIMEOUT" $WB_RUN /tmp/krc_wbcse_$$ > /dev/null 2>&1 || WB_GOT=$?
+        fi
+        if [ "$WB_GOT" = "52" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: write_builtins_stop_static_cse $WB_KIND $WB_ARCH (exit $WB_GOT, want 52; 50 = stale g reused, 99 = layout probe failed)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_wbcse_$$.kr /tmp/krc_wbcse_$$
+
+# get_module_path (IR_MODULE_PATH, 146; Windows only) writes the path through
+# its buffer, and was missing from ir_opt_cse_invalidates the same way: with
+# the buffer aliasing g, `a = g; get_module_path(p, 8); b = g` emitted ONE load
+# of g. It cannot run here, so pin the listing: two RIP-relative loads (the
+# IAT calls are `call [rip]`, not loads). Parent compiler: 1.
+printf 'static u8[8] gbuf\nstatic u64 g = 7\nfn main() {\n    u64 a = g\n    u64 n = get_module_path(gbuf + 8, 8)\n    u64 b = g\n    exit(a + b + n)\n}\n' > /tmp/krc_mpcse_$$.kr
+TOTAL=$((TOTAL + 1))
+rm -f /tmp/krc_mpcse_$$.s
+MPCSE_N="no listing"
+if $KRC --arch=x86_64 --target=windows --emit=asm /tmp/krc_mpcse_$$.kr -o /tmp/krc_mpcse_$$.s > /dev/null 2>&1 && [ -f /tmp/krc_mpcse_$$.s ]; then
+    MPCSE_N=$(grep -acE 'mov r[a-z0-9]+, \[rip' /tmp/krc_mpcse_$$.s)
+fi
+if [ "$MPCSE_N" = "2" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: module_path_stops_static_cse (static loads: $MPCSE_N, want 2)"
+    FAIL=$((FAIL + 1))
+fi
+rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
+
+# THE GUARD. cse_invalidate_set_pinned (below) reads the source of the two
+# predicates, their call sites and the pass list. Source text can always be
+# bypassed by an edit it does not read -- a new pass, a pre-pass in front of a
+# pinned loop, an accessor that hides an opcode -- so the pin is a tripwire
+# only. These rows are the guard, and they guard exactly what they run: each
+# compiles one small program per (op, shape, arch) below and RUNS it (or, for
+# ops a single-threaded run cannot observe, counts the loads in its listing).
+# A dropped op is caught only if it is dropped in a program shaped like one of
+# these. What is covered:
+#   ops     every op in the three tables below, each spelled the way the
+#           table spells it (call_ptr with and without arguments,
+#           vload8/16/32/64, a `volatile { *(p as T) -> v }`
+#           read and a device-field read, alloc, time_ns, ...);
+#   shapes  S: straight line, the op between two reads of a static g;
+#           L: the op inside a two-trip `while` that reads g at the top of
+#              each trip (a LICM that hoists the static load out of the loop,
+#              or a DCE/CSE that only acts inside loops, changes the result);
+#           B: S after 150 statements of padding in the same function (a
+#              pass that changes behaviour with function size: DCE's
+#              liveness, a cutoff on the instruction count);
+#   arches  x86_64, arm64 (qemu-aarch64), riscv32 (qemu-riscv32 -R
+#           0x20000000) for the run rows; x86_64 and arm64 for the listing
+#           rows; x86_64 --target=windows for get_module_path.
+# Not covered: an op in a program shape not listed (another nesting, a
+# different operand form, a different function size class), an arch not
+# listed (xtensa, freestanding images, the legacy backends), and an op a
+# table excludes for an arch (each exclusion is named where it is made).
+# The reviewer's mutants that these rows are known to catch are listed in
+# docs/IR_REFERENCE.md (CSE section); a mutant outside the covered space can
+# still pass.
+#
+# Layout probe: g sits behind the 8-byte gbuf, and every runs-program exits
+# 99 if gbuf + 8 does not alias g, so a layout change cannot pass vacuously.
+# Each program sets g = 7, runs the op with its result unused (so a DCE that
+# treats it as pure deletes it) and exits with g's change + 50: S and B read
+# a = g, run the op, read b = g and exit(b - a + 50); L adds g at the top of
+# each of its two trips and exits(sum - 14 + 50), the same value. 50 means
+# the op was CSE'd across, hoisted past or deleted; the expected code is the
+# one the op's write gives. stdin is /dev/zero. riscv32 has no 64-bit
+# integers, so its programs are the same text with u64 read as u32.
+#
+# One row per op class, per shape, per arch:
+#   call 50 (+ ARG 51)   setg(9)                         52
+#   call_ind 87          call_ptr(fn_addr("setg9"))      52
+#   call_ind_args 87     call_ptr(fn_addr("setg"), 9)    52
+#   static_store 78      g = 9                           52
+#   syscall 52           read(0, gbuf + 8, 1)            43 (reads a 0 byte)
+#   syscall_raw 85       syscall_raw(read, 0, gbuf + 8, 1, 0, 0, 0)  43
+#   atomic_store 90      atomic_store(gbuf + 8, 9)       52
+#   atomic_add 92        atomic_add(gbuf + 8, 2)         52
+#   atomic_cas 93        atomic_cas(gbuf + 8, 7, 9)      52
+#   atomic_sub 109       atomic_sub(gbuf + 8, 5)         45
+#   atomic_and 110       atomic_and(gbuf + 8, 3)         46
+#   atomic_or 111        atomic_or(gbuf + 8, 8)          58
+#   atomic_xor 112       atomic_xor(gbuf + 8, 14)        52
+#   vstore 94            vstore8/16/32/64(gbuf + 8, 9)   52, inline (CSE)
+#                        and inside a one-line helper (DCE: IR_VSTORE keeps
+#                        its width in `dest`, so in a large function DCE's
+#                        flow-insensitive liveness usually finds vreg 1/2/4/8
+#                        live and keeps a store it treats as pure)
+#   vptr_store 94        volatile { *(p as u64) = nine }  52
+#   asm 96               asm { mov [rax], cl } in(p -> rax, 9 -> rcx), and
+#                        strb w1, [x0] in(p -> x0, 9 -> x1) on arm64   52;
+#                        not on riscv32 (no asm bindings there), whose asm
+#                        is covered by the trap row below
+#   store_bis 148        put8(gbuf, 1, 9): *(base + i * 8) = v in a helper,
+#                        52. STORE_BIS on arm64 (fuse_lea_mem), a STORE
+#                        elsewhere. Only DCE can drop it: CSE runs before
+#                        fuse_lea_mem creates it. In a helper for the same
+#                        width-in-dest reason as vstore
+#   control_flow 40/43   a while loop (back-edge BR) and an early `return`
+#                        in a void fn, 52; a dropped BR or RET_VOID runs
+#                        `g = 5` instead
+#   memset 72, memcpy 76, store 31, fmt_uint 74 (fmt_uint writes '9', 100):
+#                        L and B only here; their S rows are
+#                        write_builtins_stop_static_cse and
+#                        fmt_uint_stops_static_cse above.
+# riscv32 has no atomics, no vstore64 and no asm bindings in this compiler
+# (each is a compile error there), so those rows are x86_64 and arm64 only.
+QEMU_RV32=""
+if command -v qemu-riscv32-static > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32-static"
+elif command -v qemu-riscv32 > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32"; fi
+OR_PAD=""
+for ((OR_PI = 1; OR_PI <= 150; OR_PI++)); do OR_PAD="$OR_PAD    acc = acc * 3 + $OR_PI
+"; done
+# or_main SHAPE PROLOGUE STATEMENT -> main() of an oracle program, on stdout.
+# The program text uses u64 throughout; riscv32 callers rewrite it to u32.
+or_main() {
+    printf 'fn main() {\n%s\n' "$2"
+    case $1 in
+        S) printf '    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n' "$3" ;;
+        B) printf '    u64 acc = one\n%s    if acc == 0 { exit(1) }\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n' "$OR_PAD" "$3" ;;
+        L) printf '    u64 ors = 0\n    u64 ork = 0\n    while ork < 2 {\n        ors = ors + g\n%s\n        ork = ork + 1\n    }\n    exit(ors - 14 + 50)\n' "$3" ;;
+    esac
+    printf '}\n'
+}
+# or_shape_name SHAPE -> "" for S, " loop" for L, " big" for B (row-name suffix)
+or_shape_name() {
+    case $1 in S) printf '' ;; L) printf ' loop' ;; B) printf ' big' ;; esac
+}
+# or_runner ARCH ROW -> sets OR_R to the runner prefix, or skips the row (and
+# returns 1) when the arch's qemu is missing. The row is already in TOTAL.
+or_runner() {
+    OR_R=""
+    case $1 in
+        arm64)
+            if [ -z "$QEMU_A64" ]; then skip_row "$2" "no qemu-aarch64"; return 1; fi
+            OR_R="$QEMU_A64" ;;
+        riscv32)
+            if [ -z "$QEMU_RV32" ]; then skip_row "$2" "no qemu-riscv32"; return 1; fi
+            OR_R="$QEMU_RV32 -R 0x20000000" ;;
+    esac
+    return 0
+}
+OR_HDR='static u8[8] sbuf
+static u8[8] gbuf
+static u64 g = 7
+static u64 one = 1
+static u64 zero = 0
+fn probe_layout() -> u64 {
+    u64 p = gbuf + 8
+    unsafe { *(p as u64) = 1234 }
+    return g
+}
+fn setg(u64 v) {
+    g = v
+    sbuf[1] = 1
+}
+fn setg9() {
+    g = 9
+    sbuf[1] = 1
+}
+fn vst8(u64 p) { vstore8(p, 9) }
+fn vst16(u64 p) { vstore16(p, 9) }
+fn vst32(u64 p) { vstore32(p, 9) }
+fn vst64(u64 p) { vstore64(p, 9) }
+fn put8(u64 base, u64 i, u64 v) {
+    unsafe { *((base + i * 8) as u64) = v }
+}
+fn early_loop() {
+    u64 k = 0
+    while k < 3 {
+        k = k + 1
+    }
+    if k == 3 {
+        g = 9
+        return
+    }
+    g = 5
+}'
+OR_PRO='    if probe_layout() != 1234 { exit(99) }
+    g = 7
+    memset(sbuf, 9, 1)'
+OR_CASES="call call_ind call_ind_args static_store syscall syscall_raw atomic_store atomic_add atomic_cas atomic_sub atomic_and atomic_or atomic_xor vstore8 vstore16 vstore32 vstore64 vstore8_fn vstore16_fn vstore32_fn vstore64_fn vptr_store asm store_bis control_flow memset memcpy store fmt_uint"
+for OR_K in $OR_CASES; do
+    OR_WANT=52
+    OR_ARCHES="x86_64 arm64 riscv32"
+    OR_SHAPES="S L B"
+    case $OR_K in
+        call)         OR_STMT='    setg(9)' ;;
+        call_ind)     OR_STMT='    call_ptr(fn_addr("setg9"))' ;;
+        call_ind_args) OR_STMT='    call_ptr(fn_addr("setg"), 9)' ;;
+        static_store) OR_STMT='    g = 9' ;;
+        syscall)      OR_STMT='    read(0, gbuf + 8, 1)'; OR_WANT=43 ;;
+        syscall_raw)  OR_STMT='    syscall_raw(OR_NR_READ, 0, gbuf + 8, 1, 0, 0, 0)'; OR_WANT=43 ;;
+        atomic_store) OR_STMT='    atomic_store(gbuf + 8, 9)'; OR_ARCHES="x86_64 arm64" ;;
+        atomic_add)   OR_STMT='    atomic_add(gbuf + 8, 2)'; OR_ARCHES="x86_64 arm64" ;;
+        atomic_cas)   OR_STMT='    atomic_cas(gbuf + 8, 7, 9)'; OR_ARCHES="x86_64 arm64" ;;
+        atomic_sub)   OR_STMT='    atomic_sub(gbuf + 8, 5)'; OR_WANT=45; OR_ARCHES="x86_64 arm64" ;;
+        atomic_and)   OR_STMT='    atomic_and(gbuf + 8, 3)'; OR_WANT=46; OR_ARCHES="x86_64 arm64" ;;
+        atomic_or)    OR_STMT='    atomic_or(gbuf + 8, 8)'; OR_WANT=58; OR_ARCHES="x86_64 arm64" ;;
+        atomic_xor)   OR_STMT='    atomic_xor(gbuf + 8, 14)'; OR_ARCHES="x86_64 arm64" ;;
+        vstore8)      OR_STMT='    vstore8(gbuf + 8, 9)' ;;
+        vstore16)     OR_STMT='    vstore16(gbuf + 8, 9)' ;;
+        vstore32)     OR_STMT='    vstore32(gbuf + 8, 9)' ;;
+        vstore64)     OR_STMT='    vstore64(gbuf + 8, 9)'; OR_ARCHES="x86_64 arm64" ;;
+        vstore64_fn)  OR_STMT='    vst64(gbuf + 8)'; OR_ARCHES="x86_64 arm64" ;;
+        vstore*_fn)   OR_V=${OR_K#vstore}; OR_STMT="    vst${OR_V%_fn}(gbuf + 8)" ;;
+        vptr_store)   OR_STMT='    u64 vq = gbuf + 8
+    u64 vnine = 9
+    volatile { *(vq as u64) = vnine }' ;;
+        asm)          OR_STMT='    u64 ap = gbuf + 8
+    u64 nine = 9
+    OR_ASM_STORE9'; OR_ARCHES="x86_64 arm64" ;;
+        store_bis)    OR_STMT='    put8(gbuf, one, 9)' ;;
+        control_flow) OR_STMT='    early_loop()' ;;
+        memset)       OR_STMT='    memset(gbuf + 8, 9, 1)'; OR_SHAPES="L B" ;;
+        memcpy)       OR_STMT='    memcpy(gbuf + 8, sbuf, 1)'; OR_SHAPES="L B" ;;
+        store)        OR_STMT='    u64 q = gbuf + 8
+    u8 nine = 9
+    unsafe { *(q as u8) = nine }'; OR_SHAPES="L B" ;;
+        fmt_uint)     OR_STMT='    fmt_uint(gbuf + 8, 9)'; OR_WANT=100; OR_SHAPES="L B" ;;
+    esac
+    for OR_SH in $OR_SHAPES; do
+        for OR_ARCH in $OR_ARCHES; do
+            TOTAL=$((TOTAL + 1))
+            OR_ROW="side_effect_runs_$OR_K $OR_ARCH$(or_shape_name $OR_SH)"
+            or_runner $OR_ARCH "$OR_ROW" || continue
+            OR_NR=0
+            OR_W=u64
+            OR_ASM='asm { "0x88 0x08" } in(ap -> rax, nine -> rcx)'
+            case $OR_ARCH in
+                arm64)   OR_NR=63; OR_ASM='asm { "0x39000001" } in(ap -> x0, nine -> x1)' ;;
+                riscv32) OR_NR=63; OR_W=u32 ;;
+            esac
+            { printf '%s\n' "$OR_HDR"; or_main $OR_SH "$OR_PRO" "$OR_STMT"; } \
+                | sed -e "s/OR_NR_READ/$OR_NR/" -e "s/OR_ASM_STORE9/$OR_ASM/" -e "s/u64/$OR_W/g" > /tmp/krc_or_$$.kr
+            # riscv32 refuses vstore64 even in an uncalled helper
+            [ "$OR_ARCH" = "riscv32" ] && sed -i '/^fn vst64/d' /tmp/krc_or_$$.kr
+            rm -f /tmp/krc_or_$$
+            OR_GOT="no binary"
+            if $KRC --arch=$OR_ARCH /tmp/krc_or_$$.kr -o /tmp/krc_or_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or_$$ ]; then
+                chmod +x /tmp/krc_or_$$
+                OR_GOT=0
+                timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_or_$$ < /dev/zero > /dev/null 2>&1 || OR_GOT=$?
+            fi
+            if [ "$OR_GOT" = "$OR_WANT" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $OR_ROW (exit $OR_GOT, want $OR_WANT; 50 = CSE'd across, hoisted or deleted, 99 = layout probe failed)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
+    done
+done
+rm -f /tmp/krc_or_$$.kr /tmp/krc_or_$$
+
+# Ops with no memory write a single-threaded program can read back still must
+# not be deleted, and their effect is visible another way: a fault, a trap,
+# an exec, a chmod, an address gap, a syscall. Each program runs the op with
+# its result unused, so a DCE that treats the op as pure deletes it and the
+# program reaches the final exit with 50 instead. Same S, L and B shapes as
+# above (g is 7 from its initializer here).
+#   vload 95 (8/16/32/64) load from address 0 (a static 0)    139 SIGSEGV
+#   vptr_load 95          volatile { *(z as u32) -> v }, z = 0 139 SIGSEGV
+#   dev_load 95           a u16 field of `device Z at 0x0`     139 SIGSEGV
+#   atomic_load 91        load from address 0                  139 SIGSEGV
+#   asm 96                ud2 / udf #0 / an all-zero word      132 SIGILL
+#   dealloc 71            read after dealloc of 1 MiB          139 SIGSEGV
+#   alloc 70              p1 = alloc(1 MiB); alloc(1 MiB); p3 = alloc(1 MiB):
+#                         p1 and p3 are two mappings apart (52), one apart
+#                         when the middle alloc was deleted (50)
+#   time_ns 119           x86_64: prctl(PR_SET_SECCOMP, STRICT), time_ns(),
+#                         raw exit(50): clock_gettime is not allowed in
+#                         strict mode, so the kernel kills the program
+#                         (137); deleted, it exits 50. arm64: qemu-aarch64
+#                         refuses seccomp, so the row runs the program under
+#                         `qemu-aarch64 -strace` and wants a clock_gettime
+#                         call in the trace. Not on riscv32 (no time_ns there)
+#   exec 113 / exec_argv 114    exec /bin/true                 0
+#   set_exec 115                chmod +x of a scratch file     the row checks -x
+#   arr_check 131 (--debug)     arr[5] on a 2-element array    1 (the trap)
+# riscv32 runs the vloads (but not vload64), vptr_load, dev_load, the asm
+# trap, dealloc and alloc; atomics, exec, set_executable and --debug bounds
+# checks are compile errors there. Core dumps are off for these runs.
+OR2_HDR='static u64 g = 7
+static u64 one = 1
+static u64 zero = 0
+static u64 five = 5
+static u64[2] arr
+static u64[2] av
+device Z at 0x0 {
+    F16 at 0x00 : u16
+}'
+OR2_CASES="vload8 vload16 vload32 vload64 vptr_load dev_load atomic_load asm_trap dealloc alloc time_ns exec exec_argv set_exec arr_check"
+for OR2_K in $OR2_CASES; do
+    OR2_FLAGS=""
+    OR2_WANT=139
+    OR2_ARCHES="x86_64 arm64"
+    case $OR2_K in
+        vload8)      OR2_STMT='    u64 z = zero
+    vload8(z)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        vload16)     OR2_STMT='    u64 z = zero
+    vload16(z)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        vload32)     OR2_STMT='    u64 z = zero
+    vload32(z)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        vload64)     OR2_STMT='    u64 z = zero
+    vload64(z)' ;;
+        vptr_load)   OR2_STMT='    u64 z = zero
+    u32 vv = 0
+    volatile { *(z as u32) -> vv }'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        dev_load)    OR2_STMT='    u16 dv = Z.F16'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        atomic_load) OR2_STMT='    u64 z = zero
+    atomic_load(z)' ;;
+        asm_trap)    OR2_STMT='    asm { "OR2_UD" }'; OR2_WANT=132; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        dealloc)     OR2_STMT='    u64 p = alloc(1048576)
+    store8(p, 1)
+    dealloc(p)
+    exit(load8(p) + 60)'; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        alloc)       OR2_STMT='    u64 p1 = alloc(1048576)
+    alloc(1048576)
+    u64 p3 = alloc(1048576)
+    u64 d = p1 - p3
+    if p3 > p1 { d = p3 - p1 }
+    if d > 1572864 { exit(52) }'; OR2_WANT=52; OR2_ARCHES="x86_64 arm64 riscv32" ;;
+        time_ns)     OR2_STMT='    OR2_TIME'; OR2_WANT=137 ;;
+        exec)        OR2_STMT='    exec_process("/bin/true")'; OR2_WANT=0 ;;
+        exec_argv)   OR2_STMT='    av[0] = "/bin/true"
+    av[1] = 0
+    exec_process_argv("/bin/true", av)'; OR2_WANT=0 ;;
+        set_exec)    OR2_STMT='    set_executable("OR2_FILE")'; OR2_WANT=x ;;
+        arr_check)   OR2_STMT='    u64 i = five
+    arr[i] = 1'; OR2_WANT=1; OR2_FLAGS="--debug" ;;
+    esac
+    for OR2_SH in S L B; do
+        for OR2_ARCH in $OR2_ARCHES; do
+            TOTAL=$((TOTAL + 1))
+            OR2_ROW="side_effect_kept_$OR2_K $OR2_ARCH$(or_shape_name $OR2_SH)"
+            or_runner $OR2_ARCH "$OR2_ROW" || continue
+            OR2_UD="0x0F 0x0B"
+            OR2_W=u64
+            OR2_TIME='syscall_raw(157, 22, 1, 0, 0, 0, 0)\n    time_ns()\n    syscall_raw(60, 50, 0, 0, 0, 0, 0)'
+            OR2_WANT_A=$OR2_WANT
+            case $OR2_ARCH in
+                arm64)   OR2_UD="0x00000000"
+                         OR2_TIME='time_ns()'
+                         [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; } ;;
+                riscv32) OR2_UD="0x00000000"; OR2_W=u32 ;;
+            esac
+            rm -f /tmp/krc_or2_$$.x
+            printf 'x\n' > /tmp/krc_or2_$$.x
+            chmod 644 /tmp/krc_or2_$$.x
+            { printf '%s\n' "$OR2_HDR"; or_main $OR2_SH "" "$OR2_STMT"; } \
+                | sed -e "s/OR2_UD/$OR2_UD/" -e "s|OR2_FILE|/tmp/krc_or2_$$.x|" -e "s/OR2_TIME/$OR2_TIME/" -e "s/u64/$OR2_W/g" > /tmp/krc_or2_$$.kr
+            rm -f /tmp/krc_or2_$$
+            OR2_GOT="no binary"
+            if $KRC --arch=$OR2_ARCH $OR2_FLAGS /tmp/krc_or2_$$.kr -o /tmp/krc_or2_$$ > /dev/null 2>&1 && [ -f /tmp/krc_or2_$$ ]; then
+                chmod +x /tmp/krc_or2_$$
+                if [ "$OR2_WANT_A" = "traced" ]; then
+                    # qemu's -strace log goes to stderr; the program's own exit is 50 either way
+                    OR2_GOT=$( ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_or2_$$ < /dev/zero 2>&1 >/dev/null ) 2>/dev/null | grep -c clock_gettime )
+                    if [ "$OR2_GOT" -ge 1 ] 2>/dev/null; then OR2_GOT=traced; else OR2_GOT="50 (no clock_gettime in the -strace log)"; fi
+                else
+                    # in a subshell whose stderr is dropped: no "Segmentation fault" line
+                    OR2_GOT=$( ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_or2_$$ < /dev/zero > /dev/null 2>&1; echo $? ) 2>/dev/null )
+                fi
+                if [ "$OR2_WANT" = "x" ]; then
+                    if [ -x /tmp/krc_or2_$$.x ]; then OR2_GOT=x; else OR2_GOT="exit $OR2_GOT, file not executable"; fi
+                fi
+            fi
+            if [ "$OR2_GOT" = "$OR2_WANT_A" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $OR2_ROW (got $OR2_GOT, want $OR2_WANT_A; 50 = the op was deleted)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
+    done
+done
+rm -f /tmp/krc_or2_$$.kr /tmp/krc_or2_$$ /tmp/krc_or2_$$.x
+
+# CSE across the ops above is not observable by a single-threaded run: they
+# write no memory the program reads back, and the second agent that a real
+# atomic_load, vload or asm orders against does not exist in a test. So count,
+# in the --emit=asm listing, the loads of the static g around each op:
+#   S  two (a = g; op; b = g), one when the second read was CSE'd into the
+#      first or DCE deleted the op first (DCE runs before CSE);
+#   B  three: the same two plus the one load of the static `one` that seeds
+#      the padding (the padding itself loads no static);
+#   L  one, and it must sit inside the loop: between the target of the
+#      loop's back-edge branch and the branch. A LICM that hoists the load
+#      out of the loop puts it before the back-edge target (zero inside).
+# The listing is main's own; the barriers 126-130 have barrier_stops_static_cse.
+# or_listing_count ARCH FILE -> "TOTAL INSIDE": loads of a static (x86_64
+# `mov r, [rip+...]`, arm64 `ldr x, [x16, ...]`), and how many of them lie in
+# the span of the backward branches (the loops). Pure awk (no gawk needed).
+or_listing_count() {
+    awk -v arch="$1" '
+    function hx(s,   i, c, v) { v = 0; s = tolower(s); sub(/^0x/, "", s)
+        for (i = 1; i <= length(s); i++) { c = index("0123456789abcdef", substr(s, i, 1)) - 1; v = v * 16 + c }
+        return v }
+    /^  [0-9a-f]+: / {
+        a = hx(substr($1, 1, length($1) - 1)); n = 0; t = ""
+        for (i = 2; i <= NF; i++) {
+            if (arch == "x86_64" && n == i - 2 && $i ~ /^[0-9a-f][0-9a-f]$/) { n++; continue }
+            if (arch == "arm64" && i == 2) { continue }
+            t = t (t == "" ? "" : " ") $i
+        }
+        if (arch == "x86_64" && t ~ /^mov r[a-z0-9]+, \[rip/) { ld[++nl] = a }
+        if (arch == "arm64" && t ~ /^ldr x[0-9]+, \[x16/) { ld[++nl] = a }
+        if (arch == "x86_64" && t ~ /^j[a-z]+ 0x[0-9a-f]+$/) {
+            r = $NF; w = length(r) - 2; d = hx(r)
+            if (w <= 2 && d >= 128) d -= 256
+            if (w > 2 && d >= 2147483648) d -= 4294967296
+            tg = a + n + d
+            if (tg <= a) { if (lo == "" || tg < lo) lo = tg; if (hi == "" || a > hi) hi = a }
+        }
+        if (arch == "arm64" && t ~ /<-[0-9]+>$/) {
+            r = $NF; gsub(/[<>-]/, "", r); tg = a - r
+            if (lo == "" || tg < lo) lo = tg; if (hi == "" || a > hi) hi = a
+        }
+    }
+    END { ins = 0; for (i = 1; i <= nl; i++) if (lo != "" && ld[i] >= lo && ld[i] <= hi) ins++; print nl + 0, ins }' "$2"
+}
+OR3_CASES="atomic_load vload8 vload16 vload32 vload64 vptr_load dev_load asm exec exec_argv set_exec"
+for OR3_K in $OR3_CASES; do
+    case $OR3_K in
+        atomic_load) OR3_STMT='    atomic_load(0)' ;;
+        vload8)      OR3_STMT='    vload8(0)' ;;
+        vload16)     OR3_STMT='    vload16(0)' ;;
+        vload32)     OR3_STMT='    vload32(0)' ;;
+        vload64)     OR3_STMT='    vload64(0)' ;;
+        vptr_load)   OR3_STMT='    u64 z = 0
+    u32 vv = 0
+    volatile { *(z as u32) -> vv }' ;;
+        dev_load)    OR3_STMT='    u16 dv = Z.F16' ;;
+        asm)         OR3_STMT='    asm { "OR3_NOP" }' ;;
+        exec)        OR3_STMT='    exec_process("/bin/true")' ;;
+        exec_argv)   OR3_STMT='    exec_process_argv("/bin/true", 0)' ;;
+        set_exec)    OR3_STMT='    set_executable("/nonexistent")' ;;
+    esac
+    for OR3_SH in S L B; do
+        for OR3_ARCH in x86_64 arm64; do
+            TOTAL=$((TOTAL + 1))
+            OR3_NOP="0x90"
+            [ "$OR3_ARCH" = "arm64" ] && OR3_NOP="0xD503201F"
+            { printf 'static u64 g = 5\nstatic u64 one = 1\ndevice Z at 0x0 {\n    F16 at 0x00 : u16\n}\n'; or_main $OR3_SH "" "$OR3_STMT"; } \
+                | sed -e "s/OR3_NOP/$OR3_NOP/" > /tmp/krc_or3_$$.kr
+            OR3_N="no listing"
+            if $KRC --arch=$OR3_ARCH --emit=asm /tmp/krc_or3_$$.kr -o /tmp/krc_or3_$$.s > /dev/null 2>&1; then
+                OR3_N=$(or_listing_count $OR3_ARCH /tmp/krc_or3_$$.s)
+            fi
+            case $OR3_SH in S) OR3_WANT="2 0" ;; B) OR3_WANT="3 0" ;; L) OR3_WANT="1 1" ;; esac
+            if [ "$OR3_N" = "$OR3_WANT" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: side_effect_stops_static_cse_listing $OR3_K $OR3_ARCH$(or_shape_name $OR3_SH) (static loads, in loops: $OR3_N, want $OR3_WANT)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
+    done
+done
+rm -f /tmp/krc_or3_$$.kr /tmp/krc_or3_$$.s
+
+# get_module_path (146) exists only in a Windows build (elsewhere it is a
+# constant). module_path_stops_static_cse above uses its result, so DCE
+# keeps it whatever the side-effect set says; this one discards the result,
+# so a DCE that treats 146 as pure deletes the call, and the two loads of g
+# merge (DCE runs before CSE). Same listing counts as above (S, L, B), under
+# --target=windows. KernRift has no win_load_library, win_get_proc_address or
+# call_ptr_win64.
+for OR4_SH in S L B; do
+    TOTAL=$((TOTAL + 1))
+    { printf 'static u8[8] gbuf\nstatic u64 g = 7\nstatic u64 one = 1\n'; or_main $OR4_SH "" '    get_module_path(gbuf + 8, 8)'; } > /tmp/krc_or4_$$.kr
+    OR4_N="no listing"
+    if $KRC --arch=x86_64 --target=windows --emit=asm /tmp/krc_or4_$$.kr -o /tmp/krc_or4_$$.s > /dev/null 2>&1; then
+        OR4_N=$(or_listing_count x86_64 /tmp/krc_or4_$$.s)
+    fi
+    case $OR4_SH in S) OR4_WANT="2 0" ;; B) OR4_WANT="3 0" ;; L) OR4_WANT="1 1" ;; esac
+    if [ "$OR4_N" = "$OR4_WANT" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: side_effect_stops_static_cse_listing module_path_unused windows-x86_64$(or_shape_name $OR4_SH) (static loads, in loops: $OR4_N, want $OR4_WANT)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_or4_$$.kr /tmp/krc_or4_$$.s
+
+# --- volatile oracles by width, form and backend (review round 6) ---------
+# The rows above observe ONE volatile-block read (u32, DCE) and the vload
+# builtins. Five mutants of the volatile lowering passed the whole suite: LICM
+# hoisting a vload out of a loop (the polling-loop miscompile), a u16 block
+# read lowered as a plain load, a u8 block store or a block compound without
+# its barrier, and the legacy x86 u16 load / arm64 u8 store barriers dropped.
+# Each group below turns at least one of them red; IR_REFERENCE.md lists the
+# shapes that are still not observed. Everything runs in a private directory
+# (VX_T), so two suites on one machine cannot collide in /tmp.
+VX_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_vx.XXXXXX")
+# vx_run ARCH FLAGS SRC -> the exit status of the compiled program (or "no
+# binary"), with core dumps off and the program's stderr dropped. The row is
+# already in TOTAL; or_runner has set OR_R for ARCH.
+vx_run() {
+    rm -f "$VX_T/b"
+    if $KRC --arch=$1 $2 "$3" -o "$VX_T/b" > /dev/null 2>&1 && [ -f "$VX_T/b" ]; then
+        chmod +x "$VX_T/b"
+        ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R "$VX_T/b" < /dev/null > /dev/null 2>&1; echo $? ) 2>/dev/null
+    else
+        echo "no binary"
+    fi
+}
+# 1. The polling loop: read the location, then write it, three times. Each
+# read must see the previous trip's write: (0xF1 & 15) + 5 + 6 = 12. A read
+# hoisted out of the loop (LICM treating IR_VLOAD 95 as invariant) reads the
+# first value three times: 3. Every vload builtin and every block width, IR
+# and legacy; riscv32 has no 64-bit integers, so it runs the 8/16/32 forms.
+for VX_K in vload8 vload16 vload32 vload64 block_u8 block_u16 block_u32 block_u64; do
+    case $VX_K in
+        vload8)  VX_W=u8;  VX_RD='        u64 v = vload8(p)' ;;
+        vload16) VX_W=u16; VX_RD='        u64 v = vload16(p)' ;;
+        vload32) VX_W=u32; VX_RD='        u64 v = vload32(p)' ;;
+        vload64) VX_W=u64; VX_RD='        u64 v = vload64(p)' ;;
+        block_*) VX_W=${VX_K#block_}; VX_RD="        volatile { *(p as $VX_W) -> v }" ;;
+    esac
+    for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy" "riscv32|"; do
+        VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+        [ "$VX_A" = riscv32 ] && [ "$VX_W" = u64 ] && continue
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="volatile_polling_loop_$VX_K $VX_A${VX_M:+ $VX_M}"
+        or_runner $VX_A "$VX_ROW" || continue
+        printf 'static u64[4] buf\nfn main() {\n    u64 p = buf\n    unsafe { *(p as u64) = 0x8897A6B5C4D3E2F1 }\n    u64 i = 0\n    u64 s = 0\n    while i < 3 {\n%s\n        s = s + (v & 15)\n        unsafe { *(p as %s) = i + 5 }\n        i = i + 1\n    }\n    exit(s)\n}\n' "$VX_RD" "$VX_W" > "$VX_T/p.kr"
+        # riscv32: u64 is not a type there; the buffer word is written as u32
+        [ "$VX_A" = riscv32 ] && sed -i -e 's/(p as u64) = 0x8897A6B5C4D3E2F1/(p as u32) = 0xC4D3E2F1/' -e 's/u64/u32/g' "$VX_T/p.kr"
+        VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_T/p.kr")
+        if [ "$VX_GOT" = 12 ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want 12; 3 = the read was hoisted out of the loop)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# 2. An unused block read of every other width from address 0 must still
+# fault (139); 50 means it was lowered as a plain load and deleted. The u32
+# read is side_effect_kept_vptr_load above. One shape: each faulting run
+# waits for the core-dump handler.
+for VX_W in u8 u16 u64 f32 f64; do
+    for VX_A in x86_64 arm64 riscv32; do
+        [ "$VX_A" = riscv32 ] && case $VX_W in u64|f32|f64) continue ;; esac
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="volatile_unused_read_kept $VX_W $VX_A"
+        or_runner $VX_A "$VX_ROW" || continue
+        printf 'static u64 zero = 0\nfn main() {\n    u64 z = zero\n    volatile { *(z as %s) -> v }\n    exit(50)\n}\n' "$VX_W" > "$VX_T/z.kr"
+        [ "$VX_A" = riscv32 ] && sed -i 's/u64/u32/g' "$VX_T/z.kr"
+        VX_GOT=$(vx_run $VX_A "" "$VX_T/z.kr")
+        if [ "$VX_GOT" = 139 ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want 139; 50 = the read was deleted)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# 3. The barriers, which no single-threaded run can observe: count them in
+# main's --emit=asm listing for each form, width and backend, with `volatile`
+# and with `unsafe`. On x86_64 and arm64 a load has one, a store two (before
+# and after: there it completes before anything after it), a compound (a read
+# and a write) three;
+# `unsafe` none. x86_64 (IR and legacy): mfence. arm64 IR: the load is LDAR,
+# the store STLR then `dsb sy`. arm64 legacy: `dsb sy` after a load and
+# before and after a store, the vstore* builtins' barrier (a `dmb ish` does not count: the block
+# store used to get one). riscv32 has no listing. One row per backend and form.
+for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+    VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+    case "$VX_A$VX_M" in
+        x86_64*)       VX_RE='^ +[0-9a-f]+: .*mfence' ;;
+        arm64--legacy) VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +dsb sy' ;;
+        arm64)         VX_RE='^ +[0-9a-f]+: [0-9a-f]{8} +(ldar|stlr|dsb sy)' ;;
+    esac
+    for VX_O in load store compound; do
+        TOTAL=$((TOTAL + 1))
+        VX_WANT=1; [ "$VX_O" = store ] && VX_WANT=2; [ "$VX_O" = compound ] && VX_WANT=3
+        VX_BAD=""
+        for VX_W in u8 u16 u32 u64 f32 f64; do
+            case $VX_W in f32) VX_V='f32 val = 1.5' ;; f64) VX_V='f64 val = 2.5' ;; *) VX_V="$VX_W val = 5" ;; esac
+            case $VX_O in
+                load)     VX_S="    $VX_W x = val
+    KW { *(p as $VX_W) -> x }" ;;
+                store)    VX_S="    KW { *(p as $VX_W) = val }" ;;
+                compound) VX_S="    KW { *(p as $VX_W) += val }" ;;
+            esac
+            VX_N=""
+            for VX_KW in volatile unsafe; do
+                printf 'static u64[2] buf\nfn main() {\n    u64 p = buf\n    %s\n%s\n    exit(0)\n}\n' "$VX_V" "$VX_S" | sed "s/KW/$VX_KW/" > "$VX_T/l.kr"
+                if $KRC --arch=$VX_A $VX_M --emit=asm "$VX_T/l.kr" -o "$VX_T/l.s" > /dev/null 2>&1; then
+                    VX_N="$VX_N $(sed -n '/^main:/,$p' "$VX_T/l.s" | grep -acE "$VX_RE")"
+                else
+                    VX_N="$VX_N no-listing"
+                fi
+            done
+            [ "$VX_N" = " $VX_WANT 0" ] || VX_BAD="$VX_BAD $VX_W:$VX_N"
+        done
+        if [ -z "$VX_BAD" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: volatile_barriers_by_width $VX_O $VX_A${VX_M:+ $VX_M} (volatile/unsafe barrier counts, want $VX_WANT 0:$VX_BAD)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# 3b. The block store and the vstore* builtin are the same volatile store, so
+# they get the same barriers, in the same order, on every backend (the user's
+# request, review round 7): on arm64 --legacy the block form used to get
+# `dmb ish` before the store and the builtin `dsb sy`. The barrier mnemonics
+# in main's listing, in order, must be identical for `volatile { *(p as uW) =
+# val }` and `vstoreW(p, val)`, every width.
+for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+    VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+    TOTAL=$((TOTAL + 1))
+    VX_BAD=""
+    for VX_W in 8 16 32 64; do
+        VX_SEQ=""
+        for VX_FORM in block builtin; do
+            if [ $VX_FORM = block ]; then VX_S="    volatile { *(p as u$VX_W) = val }"; else VX_S="    vstore$VX_W(p, val)"; fi
+            printf 'static u64[2] buf\nfn main() {\n    u64 p = buf\n    u64 val = 5\n%s\n    exit(0)\n}\n' "$VX_S" > "$VX_T/l.kr"
+            if $KRC --arch=$VX_A $VX_M --emit=asm "$VX_T/l.kr" -o "$VX_T/l.s" > /dev/null 2>&1; then
+                VX_SEQ="$VX_SEQ|$(sed -n '/^main:/,$p' "$VX_T/l.s" | grep -aoE '(mfence|lfence|sfence|dsb [a-z]+|dmb [a-z]+|stlr[bh]?)' | tr '\n' ' ')"
+            else
+                VX_SEQ="$VX_SEQ|no-listing"
+            fi
+        done
+        VX_B1=${VX_SEQ#|}; VX_B1=${VX_B1%%|*}; VX_B2=${VX_SEQ##*|}
+        if [ "$VX_B1" != "$VX_B2" ] || [ -z "$VX_B1" ] || [ "$VX_B1" = no-listing ]; then VX_BAD="$VX_BAD u$VX_W: block [$VX_B1] builtin [$VX_B2];"; fi
+    done
+    if [ -z "$VX_BAD" ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: volatile_block_store_barrier_is_vstores $VX_A${VX_M:+ $VX_M} ($VX_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+# 4. `*(p as F) -> x` with x not declared yet binds x with F's type, as
+# `F x = ...` would (3b95554's var_type_register on both legacy backends;
+# MLRift's port of f6d9b30 missed it, and `x + x` added the f64/f32 bits as
+# integers there: 1, not 3). f16 has no float register class on any
+# backend -- a declared `f16 x` is an integer bit pattern too -- so its row
+# pins that the undeclared form matches the declared one: x + x adds the
+# bits as integers, 0x3E00 + 0x3E00 = 0x7C00, high byte 124 (an f16 typed
+# as f32 adds two denormals instead: 62 on both legacy backends). unsafe
+# and volatile, every backend that runs here.
+for VX_F in f64 f32 f16; do
+    for VX_KW in unsafe volatile; do
+        if [ "$VX_F" = f16 ]; then
+            VX_P=$(printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0)\n    store16(p, 0x3E00)\n    %s { *(p as f16) -> x }\n    u64 r = x + x\n    exit(r >> 8)\n}\n' "$VX_KW")
+            VX_WANT=124
+        else
+            VX_P=$(printf 'fn main() {\n    u64 p = alloc(64)\n    %s v = 1.5\n    unsafe { *(p as %s) = v }\n    %s { *(p as %s) -> x }\n    %s y = x + x\n    %s w = 3.0\n    if y == w { exit(3) }\n    exit(1)\n}\n' "$VX_F" "$VX_F" "$VX_KW" "$VX_F" "$VX_F" "$VX_F")
+            VX_WANT=3
+        fi
+        printf '%s\n' "$VX_P" > "$VX_T/u.kr"
+        for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+            VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+            TOTAL=$((TOTAL + 1))
+            VX_ROW="ptr_load_undeclared_${VX_F}_dest $VX_KW $VX_A${VX_M:+ $VX_M}"
+            or_runner $VX_A "$VX_ROW" || continue
+            VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_T/u.kr")
+            if [ "$VX_GOT" = "$VX_WANT" ]; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: $VX_ROW (got $VX_GOT, want $VX_WANT)"
+                FAIL=$((FAIL + 1))
+            fi
+        done
+    done
+done
+# vx_rows NAME WANT -- run "$VX_T/u.kr" on every backend that runs here
+# (x86_64 and arm64, IR and --legacy) and want exit status WANT from each.
+vx_rows() {
+    for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy"; do
+        VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="$1 $VX_A${VX_M:+ $VX_M}"
+        or_runner $VX_A "$VX_ROW" || continue
+        VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_T/u.kr")
+        if [ "$VX_GOT" = "$2" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want $2)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+}
+# The `as TYPE` clause types the `->` destination WHEREVER it lives, not only
+# when the load declares it (KernRift 3b95554 registers the float kind for a
+# found dest too). These are the review-round-7 type-matrix shapes the
+# undeclared-only registration got wrong on both legacy backends -- IR said 3,
+# legacy said 1 (x + x added the float bits as integers):
+#   deadscope  `if p != 0 { u64 x = 7 }` left x in the table; then `-> x`
+#   rebind     `*(p as u64) -> x` then `*(p as F) -> x`
+#   param      x is a `u64` parameter
+#   otherfloat a declared `f32 x` loaded as f64
+# Every row wants 3 (y = x + x == 3.0 in F) on all four configs. The mirror
+# shape (a declared `f64 x` loaded as f32, then `f64 y = x + x`) is not here:
+# it reaches a separate legacy defect -- `f32 a = 1.5; f64 y = a + a` is 1,
+# not 3, on both legacy backends (no f32 -> f64 widening at an f64 VarDecl;
+# MLRift's emit_float_store_convert) -- reported, not fixed in this branch.
+for VX_F in f64 f32; do
+    if [ "$VX_F" = f64 ]; then VX_O=f32; else VX_O=f64; fi
+    for VX_KW in unsafe volatile; do
+        VX_PRE=$(printf '    u64 p = alloc(64)\n    %s v = 1.5\n    unsafe { *(p as %s) = v }' "$VX_F" "$VX_F")
+        VX_CHK=$(printf '    %s y = x + x\n    %s w = 3.0\n    if y == w { exit(3) }\n    exit(1)' "$VX_F" "$VX_F")
+        printf 'fn main() {\n%s\n    if p != 0 { u64 x = 7 }\n    %s { *(p as %s) -> x }\n%s\n}\n' "$VX_PRE" "$VX_KW" "$VX_F" "$VX_CHK" > "$VX_T/u.kr"
+        vx_rows "ptr_load_found_dest deadscope $VX_F $VX_KW" 3
+        printf 'fn main() {\n%s\n    %s { *(p as u64) -> x }\n    %s { *(p as %s) -> x }\n%s\n}\n' "$VX_PRE" "$VX_KW" "$VX_KW" "$VX_F" "$VX_CHK" > "$VX_T/u.kr"
+        vx_rows "ptr_load_found_dest rebind $VX_F $VX_KW" 3
+        printf 'fn g(u64 x, u64 p) -> u64 {\n    %s { *(p as %s) -> x }\n    %s y = x + x\n    %s w = 3.0\n    if y == w { return 3 }\n    return 1\n}\nfn main() {\n%s\n    exit(g(0, p))\n}\n' "$VX_KW" "$VX_F" "$VX_F" "$VX_F" "$VX_PRE" > "$VX_T/u.kr"
+        vx_rows "ptr_load_found_dest param $VX_F $VX_KW" 3
+        if [ "$VX_F" = f64 ]; then
+            printf 'fn main() {\n%s\n    %s x = 0.0\n    %s { *(p as %s) -> x }\n    %s y = x + x\n    %s w = 3.0\n    if y == w { exit(3) }\n    exit(1)\n}\n' "$VX_PRE" "$VX_O" "$VX_KW" "$VX_F" "$VX_O" "$VX_O" > "$VX_T/u.kr"
+            vx_rows "ptr_load_found_dest otherfloat $VX_F-into-$VX_O $VX_KW" 3
+        fi
+    done
+done
+# A signed `as iN` load reads an iN: it sign-extends from N bits and types the
+# destination signed, declared or not, on every backend. The IR rebound dest
+# to an untyped vreg (a declared `i64 x` lost its sign at the load, so
+# `x < 0` was false and `x / 2` divided unsigned), the undeclared form was
+# never signed anywhere, and every narrower load zero-extended (0xFA as i8
+# read back as 250). Memory holds -6; the program exits 100 + a mask of the
+# wrong answers: 1 = `x < 0` false, 2 = `x / 2` != -3, 4 = `x >> 1` != -3.
+for VX_T8 in i8 i16 i32 i64; do
+    for VX_KW in unsafe volatile; do
+        for VX_D in declared undeclared; do
+            VX_DECL=""
+            [ "$VX_D" = declared ] && VX_DECL=$(printf '    %s x = 0' "$VX_T8")
+            printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0xFFFFFFFFFFFFFFFA)\n%s\n    %s { *(p as %s) -> x }\n    u64 r = 100\n    if x >= 0 { r = r + 1 }\n    i64 h = x / 2\n    if h != -3 { r = r + 2 }\n    i64 s = x >> 1\n    if s != -3 { r = r + 4 }\n    exit(r)\n}\n' "$VX_DECL" "$VX_KW" "$VX_T8" > "$VX_T/u.kr"
+            vx_rows "ptr_load_signed_dest $VX_T8 $VX_KW $VX_D" 100
+        done
+    done
+done
+# ...and an unsigned cast still zero-extends: 0x..FA as uN, then >> 1 is a
+# logical shift of the zero-extended value.
+for VX_UW in "u8 125" "u16 32765" "u32 2147483645" "u64 9223372036854775805"; do
+    VX_UT=${VX_UW%% *}; VX_UV=${VX_UW#* }
+    printf 'fn main() {\n    u64 p = alloc(64)\n    store64(p, 0xFFFFFFFFFFFFFFFA)\n    unsafe { *(p as %s) -> x }\n    u64 s = x >> 1\n    if s != %s { exit(12) }\n    exit(3)\n}\n' "$VX_UT" "$VX_UV" > "$VX_T/u.kr"
+    vx_rows "ptr_load_unsigned_dest_zero_extends $VX_UT" 3
+done
+# --- store-buffering litmus: a barrier IS observable by a run (x86 hardware) --
+# Two processes (fork, MAP_SHARED) each store 1 to their own slot and then
+# read the other's: with `x = 1; r1 = y` against `y = 1; r2 = x`, the outcome
+# r1 == r2 == 0 is possible only if a load passed the preceding store -- which
+# x86 hardware does (the store buffer) unless a fence sits between them. N
+# rounds, lock-stepped through two volatile counters; the program exits with
+# the count of both-zero rounds (capped at 250). A one-sided oracle: a red row
+# PROVES a missing or misplaced fence; a green one shows only that this run
+# saw no reordering. The `plain` control (no fence at all) must see some, or
+# this machine cannot tell a fence from none and the rows are a SKIP (on a
+# full run, a FAIL: the rows would prove nothing).
+# Each VARIANT is the fence between `*(mine) = 1` and `r = *(other)`:
+#   vv        vstore64(mine, 1); r = vload64(other) -- LANGUAGE.md's
+#             x86_64 promise that the store completes before anything after it
+#   blk       the same with `volatile { }` block store and load
+#   ldW/stW   a plain store and load around a volatile block load / store of
+#             width W at a third address (its barrier is the fence)
+#   bldW/bstW the same with the vloadW / vstoreW builtins
+#   cmp       around a `volatile { *(z as u16) += 1 }`
+# IR and --legacy, on x86_64 only: the arm64 and riscv32 runs here are qemu
+# user mode, whose TCG memory model is not the hardware's, so a red row there
+# would prove nothing about the hardware either way (arm64 needs a real core).
+SB_N=100000
+sb_prog() {
+    # sb_prog BODY -- BODY uses @S (my slot), @L (the other's) and z / zp
+    SB_BODY_A=$(printf '%s' "$1" | sed -e 's/@S/xa + i * 8/g' -e 's/@L/ya + i * 8/g')
+    SB_BODY_B=$(printf '%s' "$1" | sed -e 's/@S/ya + i * 8/g' -e 's/@L/xa + i * 8/g')
+    printf 'fn main() {\n    u64 n = %s\n    u64 one = 1\n    u64 zero = 0\n    u64 sz = n * 32 + 8192\n    u64 m = syscall_raw(9, 0, sz, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 xa = m\n    u64 ya = m + n * 8\n    u64 ra = m + n * 16\n    u64 rb = m + n * 24\n    u64 ca = m + n * 32\n    u64 cb = ca + 128\n    u64 zp = ca + 512\n    u64 i = 0\n    u64 pid = syscall_raw(57, 0, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        while i < n {\n            vstore64(cb, i + 1)\n            while vload64(ca) < i + 1 { }\n%s\n            store64(rb + i * 8, r)\n            i = i + 1\n        }\n        syscall_raw(60, 0, 0, 0, 0, 0, 0)\n    }\n    while i < n {\n        vstore64(ca, i + 1)\n        while vload64(cb) < i + 1 { }\n%s\n        store64(ra + i * 8, r)\n        i = i + 1\n    }\n    syscall_raw(61, pid, 0, 0, 0, 0, 0)\n    u64 both = 0\n    i = 0\n    while i < n {\n        u64 a = load64(ra + i * 8)\n        u64 b = load64(rb + i * 8)\n        if a == 0 && b == 0 { both = both + 1 }\n        i = i + 1\n    }\n    if both > 250 { both = 250 }\n    exit(both)\n}\n' "$SB_N" "$SB_BODY_B" "$SB_BODY_A"
+}
+sb_body() {
+    SB_P='            unsafe { *(@S as u64) = one }'
+    SB_Q='            unsafe { *(@L as u64) -> r }'
+    case $1 in
+        plain) printf '%s\n%s' "$SB_P" "$SB_Q" ;;
+        vv) printf '            vstore64(@S, 1)\n            u64 r = vload64(@L)' ;;
+        blk) printf '            volatile { *(@S as u64) = one }\n            volatile { *(@L as u64) -> r }' ;;
+        ld*) printf '%s\n            volatile { *(zp as u%s) -> zz }\n%s' "$SB_P" "${1#ld}" "$SB_Q" ;;
+        st*) printf '%s\n            volatile { *(zp as u%s) = zero }\n%s' "$SB_P" "${1#st}" "$SB_Q" ;;
+        bld*) printf '%s\n            u64 zz = vload%s(zp)\n%s' "$SB_P" "${1#bld}" "$SB_Q" ;;
+        bst*) printf '%s\n            vstore%s(zp, 0)\n%s' "$SB_P" "${1#bst}" "$SB_Q" ;;
+        cmp) printf '%s\n            volatile { *(zp as u16) += 1 }\n%s' "$SB_P" "$SB_Q" ;;
+    esac
+}
+# sb_run FLAGS VARIANT -> both-zero count, or "no binary"
+sb_run() {
+    sb_prog "$(sb_body $2)" > "$VX_T/sb.kr"
+    rm -f "$VX_T/sb"
+    if $KRC --arch=x86_64 $1 "$VX_T/sb.kr" -o "$VX_T/sb" > /dev/null 2>&1 && [ -f "$VX_T/sb" ]; then
+        chmod +x "$VX_T/sb"
+        ( ulimit -c 0; timeout -k 2 15 "$VX_T/sb" < /dev/null > /dev/null 2>&1; echo $? ) 2>/dev/null
+    else
+        echo "no binary"
+    fi
+}
+for SB_M in "" --legacy; do
+    SB_MN=${SB_M:+ $SB_M}
+    if [ "$ARCH" != x86_64 ]; then
+        for SB_V in vv blk ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
+            TOTAL=$((TOTAL + 1)); skip_row "store_buffering_litmus $SB_V x86_64$SB_MN" "host is $ARCH, not x86_64 hardware"
+        done
+        continue
+    fi
+    SB_CTL=$(sb_run "$SB_M" plain)
+    for SB_V in vv blk ld8 ld16 ld32 ld64 st8 st16 st32 st64 bld8 bld16 bld32 bld64 bst8 bst16 bst32 bst64 cmp; do
+        TOTAL=$((TOTAL + 1))
+        SB_ROW="store_buffering_litmus $SB_V x86_64$SB_MN"
+        case $SB_CTL in
+            ''|*[!0-9]*|0) skip_row "$SB_ROW" "the unfenced control saw no reordering (got '$SB_CTL'), so this run cannot tell a fence from none"; continue ;;
+        esac
+        SB_GOT=$(sb_run "$SB_M" $SB_V)
+        if [ "$SB_GOT" = 0 ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $SB_ROW (both-zero rounds: $SB_GOT of $SB_N, want 0 -- a load passed a store the volatile access should have fenced; the unfenced control saw $SB_CTL)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+# --- volatile reads against a concurrent writer (review round 7, sb/cse2 and
+# sb/poll3): a second process (fork, MAP_SHARED) writes while this one reads,
+# so merging two volatile reads (CSE of IR_VLOAD) or hoisting one out of a
+# polling loop (LICM) changes what a RUN sees, not only the listing.
+#   cse   once the parent is in its loop, the child stores 1, 2, 3, ... to
+#         one word until the parent has seen 100 differing pairs (or 20M
+#         stores); the parent reads the word twice per trip and counts trips
+#         where the two reads differ. Two reads merged into one never differ:
+#         exit 1, want 3.
+#   poll  once the parent is polling, the child spins, then stores 7 once;
+#         the parent polls the word until it reads 7. A read hoisted out of
+#         the loop never sees it: the row times out (124/137), want 3.
+# The child waits for the parent's go-flag in both: without it, a slow
+# parent start (qemu) let the child finish first -- the cse row then saw no
+# differing pair and went red on a correct compiler, and the poll row could
+# pass a hoisted read that happened to see the 7 at its first and only read.
+# Builtin (vload64) and block (`volatile { *(m as u64) -> v }`) forms, IR and
+# --legacy, x86_64 and arm64 (qemu; the raw syscall numbers are per arch:
+# mmap, fork -- clone(SIGCHLD) on arm64 --, exit, wait4).
+# vx_rows_on ARCH NAME WANT -- vx_rows for one arch: IR and --legacy
+vx_rows_on() {
+    for VX_M in "" --legacy; do
+        TOTAL=$((TOTAL + 1))
+        VX_ROW="$2 $1${VX_M:+ $VX_M}"
+        or_runner $1 "$VX_ROW" || continue
+        # Bounded well under RUN_TEST_TIMEOUT: a correct run takes well
+        # under a second (qemu included); a hoisted poll never ends.
+        VX_GOT=$(RUN_TEST_TIMEOUT=15 vx_run $1 "$VX_M" "$VX_T/u.kr")
+        if [ "$VX_GOT" = "$3" ]; then
+            PASS=$((PASS + 1))
+        else
+            echo "FAIL: $VX_ROW (got $VX_GOT, want $3)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+}
+VR_CSE_B='        u64 a = vload64(m)
+        u64 b = vload64(m)'
+VR_CSE_K='        volatile { *(m as u64) -> a }
+        volatile { *(m as u64) -> b }'
+VR_POLL_B='        u64 v = vload64(m)'
+VR_POLL_K='        volatile { *(m as u64) -> v }'
+for VR_K in cse poll; do
+    for VR_F in builtin block; do
+        if [ $VR_K = cse ]; then
+            if [ $VR_F = builtin ]; then VR_R="$VR_CSE_B"; else VR_R="$VR_CSE_K"; fi
+            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        while vload64(m + 128) == 0 { }\n        u64 k = 1\n        while vload64(m + 192) == 0 && k < 20000000 {\n            vstore64(m, k)\n            k = k + 1\n        }\n        vstore64(m + 64, 1)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    vstore64(m + 128, 1)\n    u64 diff = 0\n    while vload64(m + 64) == 0 {\n%s\n        if a != b { diff = diff + 1 }\n        if diff > 100 { vstore64(m + 192, 1) }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    if diff > 0 { exit(3) }\n    exit(1)\n}\n' "$VR_R" > "$VX_T/v.kr"
+        else
+            if [ $VR_F = builtin ]; then VR_R="$VR_POLL_B"; else VR_R="$VR_POLL_K"; fi
+            printf 'fn main() {\n    u64 m = syscall_raw(@MMAP, 0, 4096, 3, 0x21, 0xFFFFFFFFFFFFFFFF, 0)\n    u64 pid = syscall_raw(@FORK, 0, 0, 0, 0, 0)\n    if pid == 0 {\n        while vload64(m + 128) == 0 { }\n        u64 k = 0\n        while k < 1000000 { k = k + 1 }\n        vstore64(m, 7)\n        syscall_raw(@EXIT, 0, 0, 0, 0, 0, 0)\n    }\n    vstore64(m + 128, 1)\n    u64 go = 1\n    while go == 1 {\n%s\n        if v == 7 { go = 0 }\n    }\n    syscall_raw(@WAIT, pid, 0, 0, 0, 0, 0)\n    exit(3)\n}\n' "$VR_R" > "$VX_T/v.kr"
+        fi
+        for VR_A in x86_64 arm64; do
+            if [ $VR_A = x86_64 ]; then VR_SC='s/@MMAP/9/; s/@FORK/57, 0/; s/@EXIT/60/; s/@WAIT/61/'
+            else VR_SC='s/@MMAP/222/; s/@FORK/220, 17/; s/@EXIT/93/; s/@WAIT/260/'; fi
+            sed "$VR_SC" "$VX_T/v.kr" > "$VX_T/u.kr"
+            vx_rows_on $VR_A "volatile_read_vs_concurrent_writer $VR_K $VR_F" 3
+        done
+    done
+done
+# 5. Alignment. A volatile access must be naturally aligned (LANGUAGE.md,
+# UNDEFINED_BEHAVIOR.md): arm64 IR lowers it to LDAR/STLR, which fault on a
+# misaligned address, so a misaligned one is undefined on every backend and
+# is not tested. What IS defined is pinned here: a naturally aligned access
+# of every width at an offset that is not 8-aligned (u16 at +2, u32/f32 at
+# +4, u8 at +1) round-trips on every backend. Exit 42 = all six; else the
+# number of the first width that failed.
+VX_P='static u64[4] buf
+fn main() {
+    u64 p = buf
+    u8 a8 = 0xA5
+    volatile { *(p + 1 as u8) = a8 }
+    volatile { *(p + 1 as u8) -> b8 }
+    if b8 != 0xA5 { exit(1) }
+    u16 a16 = 0xBEEF
+    volatile { *(p + 2 as u16) = a16 }
+    volatile { *(p + 2 as u16) -> b16 }
+    if b16 != 0xBEEF { exit(2) }
+    u32 a32 = 0xCAFEF00D
+    volatile { *(p + 4 as u32) = a32 }
+    volatile { *(p + 4 as u32) -> b32 }
+    if b32 != 0xCAFEF00D { exit(3) }
+    u64 a64 = 0x0123456789ABCDEF
+    volatile { *(p + 8 as u64) = a64 }
+    volatile { *(p + 8 as u64) -> b64 }
+    if b64 != 0x0123456789ABCDEF { exit(4) }
+    f32 af = 1.25
+    volatile { *(p + 20 as f32) = af }
+    volatile { *(p + 20 as f32) -> bf }
+    if bf != af { exit(5) }
+    f64 ad = 2.5
+    volatile { *(p + 24 as f64) = ad }
+    volatile { *(p + 24 as f64) -> bd }
+    if bd != ad { exit(6) }
+    exit(42)
+}'
+printf '%s\n' "$VX_P" > "$VX_T/a.kr"
+# riscv32: the 8/16/32-bit half (no 64-bit integers, no float pointer casts)
+printf '%s\n' "$VX_P" | awk '/a64 = /{skip=1} skip && /exit\(42\)/{skip=0} !skip' | sed 's/u64/u32/g' > "$VX_T/a_rv.kr"
+for VX_C in "x86_64|" "x86_64|--legacy" "arm64|" "arm64|--legacy" "riscv32|"; do
+    VX_A=${VX_C%%|*}; VX_M=${VX_C#*|}
+    TOTAL=$((TOTAL + 1))
+    VX_ROW="volatile_naturally_aligned_roundtrip $VX_A${VX_M:+ $VX_M}"
+    or_runner $VX_A "$VX_ROW" || continue
+    VX_SRC="$VX_T/a.kr"; [ "$VX_A" = riscv32 ] && VX_SRC="$VX_T/a_rv.kr"
+    VX_GOT=$(vx_run $VX_A "$VX_M" "$VX_SRC")
+    if [ "$VX_GOT" = 42 ]; then
+        PASS=$((PASS + 1))
+    else
+        echo "FAIL: $VX_ROW (got $VX_GOT, want 42; N = width N of u8 u16 u32 u64 f32 f64 failed)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -rf "$VX_T"
+
+# cse_invalidate_set_pinned is a TRIPWIRE, not the guard. ir_opt_cse_invalidates
+# is derived from ir_opt_is_side_effect minus an exemption list (a hand-kept
+# positive list had drifted from the side-effect list: barriers 126-130, then
+# 74/124/125/150/151/152). This row reads the source and fails loudly when the
+# code it reads moves: the exact side-effect set (WANT_SE), the exact
+# exemption set (WANT_EX), the derivation, every place either predicate is
+# named, and four windows pinned token for token -- the whole DCE mark loop,
+# the whole DCE sweep loop, the CSE loop from its `while` through the
+# invalidation block, and the whole ir_optimize body (the pass list). A source
+# pin can always be bypassed by an edit it does not read: a new pass called
+# from somewhere else, a pre-pass in front of a pinned loop, a call through a
+# computed pointer. The run rows above (side_effect_runs_*,
+# side_effect_kept_*, side_effect_stops_static_cse_listing,
+# barrier_stops_static_cse, fmt_uint_stops_static_cse and
+# write_builtins_stop_static_cse) are what catch a dropped op; this row only
+# makes the move visible.
+#
+# What it reads: every file in the Makefile's SRCS (std/sha256.kr included),
+# with comments stripped (string-aware) and u8/u16/u32/u64 read as
+# uint8..uint64, so spacing, tabs, line breaks and comments do not matter. A
+# mention of a predicate is its name as an identifier or as a string token
+# (fn_addr("ir_opt_is_side_effect")). ir_opt_is_side_effect may be mentioned
+# only from ir_opt_dce (twice) and the first line of ir_opt_cse_invalidates,
+# and ir_opt_cse_invalidates only from ir_opt_cse.
+#
+# What it accepts in the two predicates: an optional `uint64 x = <param>`
+# alias, then statements `if <cond> { return R }` and a final `return R`. R is
+# a decimal or hex literal in any number of parentheses; <cond> is `op == N`
+# (either side of the `==`), an `||` of those, or `op >= N && op <= M` (either
+# term first, either side of each comparison), grouped by parentheses if
+# wanted, with N below 65536. Everything else is refused by name and quoted:
+# a named constant or a call, `!=`, `<`, `>`, an `else` (so `else if` too),
+# `&&` that is not such a range, `&&` mixed with `||` without parentheses, a
+# statement after the final `return`. In the four windows nothing is
+# normalised beyond comments and the type spellings: any other token change
+# (a debug counter, a reordered statement, a renamed local) is refused, and
+# the row has to be re-pinned along with the edit.
+TOTAL=$((TOTAL + 1))
+CSEPIN=$(python3 - "$DIR/.." <<'PYEOF'
+import re, sys, os
+EXT = ".kr"
+IR_FILE = "ir.kr"
+# The side-effect and exemption sets this row expects. Changing either list
+# is an edit of this row; that alone makes it a tripwire, not a guard: an
+# edit made elsewhere (a new pass, a pre-pass before a pinned loop, a
+# computed call) is not read here. The run rows above are the guard for
+# every op reachable from source; this row only says loudly that the code it
+# reads has moved.
+WANT_SE = {31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 74, 76, 78, 80, 81, 82, 83, 85, 87,
+          90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
+          124, 125, 126, 127, 128, 129, 130, 131, 146, 148}
+WANT_EX = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
+# Windows pinned token for token. Each starts at the `while` of its loop, so
+# a statement inserted at the top of the loop body is inside it: the whole
+# DCE mark loop, the whole DCE sweep loop, the CSE loop from its `while` to
+# the end of the invalidation block, and the whole body of ir_optimize (the
+# pass list).
+WINDOWS = {
+ "dce_mark": ("ir_opt_dce", """
+while ii > 0 {
+    ii = ii - 1
+    uint64 op = ir_insn_opcode(ii)
+    if op == 0 { continue }
+    uint64 dest = ir_insn_dest(ii)
+    uint64 s1 = ir_insn_src1(ii)
+    uint64 s2 = ir_insn_src2(ii)
+    uint64 imm = ir_insn_imm(ii)
+    uint64 keep = ir_opt_is_side_effect(op)
+    if keep == 0 && dest > 0 && dest < 65536 {
+        uint64 lp = ir_dce_live + dest
+        uint8 lv = 0
+        unsafe { *(lp as uint8) -> lv }
+        if lv != 0 { keep = 1 }
+    }
+    if keep != 0 {
+        ir_opt_dce_mark(s1, 0)
+        if op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
+            ir_opt_dce_mark(s2, 0)
+        }
+        if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
+            ir_opt_dce_mark(imm, 0)
+        }
+    }
+}"""),
+ "dce_sweep": ("ir_opt_dce", """
+while si < ir_insn_count {
+    uint64 op = ir_insn_opcode(si)
+    if op == 0 { si = si + 1; continue }
+    if ir_opt_is_side_effect(op) == 0 {
+        uint64 dest = ir_insn_dest(si)
+        uint64 is_live = 0
+        if dest > 0 && dest < 65536 {
+            uint64 lp = ir_dce_live + dest
+            uint8 lv = 0
+            unsafe { *(lp as uint8) -> lv }
+            is_live = lv
+        }
+        if is_live == 0 {
+            ir_insn_set_opcode(si, 0)
+        }
+    }
+    si = si + 1
+}"""),
+ "cse": ("ir_opt_cse", """
+while ii < ir_insn_count {
+    uint64 op = ir_insn_opcode(ii)
+    if op == 0 { ii = ii + 1; continue }
+    uint64 bb = ir_insn_bb(ii)
+    if bb != cur_bb {
+        ir_cse_gen = ir_cse_gen + 1
+        cur_bb = bb
+    }
+    if op == 61 {
+        uint64 cd = ir_insn_dest(ii)
+        uint64 cs = ir_cse_canon_of(ir_insn_src1(ii))
+        ir_cse_canon_set(cd, cs)
+        ii = ii + 1
+        continue
+    }
+    if ir_opt_cse_invalidates(op) != 0 {
+        ir_cse_gen = ir_cse_gen + 1
+        ii = ii + 1
+        continue
+    }"""),
+ "passes": ("ir_optimize", """
+if ir_const_values == 0 { ir_const_values = alloc(65536 * 8) }
+if ir_const_known == 0 { ir_const_known = alloc(65536) }
+if ir_w32_clean == 0 { ir_w32_clean = alloc(65536) }
+uint64 opt_clear = ir_vreg_next
+if opt_clear > 65536 { opt_clear = 65536 }
+memset(ir_const_known, 0, opt_clear)
+memset(ir_w32_clean, 0, opt_clear)
+ir_opt_const_fold()
+ir_opt_dce()
+uint64 rw0 = ir_opt_rewrites
+ir_opt_cse()
+if ir_opt_rewrites != rw0 { ir_opt_dce() }
+uint64 rw1 = ir_opt_rewrites
+ir_opt_licm()
+if ir_opt_rewrites != rw1 { ir_opt_dce() }
+uint64 rw2 = ir_opt_rewrites
+ir_opt_recognize_rotate()
+if ir_opt_rewrites != rw2 {
+    ir_opt_const_fold()
+    ir_opt_dce()
+}
+uint64 rw3 = ir_opt_rewrites
+ir_opt_recognize_lea_bis()
+if ir_opt_rewrites != rw3 { ir_opt_dce() }
+if target_arch == 1 {
+    uint64 rw3a = ir_opt_rewrites
+    ir_compute_use_count()
+    ir_opt_fuse_lea_mem()
+    if ir_opt_rewrites != rw3a { ir_opt_dce() }
+}
+uint64 rw4 = ir_opt_rewrites
+ir_compute_use_count()
+ir_opt_recognize_ffma()
+if ir_opt_rewrites != rw4 { ir_opt_dce() }"""),
+}
+LABEL_OF = {"dce_mark": "ir_opt_is_side_effect (DCE mark loop)",
+            "dce_sweep": "ir_opt_is_side_effect (DCE sweep loop)",
+            "cse": "ir_opt_cse_invalidates (CSE loop)",
+            "passes": "the ir_optimize pass list"}
+ROOT = sys.argv[1]
+TOK = re.compile(r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|0[xX][0-9A-Fa-f]+|\d+|[A-Za-z_]\w*|==|!=|>=|<=|&&|\|\||->|<<|>>|\S')
+# u8/u16/u32/u64 are the same types as uint8..uint64; read them as one.
+# cg_alloc is alloc that stops the compile when the allocation is refused
+# (defect-sweep routes every compiler allocation through it): to the pinned
+# pass list the two are the same call, so a merge that turns the three
+# `alloc(65536 ...)` lines of ir_optimize into cg_alloc keeps the pin green.
+ALIAS = {"u8": "uint8", "u16": "uint16", "u32": "uint32", "u64": "uint64", "cg_alloc": "alloc"}
+def strip_comments(t):
+    # Drop // and /* */ comments; string and char literals are kept whole.
+    out, i, n = [], 0, len(t)
+    while i < n:
+        c = t[i]
+        if c in "\"'":
+            j = i + 1
+            while j < n and t[j] != c and t[j] != "\n":
+                j += 2 if t[j] == "\\" else 1
+            out.append(t[i:j + 1]); i = j + 1
+        elif t.startswith("//", i):
+            j = t.find("\n", i); i = n if j < 0 else j
+        elif t.startswith("/*", i):
+            j = t.find("*/", i + 2); k = n if j < 0 else j + 2
+            out.append("\n" * t.count("\n", i, k)); i = k
+        else:
+            out.append(c); i += 1
+    return "".join(out)
+def toks(text):
+    return [ALIAS.get(t, t) for t in TOK.findall(strip_comments(text))]
+class Refused(Exception): pass
+def srcs():
+    # Every file the compiler is built from: the Makefile's SRCS, with its
+    # backslash continuations (std/sha256 is one of them, not under src/).
+    mk = open(os.path.join(ROOT, "Makefile")).read().replace("\\\n", " ")
+    m = re.search(r"^SRCS\s*=([^\n]*)", mk, re.M)
+    if not m: raise Refused("cannot read SRCS from the Makefile")
+    files = m.group(1).split()
+    if not files or any(not f.endswith(EXT) for f in files):
+        raise Refused("SRCS in the Makefile is not a list of %s files: %s" % (EXT, " ".join(files)))
+    return files
+FILES = {}
+def load():
+    for f in srcs():
+        p = os.path.join(ROOT, f)
+        if not os.path.isfile(p): raise Refused("SRCS names %s, which does not exist" % f)
+        FILES[f] = toks(open(p).read())
+def fn_defs(name):
+    return [(f, i) for f, tk in FILES.items() for i in range(len(tk) - 1) if tk[i] == "fn" and tk[i + 1] == name]
+def ir_path():
+    return [f for f in FILES if os.path.basename(f) == IR_FILE]
+def body(name):
+    # -> (file, start index of body tokens, body tokens, param name) or error string
+    d = fn_defs(name)
+    if len(d) != 1:
+        return "%s is defined %d times in the Makefile's SRCS, want 1" % (name, len(d))
+    f, i = d[0]
+    tk = FILES[f]
+    if os.path.basename(f) != IR_FILE:
+        return "%s is defined in %s, want src/%s" % (name, f, IR_FILE)
+    sig = tk[i:i + 9]
+    if len(sig) < 9 or sig[2] != "(" or sig[3] != "uint64" or not re.fullmatch(r"[A-Za-z_]\w*", sig[4]) \
+            or sig[5:8] != [")", "->", "uint64"] or sig[8] != "{":
+        return "%s: signature is not `fn %s(uint64 <param>) -> uint64 {`: %s" % (name, name, " ".join(sig))
+    depth, j = 1, i + 9
+    while j < len(tk) and depth:
+        depth += {"{": 1, "}": -1}.get(tk[j], 0); j += 1
+    return (f, i + 9, tk[i + 9:j - 1], sig[4])
+def body_any(name):
+    d = fn_defs(name)
+    if len(d) != 1:
+        return "%s is defined %d times in the Makefile's SRCS, want 1" % (name, len(d))
+    f, i = d[0]
+    tk = FILES[f]
+    j = tk.index("{", i) + 1
+    k, depth = j, 1
+    while k < len(tk) and depth:
+        depth += {"{": 1, "}": -1}.get(tk[k], 0); k += 1
+    return (f, j, tk[j:k - 1], None)
+def lit(t):
+    if re.fullmatch(r"\d+", t): v = int(t)
+    elif re.fullmatch(r"0[xX][0-9A-Fa-f]+", t): v = int(t, 16)
+    else: return None
+    return v if v < 65536 else -1
+def ret_val(tk, i):
+    # `return` operand: a literal, optionally in parentheses. -> (value, next) or (None, i)
+    depth = 0
+    while tk[i] == "(":
+        depth += 1; i += 1
+    v = lit(tk[i])
+    if v is None or v < 0: return None, i
+    i += 1
+    for _ in range(depth):
+        if tk[i] != ")": return None, i
+        i += 1
+    return v, i
+def shown(tk, st):
+    # the statement at st: through its first `}`, and an `else` block after it
+    end = st
+    while tk[end] not in ("}", "<END>"): end += 1
+    if tk[end] == "}" and tk[end + 1] == "else":
+        end += 2
+        while tk[end] not in ("}", "<END>"): end += 1
+    return " ".join(t for t in tk[st:end + 1] if t != "<END>")
+MIRROR = {"==": "==", ">=": "<=", "<=": ">="}
+def parse_cond(tk, i, vs):
+    # One condition up to the `{`. Accepted: `op == N` (or `N == op`), an
+    # `||` of those, and an inclusive range `op >= N && op <= M` with either
+    # term first and either side of each comparison (`N <= op`); parentheses
+    # group. Refused: `!=`, `<`, `>`, a named constant, a call, a literal
+    # >= 65536, `&&` that is not exactly such a range, and `&&` mixed with
+    # `||` without parentheses.
+    def atom(i):
+        if tk[i] == "(":
+            t, v, i = disj(i + 1)
+            if tk[i] != ")": raise Refused("unbalanced parenthesis")
+            return t, v, i + 1
+        if tk[i] in vs and tk[i + 1] in ("==", ">=", "<="):
+            cmp_, other = tk[i + 1], tk[i + 2]
+        elif tk[i + 2] in vs and tk[i + 1] in ("==", ">=", "<=") and lit(tk[i]) is not None:
+            cmp_, other = MIRROR[tk[i + 1]], tk[i]
+        else:
+            raise Refused("unrecognised comparison at `%s`" % " ".join(tk[i:i + 3]))
+        n = lit(other)
+        if n is None: raise Refused("compares with a non-literal `%s`" % other)
+        if n < 0: raise Refused("literal %s is out of the opcode range" % other)
+        return {"==": "eq", ">=": "ge", "<=": "le"}[cmp_], n, i + 3
+    def conj(i):
+        # -> (tag, value, next, joined_by_and)
+        t, v, i = atom(i)
+        if tk[i] != "&&": return t, v, i, False
+        t2, v2, i = atom(i + 1)
+        if tk[i] == "&&": raise Refused("more than two `&&` terms")
+        if (t, t2) == ("le", "ge"): t, v, t2, v2 = t2, v2, t, v
+        if (t, t2) != ("ge", "le"): raise Refused("`&&` that is not `op >= N && op <= M`")
+        if v > v2: raise Refused("empty range %d..%d" % (v, v2))
+        return "set", set(range(v, v2 + 1)), i, True
+    def disj(i):
+        t, v, i, a = conj(i)
+        if tk[i] != "||": return t, v, i
+        terms = [(t, v, a)]
+        while tk[i] == "||":
+            t, v, i, a = conj(i + 1)
+            terms.append((t, v, a))
+        acc = set()
+        for t, v, a in terms:
+            if a: raise Refused("`&&` mixed with `||` without parentheses")
+            if t == "eq": acc.add(v)
+            elif t == "set": acc |= v
+            else: raise Refused("a lone `>=`/`<=` inside `||`")
+        return "set", acc, i
+    t, v, i = disj(i)
+    if t == "eq": return {v}, i
+    if t == "set": return v, i
+    raise Refused("a lone `>=`/`<=` condition")
+def parse_fn(name, ret_case, ret_tail, first=None):
+    b = body(name)
+    if isinstance(b, str): raise Refused(b)
+    f, start, tk, param = b
+    tk = tk + ["<END>"] * 6
+    vs, i, s = {param}, 0, set()
+    while tk[i] == ";": i += 1
+    # optional alias of the parameter: `uint64 x = param`
+    if tk[i] == "uint64" and tk[i + 2] == "=" and tk[i + 3] == param and tk[i + 4] in ("if", "return", ";"):
+        vs.add(tk[i + 1]); i += 4
+    if first:
+        want = ["if", first, "(", "?", ")", "==", "0", "{", "return"]
+        got = tk[i:i + 9]
+        ok = got[:3] == want[:3] and got[3] in vs and got[4:] == want[4:]
+        if ok:
+            v, j = ret_val(tk, i + 9)
+            ok = v == 0 and tk[j] == "}"
+        if not ok:
+            raise Refused("%s is not derived from %s: first statement is `%s`" % (name, first, shown(tk, i)))
+        i = j + 1
+    while True:
+        while tk[i] == ";": i += 1
+        st = i
+        if tk[i] == "return":
+            v, j = ret_val(tk, i + 1)
+            if v != ret_tail:
+                raise Refused("%s ends in `return %s`, want `return %d`" % (name, " ".join(tk[i + 1:max(j, i + 2)]), ret_tail))
+            while tk[j] == ";": j += 1
+            if tk[j] != "<END>":
+                raise Refused("%s: statement after the final `return %d`" % (name, ret_tail))
+            return s
+        try:
+            if tk[i] != "if": raise Refused("not an `if`")
+            ops, i = parse_cond(tk, i + 1, vs)
+            if tk[i:i + 2] != ["{", "return"]: raise Refused("the block is not `{ return %d }`" % ret_case)
+            v, i = ret_val(tk, i + 2)
+            if v != ret_case: raise Refused("the block is not `{ return %d }`" % ret_case)
+            while tk[i] == ";": i += 1
+            if tk[i] != "}": raise Refused("the block has more than `return %d`" % ret_case)
+            i += 1
+            if tk[i] == "else": raise Refused("an `else`")
+        except Refused as e:
+            raise Refused("%s: statement of a refused shape (%s): %s" % (name, e, shown(tk, st)))
+        s |= ops
+def window(label, fn, text):
+    b = body_any(fn)
+    if isinstance(b, str): raise Refused(b)
+    tk = b[2]
+    w = toks(text)
+    if label == "passes":
+        if tk != w:
+            k = next((k for k in range(min(len(tk), len(w))) if tk[k] != w[k]), min(len(tk), len(w)))
+            raise Refused("%s differs from the pinned one at token %d: `%s` (want `%s`)"
+                          % (LABEL_OF[label], k, " ".join(tk[k:k + 8]), " ".join(w[k:k + 8])))
+        return tk
+    hits = [k for k in range(len(tk) - len(w) + 1) if tk[k:k + len(w)] == w]
+    if len(hits) != 1:
+        raise Refused("%s: the pinned window (from the loop's `while` on) is found %d times in %s, want 1"
+                      % (LABEL_OF[label], len(hits), fn))
+    return tk
+def refs(name):
+    # every mention outside its own definition, by enclosing function. A
+    # string token that is exactly the name counts too: fn_addr("<name>")
+    # reaches the function without naming it as an identifier.
+    out = []
+    q = '"%s"' % name
+    for f, tk in FILES.items():
+        cur = None
+        for k, t in enumerate(tk):
+            if t == "fn" and k + 1 < len(tk): cur = tk[k + 1]
+            if (t == name and not (k > 0 and tk[k - 1] == "fn")) or t == q:
+                out.append(cur)
+    return sorted(out)
+def check():
+    load()
+    if len(ir_path()) != 1:
+        return "SRCS lists %d files named %s, want 1" % (len(ir_path()), IR_FILE)
+    se = parse_fn("ir_opt_is_side_effect", 1, 0)
+    ex = parse_fn("ir_opt_cse_invalidates", 0, 1, first="ir_opt_is_side_effect")
+    if se != WANT_SE:
+        return "side-effect set: missing %s, extra %s" % (sorted(WANT_SE - se), sorted(se - WANT_SE))
+    if ex != WANT_EX:
+        return "exemptions: missing %s, extra %s" % (sorted(WANT_EX - ex), sorted(ex - WANT_EX))
+    if ex - se:
+        return "exempt but not side-effecting: %s" % sorted(ex - se)
+    for name, want in (("ir_opt_is_side_effect", ["ir_opt_cse_invalidates", "ir_opt_dce", "ir_opt_dce"]),
+                       ("ir_opt_cse_invalidates", ["ir_opt_cse"])):
+        got = refs(name)
+        if got != want:
+            return "%s is referenced from %s, want exactly %s" % (name, got, want)
+    for label, (fn, text) in WINDOWS.items():
+        tk = window(label, fn, text)
+        if label == "dce_mark":
+            n = tk.count("keep")
+            if n != 4:
+                return "dce_mark: `keep` appears %d times in ir_opt_dce, want 4 (all in the pinned mark loop)" % n
+    return "ok"
+try:
+    print(check())
+except Refused as e:
+    print(e)
+except (IndexError, OSError) as e:
+    print("could not read the sources: %s" % e)
+PYEOF
+)
+if [ "$CSEPIN" = "ok" ]; then
+    PASS=$((PASS + 1))
+else
+    echo "FAIL: cse_invalidate_set_pinned ($CSEPIN)"
+    FAIL=$((FAIL + 1))
+fi
 
 echo ""
 echo "--- v2.6 method calls ---"
@@ -6189,7 +8216,7 @@ if $KRC lc --fix /tmp/krc_mig2_$$.kr > /dev/null 2>&1; then
         # Now verify the rewritten file still compiles and runs
         if $KRC $KRC_FLAGS /tmp/krc_mig2_$$.kr -o /tmp/krc_mig2_bin_$$ > /dev/null 2>&1; then
             chmod +x /tmp/krc_mig2_bin_$$
-            /tmp/krc_mig2_bin_$$ > /dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_mig2_bin_$$ > /dev/null 2>&1
             if [ "$?" = "42" ]; then
                 PASS=$((PASS + 1))
             else
@@ -6428,10 +8455,10 @@ for cparch in x86_64 arm64; do
     cprun=""
     if [ "$cparch" = "x86_64" ]; then
         $KRC /tmp/krc_constprec_$$.kr --arch=x86_64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
-            && cprun=$(/tmp/krc_constprec_$$ 2>&1)
+            && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_constprec_$$ 2>&1)
     elif command -v qemu-aarch64-static >/dev/null 2>&1; then
         $KRC /tmp/krc_constprec_$$.kr --arch=arm64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
-            && cprun=$(qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
+            && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
     else
         continue
     fi
@@ -6521,7 +8548,7 @@ fn main() -> uint64 {
 KREOF
 fnaddr2_err=""
 if $KRC --arch=x86_64 /tmp/krc_fnaddr2_$$.kr -o /tmp/krc_fnaddr2_$$ --emit=elf >/dev/null 2>&1; then
-    /tmp/krc_fnaddr2_$$; fa2rc=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_fnaddr2_$$; fa2rc=$?
     [ "$fa2rc" = "42" ] || fnaddr2_err="called-through-fn_addr-gave-$fa2rc-want-42"
 else
     fnaddr2_err="the-string-literal-form-stopped-compiling"
@@ -6666,7 +8693,7 @@ KREOF
 nakedalt_err=""
 if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf >/dev/null 2>&1; then
     if command -v qemu-aarch64-static >/dev/null 2>&1; then
-        qemu-aarch64-static /tmp/krc_nakedalt_$$; nart=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-aarch64-static /tmp/krc_nakedalt_$$; nart=$?
         [ "$nart" = "7" ] || nakedalt_err="ran-and-gave-$nart-want-7"
         if [ -z "$nakedalt_err" ]; then
             PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: PASS (read cntvct_el0 into a variable)"
@@ -7149,7 +9176,7 @@ else
     gz_note=""
     for gz_n in 0 1 65535 65536 131070; do
         head -c $gz_n /dev/urandom > /tmp/krgz_in_$$ 2>/dev/null
-        if ! /tmp/krgz_$$ < /tmp/krgz_in_$$ > /tmp/krgz_out_$$.gz 2>/dev/null; then
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krgz_$$ < /tmp/krgz_in_$$ > /tmp/krgz_out_$$.gz 2>/dev/null; then
             gz_ok=0; gz_note="encoder failed at $gz_n"; break
         fi
         if ! gunzip -c /tmp/krgz_out_$$.gz > /tmp/krgz_back_$$ 2>/dev/null; then
@@ -7197,20 +9224,20 @@ LCBEOF
 cp "$lcb_dir/t.kr" "$lcb_dir/orig.kr"
 lcb_ok=1
 lcb_why=""
-"$DIR/../build/krc2" lc --fix "$lcb_dir/t.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc --fix "$lcb_dir/t.kr" >/dev/null 2>&1
 # A rewrite must actually have happened, or every clause below is vacuous.
 grep -q 'v = load32(buf)' "$lcb_dir/t.kr" || { lcb_ok=0; lcb_why="no rewrite happened (positive control)"; }
 [ -f "$lcb_dir/t.kr.lcbak" ] || { lcb_ok=0; lcb_why="no backup written"; }
 cmp -s "$lcb_dir/t.kr.lcbak" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="backup is not the original bytes"; }
-"$DIR/../build/krc2" lc undo "$lcb_dir/t.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc undo "$lcb_dir/t.kr" >/dev/null 2>&1
 cmp -s "$lcb_dir/t.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="undo did not restore the original"; }
 # --dry-run must neither write a backup nor touch the file.
 cp "$lcb_dir/orig.kr" "$lcb_dir/dry.kr"
-"$DIR/../build/krc2" lc --fix --dry-run "$lcb_dir/dry.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc --fix --dry-run "$lcb_dir/dry.kr" >/dev/null 2>&1
 [ -f "$lcb_dir/dry.kr.lcbak" ] && { lcb_ok=0; lcb_why="--dry-run wrote a backup"; }
 cmp -s "$lcb_dir/dry.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="--dry-run modified the file"; }
 # undo with no backup must FAIL loudly rather than silently doing nothing.
-"$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
 [ "$?" != "0" ] || { lcb_ok=0; lcb_why="undo with no backup exited 0"; }
 if [ "$lcb_ok" = "1" ]; then
     PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"   # tripwire: not a skip -- every leg ran; a missing backup is the case tested
@@ -7231,10 +9258,10 @@ mkdir -p "$lcx_dir"
 cp "$DIR/../src/lexer.kr" "$lcx_dir/lex.kr"
 lcx_ok=1
 lcx_why=""
-lcx_sites=$("$DIR/../build/krc2" lc --fix "$lcx_dir/lex.kr" 2>&1 | sed -n 's/^migration: \([0-9]*\) migration site.*/\1/p')
+lcx_sites=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc --fix "$lcx_dir/lex.kr" 2>&1 | sed -n 's/^migration: \([0-9]*\) migration site.*/\1/p')
 [ -n "$lcx_sites" ] && [ "$lcx_sites" -gt 50 ] || { lcx_ok=0; lcx_why="expected a large rewrite on a real file, got '${lcx_sites:-none}'"; }
 cmp -s "$lcx_dir/lex.kr" "$DIR/../src/lexer.kr" && { lcx_ok=0; lcx_why="the file was NOT modified, so undo proves nothing"; }
-"$DIR/../build/krc2" lc undo "$lcx_dir/lex.kr" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" lc undo "$lcx_dir/lex.kr" >/dev/null 2>&1
 cmp -s "$lcx_dir/lex.kr" "$DIR/../src/lexer.kr" || { lcx_ok=0; lcx_why="undo did not recover the corrupted file"; }
 if [ "$lcx_ok" = "1" ]; then
     PASS=$((PASS + 1)); echo "  lc_undo_recovers_a_corrupted_source: PASS ($lcx_sites sites rewritten, fully recovered)"
@@ -7253,7 +9280,7 @@ rm -rf "$lcx_dir"
 # which emits a single ELF and no fat line at all, so $KRC could never pass.
 TOTAL=$((TOTAL + 1))
 printf 'fn main(){ exit(0) }\n' > "$DIR/../a1_tmp_$$.kr"
-a1_out=$("$DIR/../build/krc2" "$DIR/../a1_tmp_$$.kr" -o /tmp/a1_$$.krbo 2>&1)
+a1_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" "$DIR/../a1_tmp_$$.kr" -o /tmp/a1_$$.krbo 2>&1)
 a1_ok=1
 a1_why=""
 printf '%s' "$a1_out" | grep -q 'run it with: kr' || { a1_ok=0; a1_why="no runner hint"; }
@@ -7279,8 +9306,8 @@ printf 'fn main(){ exit(0) }\n' > "$DIR/../a1c_tmp_$$.kr"
 # Name the host slice by $RUN_ARCH so this does not silently invert on arm64.
 if [ "$RUN_ARCH" = "arm64" ]; then a1_host=linux-arm64; a1_away=linux-x64
 else a1_host=linux-x64; a1_away=linux-arm64; fi
-a1c_with=$("$DIR/../build/krc2" --targets=$a1_host,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cw_$$.krbo 2>&1)
-a1c_without=$("$DIR/../build/krc2" --targets=$a1_away,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cn_$$.krbo 2>&1)
+a1c_with=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" --targets=$a1_host,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cw_$$.krbo 2>&1)
+a1c_without=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/krc2" --targets=$a1_away,win-x64 "$DIR/../a1c_tmp_$$.kr" -o /tmp/a1cn_$$.krbo 2>&1)
 a1c_ok=1
 a1c_why=""
 printf '%s' "$a1c_with" | grep -q 'run it with: kr' || { a1c_ok=0; a1c_why="no hint when the host slice IS present"; }
@@ -7620,7 +9647,7 @@ MNREOF
     for mnr_mode in "" "--legacy"; do
         if $KRC --arch=$RUN_ARCH $mnr_mode "$DIR/../mnemr_tmp_$$.kr" -o /tmp/mnemr_$$ >/dev/null 2>&1; then
             chmod +x /tmp/mnemr_$$
-            /tmp/mnemr_$$ >/dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/mnemr_$$ >/dev/null 2>&1
             mnr_rc=$?
             [ "$mnr_rc" = "9" ] || { mnr_ok=0; echo "    ${mnr_mode:-ir} exited $mnr_rc, want 9"; }
         else
@@ -8276,7 +10303,7 @@ else
     printf '%s' "$asmoi_out" | grep -q "used before initialization.*'v'" \
         && { asmoi_ok=0; asmoi_note="false use-before-init diagnostic on v"; }
     chmod +x /tmp/asmoi_$$
-    /tmp/asmoi_$$ >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/asmoi_$$ >/dev/null 2>&1
     asmoi_rc=$?
     [ "$asmoi_rc" = "9" ] || { asmoi_ok=0; asmoi_note="$asmoi_note; exited $asmoi_rc, want 9"; }
 fi
@@ -8421,7 +10448,7 @@ va_skip=""
 # host arch, natively
 if $KRC --arch=$RUN_ARCH "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr_$$ >/dev/null 2>&1; then
     chmod +x /tmp/vattr_$$
-    /tmp/vattr_$$ >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/vattr_$$ >/dev/null 2>&1
     [ "$?" = "9" ] || { va_ok=0; va_note="native $RUN_ARCH run"; }
 else
     va_ok=0; va_note="native $RUN_ARCH build"
@@ -8434,7 +10461,7 @@ va_emu=""
 if [ -n "$va_emu" ]; then
     if $KRC --arch=$va_other "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr2_$$ >/dev/null 2>&1; then
         chmod +x /tmp/vattr2_$$
-        $va_emu /tmp/vattr2_$$ >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $va_emu /tmp/vattr2_$$ >/dev/null 2>&1
         [ "$?" = "9" ] || { va_ok=0; va_note="$va_other run"; }
     else
         va_ok=0; va_note="$va_other build (pure helpers should not drag in x86 asm)"
@@ -8570,7 +10597,7 @@ ASMBINDEOF
     for asmbind_be in "" "--legacy"; do
         if $KRC --arch=$RUN_ARCH $asmbind_be "$DIR/../asmbind_tmp_$$.kr" -o /tmp/asmbind_$$ >/dev/null 2>&1; then
             chmod +x /tmp/asmbind_$$
-            /tmp/asmbind_$$ >/dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/asmbind_$$ >/dev/null 2>&1
             asmbind_rc=$?
             [ "$asmbind_rc" = "42" ] || { asmbind_ok=0; asmbind_note="${asmbind_be:-ir} exited $asmbind_rc, want 42"; }
         else
@@ -9003,7 +11030,7 @@ else
     GOV_KRC=""
 fi
 mkdir -p "$GOV_DIR" && (cd "$GOV_DIR" && rm -rf .kernrift && \
-    "$GOV_KRC" lc --promote tail_call_intrinsic > /tmp/krc_gov_promote_$$.txt 2>&1)
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GOV_KRC" lc --promote tail_call_intrinsic > /tmp/krc_gov_promote_$$.txt 2>&1)
 if [ -n "$GOV_KRC" ] && \
    grep -q "promoted: tail_call_intrinsic" /tmp/krc_gov_promote_$$.txt 2>/dev/null && \
    [ -f "$GOV_DIR/.kernrift/proposals" ] && \
@@ -9502,9 +11529,9 @@ if [ -f "$DIR/../build/krc.kr" ]; then
     cp "$DIR/../build/krc.kr" /tmp/krc_bootstrap_$$.kr
     $KRC $KRC_FLAGS /tmp/krc_bootstrap_$$.kr -o /tmp/krc2_$$ > /dev/null 2>&1
     chmod +x /tmp/krc2_$$ 2>/dev/null
-    /tmp/krc2_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc3_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc2_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc3_$$ > /dev/null 2>&1
     chmod +x /tmp/krc3_$$ 2>/dev/null
-    /tmp/krc3_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc4_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc3_$$ --arch=$BS_ARCH /tmp/krc_bootstrap_$$.kr -o /tmp/krc4_$$ > /dev/null 2>&1
     if diff /tmp/krc3_$$ /tmp/krc4_$$ > /dev/null 2>&1; then
         PASS=$((PASS + 1))
         echo "  bootstrap: PASS (fixed point at $(wc -c < /tmp/krc3_$$) bytes)"
@@ -9617,7 +11644,7 @@ fn main() { exit(imp_after_comment_helper() + 35) }
 KREOF
 if $KRC $KRC_FLAGS "$IMPC_DIR/impmain.kr" -o "$IMPC_DIR/impbin" > /dev/null 2>&1; then
     chmod +x "$IMPC_DIR/impbin"
-    "$IMPC_DIR/impbin" > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMPC_DIR/impbin" > /dev/null 2>&1
     imp_ec=$?
     if [ "$imp_ec" -eq 42 ]; then
         PASS=$((PASS + 1))
@@ -9698,7 +11725,7 @@ fn main() {
     exit(0)
 }
 KREOF
-if "$KRCBIN" /tmp/krc_lz4_$$.kr -o /tmp/krc_lz4_$$.krbo > /dev/null 2>&1; then
+if timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRCBIN" /tmp/krc_lz4_$$.kr -o /tmp/krc_lz4_$$.krbo > /dev/null 2>&1; then
     if command -v python3 > /dev/null 2>&1; then
         if python3 -c "
 import struct, sys
@@ -9761,14 +11788,14 @@ cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > /tmp/krc_rt_kr_$$.kr
 # src/bcj.kr is exactly what this row exists to catch, and no other row
 # builds the runner.
 RT_FAT_OK=0; RT_RUN_OK=0
-"$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
-"$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
 if [ "$RT_FAT_OK" != "1" ] || [ "$RT_RUN_OK" != "1" ]; then
     FAIL=$((FAIL + 1))
     echo "  krbo_roundtrip: FAIL (compile failed: fat .krbo ok=$RT_FAT_OK, runner (runner.kr+bcj.kr) ok=$RT_RUN_OK)"
 else
     chmod +x /tmp/krc_rt_kr_$$
-    out=$(/tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
+    out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
     code=$?
     if [ "$out" = "roundtrip-ok" ] && [ "$code" = "123" ]; then
         PASS=$((PASS + 1))
@@ -11150,7 +13177,7 @@ fn main() {
 KREOF
     if $KRC --emit=obj /tmp/krc_ext_$$.kr -o /tmp/krc_ext_$$.o > /dev/null 2>&1 \
        && gcc /tmp/krc_ext_$$.o -o /tmp/krc_ext_linked_$$ -no-pie > /dev/null 2>&1; then
-        got=$(/tmp/krc_ext_linked_$$ 2>/dev/null)
+        got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ext_linked_$$ 2>/dev/null)
         if [ "$got" = "extern_ok" ]; then
             PASS=$((PASS + 1))
             echo "  extern_libc_write: PASS"
@@ -11178,7 +13205,7 @@ fn main() {
 KREOF
     if $KRC --emit=obj /tmp/krc_ext2_$$.kr -o /tmp/krc_ext2_$$.o > /dev/null 2>&1 \
        && gcc /tmp/krc_ext2_$$.o -o /tmp/krc_ext2_linked_$$ -no-pie > /dev/null 2>&1; then
-        got=$(/tmp/krc_ext2_linked_$$ 2>/dev/null)
+        got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ext2_linked_$$ 2>/dev/null)
         if [ "$got" = "two_externs" ]; then
             PASS=$((PASS + 1))
             echo "  extern_libc_strlen_write: PASS"
@@ -11295,7 +13322,7 @@ fn main() {
 KREOF
             if $KRC $KRC_FLAGS $BACKEND_FLAG --emit=obj /tmp/krc_extres_$$.kr -o /tmp/krc_extres_$$.o > /dev/null 2>&1 \
                && gcc /tmp/krc_extres_$$.o -o /tmp/krc_extres_bin_$$ -no-pie > /dev/null 2>&1; then
-                got=$(/tmp/krc_extres_bin_$$ 2>/dev/null)
+                got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_extres_bin_$$ 2>/dev/null)
                 if [ "$got" = "extern_resolved_ok" ]; then
                     PASS=$((PASS + 1))
                     echo "  $LABEL: PASS"
@@ -11345,7 +13372,7 @@ fn main() {
 KREOF
         if $KRC $KRC_FLAGS --emit=obj /tmp/krc_aobj_$$.kr -o /tmp/krc_aobj_$$.o > /dev/null 2>&1 \
            && gcc -nostdlib -static /tmp/krc_aobj_$$.o -o /tmp/krc_aobj_bin_$$ > /dev/null 2>&1; then
-            /tmp/krc_aobj_bin_$$ > /dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_aobj_bin_$$ > /dev/null 2>&1
             aobj_got=$?
             if [ "$aobj_got" = "42" ]; then
                 PASS=$((PASS + 1))
@@ -11376,7 +13403,7 @@ fn add(uint64 a, uint64 b) -> uint64 { return a + b }
 fn main() { exit(add(3, 4)) }
 KREOF
 if $KRC $KRC_FLAGS --legacy /tmp/krc_extnofp_$$.kr -o /tmp/krc_extnofp_bin_$$ > /dev/null 2>&1; then
-    /tmp/krc_extnofp_bin_$$
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_extnofp_bin_$$
     rc=$?
     if [ "$rc" = "7" ]; then
         PASS=$((PASS + 1))
@@ -11992,7 +14019,7 @@ if [ ! -f "$BEX_DIR/main.kr" ] || [ ! -f "$BEX_DIR/pager.kr" ]; then
 elif ! $KRC --arch="$RUN_ARCH" "$BEX_DIR/main.kr" -o "$BEX_BIN" >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (compile failed)"
 else
-    "$BEX_BIN" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$BEX_BIN" >/dev/null 2>&1
     bex_rc=$?
     if [ "$bex_rc" = "0" ]; then
         PASS=$((PASS + 1)); echo "  tutorial_btree_example_runs: PASS (magic + value survive msync and reopen)"
@@ -12093,7 +14120,7 @@ REPO_ROOT="$DIR/.."
 printf 'fn main() { uint64 a = 10; uint64 b = 0; uint64 c = a / b; exit(c) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --debug "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_test_$$
-    /tmp/krc_test_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" != "0" ]; then
         PASS=$((PASS + 1))
@@ -12113,7 +14140,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 a = 9223372036854775807; uint64 b = a + a; exit(b) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --debug "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_test_$$
-    /tmp/krc_test_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" != "0" ]; then
         PASS=$((PASS + 1))
@@ -12133,7 +14160,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 p = 0; uint64 v = load64(p); exit(v) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --debug "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_test_$$
-    /tmp/krc_test_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" != "0" ]; then
         PASS=$((PASS + 1))
@@ -12172,7 +14199,7 @@ fi
 # Test: binary with -g runs correctly
 TOTAL=$((TOTAL + 1))
 chmod +x /tmp/krc_g_$$
-/tmp/krc_g_$$ > /dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_g_$$ > /dev/null 2>&1
 actual=$?
 if [ "$actual" = "42" ]; then
     PASS=$((PASS + 1))
@@ -12225,7 +14252,7 @@ REPO_ROOT="$DIR/.."
 printf 'fn main() { exit(42) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "42" ]; then
         PASS=$((PASS + 1))
@@ -12265,7 +14292,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { exit(10 / 3) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "3" ]; then
         PASS=$((PASS + 1))
@@ -12285,7 +14312,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 x = 10; if x > 5 { exit(1) } else { exit(0) } }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "1" ]; then
         PASS=$((PASS + 1))
@@ -12305,7 +14332,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 p = alloc(64); store64(p, 42); uint64 v = load64(p); dealloc(p); exit(v) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "42" ]; then
         PASS=$((PASS + 1))
@@ -12325,7 +14352,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 p = alloc(16); store8(p, 65); uint64 v = load8(p); dealloc(p); exit(v) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "65" ]; then
         PASS=$((PASS + 1))
@@ -12345,7 +14372,7 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() { uint64 a = alloc(64); uint64 b = alloc(64); store64(a, 10); store64(b, 32); uint64 r = load64(a) + load64(b); dealloc(a); dealloc(b); exit(r) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "42" ]; then
         PASS=$((PASS + 1))
@@ -12365,7 +14392,7 @@ cat > "$REPO_ROOT/test_tmp_$$.kr" << 'IREOF'
 fn main() { uint64 i = 0; while i < 100 { if i == 5 { break }; i = i + 1 }; exit(i) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 5 ]; then
         echo "  ir_break: PASS"
     else
@@ -12381,7 +14408,7 @@ cat > "$REPO_ROOT/test_tmp_$$.kr" << 'IREOF'
 fn main() { uint64 i = 0; uint64 s = 0; while i < 10 { i = i + 1; if i == 5 { continue }; s = s + 1 }; exit(s) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 9 ]; then
         echo "  ir_continue: PASS"
     else
@@ -12398,7 +14425,7 @@ fn add(uint64 a, uint64 b) -> uint64 { return a + b }
 fn main() { exit(add(20, 22)) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 42 ]; then
         echo "  ir_fn_call: PASS"
     else
@@ -12415,7 +14442,7 @@ fn fib(uint64 n) -> uint64 { if n <= 1 { return n }; return fib(n - 1) + fib(n -
 fn main() { exit(fib(10)) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 55 ]; then
         echo "  ir_recursion: PASS"
     else
@@ -12431,7 +14458,7 @@ cat > "$REPO_ROOT/test_tmp_$$.kr" << 'IREOF'
 fn main() { uint64 x = 2; uint64 r = 0; match x { 1 => { r = 10 } 2 => { r = 42 } 3 => { r = 30 } }; exit(r) }
 IREOF
 if timeout 10 "$KRC" $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ 2>/dev/null; then
-    chmod +x /tmp/krc_ir_$$; /tmp/krc_ir_$$; actual=$?
+    chmod +x /tmp/krc_ir_$$; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$; actual=$?
     if [ "$actual" -eq 42 ]; then
         echo "  ir_match: PASS"
     else
@@ -12460,7 +14487,7 @@ fn main() {
 IREOF
 if $KRC $KRC_FLAGS --ir "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_ir_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_ir_$$
-    /tmp/krc_ir_$$ > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_ir_$$ > /dev/null 2>&1
     actual=$?
     if [ "$actual" = "171" ]; then
         PASS=$((PASS + 1))
@@ -13367,7 +15394,7 @@ if echo "$INLIDX_IR" | grep -q "call @"; then
 fi
 for _fl in "" "--legacy"; do
     if $KRC --arch="$RUN_ARCH" $_fl "$REPO_ROOT/test_tmp_inlidx_$$.kr" -o "/tmp/krc_inlidx_$$" >/dev/null 2>&1; then
-        "/tmp/krc_inlidx_$$"; _rc=$?
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "/tmp/krc_inlidx_$$"; _rc=$?
         [ "$_rc" = "7" ] || { INLIDX_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
     else
         INLIDX_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
@@ -13457,7 +15484,7 @@ $KRC $KRC_FLAGS "$MANYFN" -o "$MANYBIN" >/dev/null 2>&1
 MANYOUT=""
 if [ -f "$MANYBIN" ]; then
     chmod +x "$MANYBIN"
-    MANYOUT=$("$MANYBIN" 2>/dev/null)
+    MANYOUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MANYBIN" 2>/dev/null)
 fi
 rm -f "$MANYFN" "$MANYBIN"
 if [ "$MANYOUT" = "8400" ]; then
@@ -14385,7 +16412,7 @@ fi
 # inline_asm.kr prints 'X', then an operand-less multi-line `asm { "memw" "nop" }`
 # block, then 'Y'. Boot equality (XY) proves the block did not perturb the
 # surrounding putc calls. The block is deliberately operand-less — the upstream
-# constraint binding hardcodes x86 reg codes (ir.kr:5456), out of scope here.
+# constraint binding hardcodes x86 reg codes (ir.kr:5481), out of scope here.
 # Structural gate (when the xtensa objdump is present): assert a `nop` is emitted.
 # A `memw` grep would NOT discriminate — putc emits its own MEMW MMIO barriers on
 # every device access — but NOTHING else in the backend emits `nop`, so a present
@@ -15206,7 +17233,7 @@ fi
 
 # Compiles examples/riscv-featuregap/t9_asm.kr, which exercises inline asm
 # (IR_ASM_BLOCK 96): a raw hex word `asm("0x00150513")` = `addi a0,a0,1` bound
-# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:5451/
+# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:5476/
 # 5444), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
 # raw word is a COMPRESSIBLE encoding (rd==rs1, simm6 imm) so its objdump
 # survival as a full 4-byte `addi a0,a0,1` proves the handler marked the range
@@ -15277,7 +17304,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_exit_code (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15324,7 +17351,7 @@ RVEOF
         echo "FAIL: riscv_alloc_oom_returns_zero (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_A_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_A_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "44" ]; then
             PASS=$((PASS + 1))
@@ -15355,7 +17382,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_hello (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" 2>/dev/null)
         if [ "$RV_OUT" = "hello riscv" ]; then
             PASS=$((PASS + 1))
             echo "  riscv_hosted_hello: PASS (qemu-riscv32-static printed 'hello riscv')"
@@ -15410,7 +17437,7 @@ RVSP
         echo "FAIL: riscv_hosted_struct_param (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_SP_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_SP_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15458,7 +17485,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_argv (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(qemu-riscv32-static "$RV_BIN" HELLO 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" HELLO 2>/dev/null)
         if [ "$RV_OUT" = "HELLO" ]; then
             PASS=$((PASS + 1))
             echo "  riscv_hosted_argv: PASS (qemu-riscv32-static echoed 'HELLO')"
@@ -15489,7 +17516,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_heap (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" 2>/dev/null)
         if [ "$RV_OUT" = "ok" ]; then
             PASS=$((PASS + 1))
             echo "  riscv_hosted_heap: PASS (qemu-riscv32-static printed 'ok')"
@@ -15527,7 +17554,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
         echo "FAIL: riscv_hosted_obj_single (link failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15572,7 +17599,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
         echo "FAIL: riscv_hosted_link (link failed)"
         FAIL=$((FAIL + 1))
     else
-        qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -15744,7 +17771,7 @@ printf 'fn main() { exit(42) }\n' > "$XT_E_SRC"
 # esp32 must REFUSE, with the new wording, and must exit non-zero: a
 # print-and-continue regression would still match the grep below while
 # happily emitting SIMCALL into an ESP32 image (xtensa_framecap_guard,
-# tests/run_tests.sh:14534, checks its rc the same way).
+# tests/run_tests.sh:16561, checks its rc the same way).
 XT_REFUSE_ERR=$($KRC --arch=xtensa --freestanding --target=esp32 "$XT_E_SRC" -o /dev/null 2>&1)
 XT_REFUSE_RC=$?
 if [ $XT_REFUSE_RC -ne 0 ] && echo "$XT_REFUSE_ERR" | grep -q "no OS to return an exit status to"; then
@@ -15944,7 +17971,10 @@ echo "--- esp32 esp-image container byte-identity test ---"
 TOTAL=$((TOTAL + 1))
 ESP_SRC="$DIR/../test_tmp_esp_$$.kr"
 ESP_BIN="/tmp/krc_esp_$$"
-ESP_OUT="/tmp/our_image.bin"
+# The program writes the image to ESP_OUT; a fixed /tmp name let two suites
+# overwrite each other's image, so the literal below is rewritten to a
+# per-run path once the source is written.
+ESP_OUT="/tmp/krc_our_image_$$.bin"
 ESP_GOLD="$DIR/golden/esp32_ref_image.bin"
 cat > "$ESP_SRC" <<'ESP_EOF'
 import "std/sha256.kr"
@@ -15986,6 +18016,7 @@ fn main() {
     exit(0)
 }
 ESP_EOF
+sed -i "s#\"/tmp/our_image.bin\"#\"$ESP_OUT\"#" "$ESP_SRC"
 if [ ! -f "$ESP_GOLD" ]; then
     echo "FAIL: esp32_image_format (golden reference $ESP_GOLD missing)"
     FAIL=$((FAIL + 1))
@@ -15996,7 +18027,7 @@ elif ! $KRC $KRC_FLAGS "$ESP_SRC" -o "$ESP_BIN" >/dev/null 2>&1; then
 else
     chmod +x "$ESP_BIN"
     rm -f "$ESP_OUT"
-    "$ESP_BIN" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$ESP_BIN" >/dev/null 2>&1
     if cmp -s "$ESP_OUT" "$ESP_GOLD"; then
         PASS=$((PASS + 1))
         echo "  esp32_image_format: PASS ($(wc -c < "$ESP_GOLD" | tr -d ' ') bytes byte-identical to esptool reference)"
@@ -16385,7 +18416,7 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f /tmp/krc_tnone_nf1_$$
 if [ -n "$TN_RAW_KRC" ]; then
-    "$TN_RAW_KRC" --target=none "$TN_SRC" -o /tmp/krc_tnone_nf1_$$ >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$TN_RAW_KRC" --target=none "$TN_SRC" -o /tmp/krc_tnone_nf1_$$ >/dev/null 2>&1
 fi
 TN_NF1_MAGIC=""
 if [ -f /tmp/krc_tnone_nf1_$$ ]; then
@@ -16498,7 +18529,7 @@ t6_refuses() {
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/out"
     local err st
-    err=$("$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
+    err=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
     if [ -z "$T6_KRC" ]; then
         echo "FAIL: $name (no raw compiler binary found)"; FAIL=$((FAIL + 1))
     elif [ "$st" = "0" ] || [ -f "$T6_D/out" ]; then
@@ -16522,7 +18553,7 @@ t6_builds() {
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/out"
     local err st
-    err=$("$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
+    err=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" "$@" -o "$T6_D/out" 2>&1); st=$?
     if [ -n "$T6_KRC" ] && [ "$st" = "0" ] && [ -f "$T6_D/out" ]; then
         PASS=$((PASS + 1)); echo "  $name: PASS"
     else
@@ -16620,7 +18651,7 @@ t6_builds "t6_emit_obj_arm64_debug_builds" -- --arch=arm64 --emit=obj --debug "$
 # that only asserted "some refusal fired" would have passed unchanged
 # across this whole commit and proved nothing.
 TOTAL=$((TOTAL + 1))
-T6_LKM_ERR=$("$T6_KRC" --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr" -o "$T6_D/lkm_out" 2>&1); T6_LKM_ST=$?
+T6_LKM_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --arch=arm64 --emit=lkm --debug "$T6_D/arr.kr" -o "$T6_D/lkm_out" 2>&1); T6_LKM_ST=$?
 if [ "$T6_LKM_ST" != "0" ] && echo "$T6_LKM_ERR" | grep -q -- "--emit=lkm" \
    && echo "$T6_LKM_ERR" | grep -q "x86_64" \
    && ! echo "$T6_LKM_ERR" | grep -q -- "--debug"; then
@@ -16674,7 +18705,7 @@ ES_BAD=""
 for ES in $EMIT_SPELLINGS; do
     TOTAL=$((TOTAL + 1))
     rm -f "$T6_D/es_out"
-    ES_ERR=$("$T6_KRC" --arch=arm64 --debug --emit=$ES "$T6_D/arr.kr" -o "$T6_D/es_out" 2>&1); ES_ST=$?
+    ES_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --arch=arm64 --debug --emit=$ES "$T6_D/arr.kr" -o "$T6_D/es_out" 2>&1); ES_ST=$?
     # No spelling may be turned away FOR BEING --debug any more. Checked on
     # every row, including the ones that legitimately fail for another
     # reason -- this single assertion is what would catch the refusal (or
@@ -16741,9 +18772,9 @@ printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    println(v)\n    
 # never native-executed on a mismatched host.
 if [ -n "$QEMU_A64" ]; then
     TOTAL=$((TOTAL + 1))
-    if $T6_KRC --arch=arm64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_ir_a64" >/dev/null 2>&1; then
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $T6_KRC --arch=arm64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_ir_a64" >/dev/null 2>&1; then
         chmod +x "$T6_D/oob_ir_a64"
-        $QEMU_A64 "$T6_D/oob_ir_a64" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $QEMU_A64 "$T6_D/oob_ir_a64" >/dev/null 2>&1
         oob_ir_a64_st=$?
         if [ "$oob_ir_a64_st" != "0" ]; then
             PASS=$((PASS + 1)); echo "  t6_debug_arm64_ir_still_traps: PASS (exit $oob_ir_a64_st)"
@@ -16765,9 +18796,9 @@ fi
 # (cannot execute), which reads as a wrong answer rather than a wrong arch.
 if [ "$RUN_ARCH" = "x86_64" ]; then
     TOTAL=$((TOTAL + 1))
-    if $T6_KRC --legacy --arch=x86_64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_leg_x64" >/dev/null 2>&1; then
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $T6_KRC --legacy --arch=x86_64 --debug "$T6_D/oob.kr" -o "$T6_D/oob_leg_x64" >/dev/null 2>&1; then
         chmod +x "$T6_D/oob_leg_x64"
-        "$T6_D/oob_leg_x64" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_D/oob_leg_x64" >/dev/null 2>&1
         oob_leg_x64_st=$?
         if [ "$oob_leg_x64_st" != "0" ]; then
             PASS=$((PASS + 1)); echo "  t6_debug_legacy_x86_64_still_traps: PASS (exit $oob_leg_x64_st)"
@@ -16786,9 +18817,9 @@ if [ "$RUN_ARCH" = "x86_64" ]; then
     # _link gate above (gcc, -no-pie, x86_64 host toolchain).
     if command -v gcc > /dev/null 2>&1; then
         TOTAL=$((TOTAL + 1))
-        if $T6_KRC --arch=x86_64 --emit=obj --debug "$T6_D/oob.kr" -o "$T6_D/oob_obj_x64.o" >/dev/null 2>&1 \
+        if timeout -k 5 "$RUN_TEST_TIMEOUT" $T6_KRC --arch=x86_64 --emit=obj --debug "$T6_D/oob.kr" -o "$T6_D/oob_obj_x64.o" >/dev/null 2>&1 \
            && gcc "$T6_D/oob_obj_x64.o" -o "$T6_D/oob_obj_x64" -no-pie >/dev/null 2>&1; then
-            "$T6_D/oob_obj_x64" >/dev/null 2>&1
+            timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_D/oob_obj_x64" >/dev/null 2>&1
             oob_obj_x64_st=$?
             if [ "$oob_obj_x64_st" != "0" ]; then
                 PASS=$((PASS + 1)); echo "  t6_debug_obj_x86_64_still_traps: PASS (exit $oob_obj_x64_st)"
@@ -16839,7 +18870,7 @@ t6_builds "t6_emit_elfexe_tnone" -- --emit=elfexe --arch=x86_64 --target=none "$
 #    provider-routing tests read. Assert the content, not just the exit code:
 #    an empty stream would satisfy exit 0.
 TOTAL=$((TOTAL + 1))
-T6_OUT=$("$T6_KRC" --emit=asm --arch=x86_64 --target=none "$T6_D/plain.kr" -o "$T6_D/a.s" 2>&1)
+T6_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --emit=asm --arch=x86_64 --target=none "$T6_D/plain.kr" -o "$T6_D/a.s" 2>&1)
 if [ -f "$T6_D/a.s" ] && grep -q "main" "$T6_D/a.s"; then
     PASS=$((PASS + 1)); echo "  t6_emit_asm_tnone: PASS"
 else
@@ -16847,7 +18878,7 @@ else
 fi
 rm -f "$T6_D/a.s"
 TOTAL=$((TOTAL + 1))
-T6_OUT=$("$T6_KRC" --emit=ir --arch=x86_64 --target=none "$T6_D/plain.kr" 2>&1)
+T6_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --emit=ir --arch=x86_64 --target=none "$T6_D/plain.kr" 2>&1)
 if echo "$T6_OUT" | grep -q "^function main:"; then
     PASS=$((PASS + 1)); echo "  t6_emit_ir_tnone: PASS"
 else
@@ -16956,7 +18987,7 @@ t6_builds "t6_pair_ok_riscv32_none" -- --arch=riscv32 --target=none "$T6_D/plain
 t6_builds "t6_pair_ok_xtensa_none" -- --arch=xtensa --target=none "$T6_D/plain.kr"
 t6_builds "t6_pair_ok_xtensa_freestanding" -- --arch=xtensa --freestanding "$T6_D/plain.kr"
 TOTAL=$((TOTAL + 1))
-T6_OUT=$("$T6_KRC" --arch=xtensa --target=linux "$T6_D/plain.kr" -o "$T6_D/out" 2>&1)
+T6_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$T6_KRC" --arch=xtensa --target=linux "$T6_D/plain.kr" -o "$T6_D/out" 2>&1)
 if echo "$T6_OUT" | grep -q "not a supported target pair"; then
     echo "FAIL: t6_pair_ok_xtensa_linux (rejected by the pair check; every --arch=xtensa --freestanding build carries target_os=0)"
     FAIL=$((FAIL + 1))
@@ -17102,7 +19133,7 @@ img_refuses image_targets_with_none "cannot build a fat binary" --arch=x86_64 --
 TOTAL=$((TOTAL + 1))
 if [ -f "$DIR/../build/krc2" ]; then IMG_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else IMG_RAW_KRC=""; fi
 rm -f /tmp/krc_imgna_$$
-imgna_out=$("$IMG_RAW_KRC" "$IMG_SRC" -o /tmp/krc_imgna_$$ --target=none --emit=image --load-addr=0x40400100 2>&1); imgna_st=$?
+imgna_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMG_RAW_KRC" "$IMG_SRC" -o /tmp/krc_imgna_$$ --target=none --emit=image --load-addr=0x40400100 2>&1); imgna_st=$?
 if [ -n "$IMG_RAW_KRC" ] && [ $imgna_st -ne 0 ] \
    && echo "$imgna_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_imgna_$$ ]; then
     PASS=$((PASS + 1)); echo "  image_needs_explicit_arch: PASS"
@@ -18186,7 +20217,7 @@ uefi_refuses uefi_refuses_xtensa "no PE Machine value for xtensa" --arch=xtensa 
 TOTAL=$((TOTAL + 1))
 if [ -f "$DIR/../build/krc2" ]; then UEFI_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else UEFI_RAW_KRC=""; fi
 rm -f /tmp/krc_uefina_$$
-uefina_out=$("$UEFI_RAW_KRC" "$UEFI_SRC" -o /tmp/krc_uefina_$$ --target=none --emit=uefi 2>&1); uefina_st=$?
+uefina_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$UEFI_RAW_KRC" "$UEFI_SRC" -o /tmp/krc_uefina_$$ --target=none --emit=uefi 2>&1); uefina_st=$?
 if [ -n "$UEFI_RAW_KRC" ] && [ $uefina_st -ne 0 ] \
    && echo "$uefina_out" | grep -q "requires an explicit --arch" && [ ! -f /tmp/krc_uefina_$$ ]; then
     PASS=$((PASS + 1)); echo "  uefi_requires_explicit_arch: PASS"
@@ -20508,7 +22539,7 @@ else
 fi
 for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     if [ -n "$CP_KRC" ] && [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "no operating system"; then
         PASS=$((PASS + 1)); echo "  choke_point_$A: PASS"
     else
@@ -20527,14 +22558,14 @@ done
 # validation under --target=none (asserted by t6_legacy_tnone_* above).
 # --emit=obj is: it reaches the SAME src/codegen.kr and
 # src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
-# `emit_mode != 3` guard at src/main.kr:4450 and arm64 through the one at
+# `emit_mode != 3` guard at src/main.kr:5150 and arm64 through the one at
 # :4005 -- so retargeting these assertions onto it keeps every legacy
 # bare-metal guard live and tested rather than turning them into unreachable
 # code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
 # and --legacy is not: dropping both would have deleted this block.
 for CP_FLAG in --emit=obj; do
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" $CP_FLAG --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" $CP_FLAG --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     CP_NAME=$(echo "$CP_FLAG" | tr -d '-' | tr '=' '_')
     if [ -n "$CP_KRC" ] && [ "$CP_ST" != "0" ] && echo "$CP_ERR" | grep -q "no operating system"; then
         PASS=$((PASS + 1)); echo "  choke_point_x86_$CP_NAME: PASS"
@@ -20591,7 +22622,7 @@ for CP_B in $CP_CASE_NAMES; do
     esac
     printf 'fn main() { %s }\n' "$CP_BODY" > "$CP_SRC"
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --emit=obj --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --emit=obj --arch=x86_64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
     if echo "$CP_ERR" | grep -q "reached the emitter from '$CP_B'"; then
         PASS=$((PASS + 1)); echo "  choke_point_names_${CP_B}_obj: PASS"
     else
@@ -20610,7 +22641,7 @@ printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 # same reason as the block above: the IR path refuses earlier now, and
 # --legacy is refused at flag validation.
 TOTAL=$((TOTAL + 1))
-CP_ERR=$("$CP_KRC" --emit=obj --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
+CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --emit=obj --arch=arm64 --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1)
 if echo "$CP_ERR" | grep -q "before it can be used in a freestanding image\.$"; then
     PASS=$((PASS + 1)); echo "  choke_point_diag_not_truncated: PASS"
 else
@@ -20696,7 +22727,7 @@ fi
 # device, emitting no ECALL at all -- so neither arch may refuse here.
 for A in riscv32 xtensa; do
     TOTAL=$((TOTAL + 1))
-    CP_ERR=$("$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
+    CP_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$CP_SRC" -o /tmp/krc_choke_bin_$$ 2>&1); CP_ST=$?
     if [ "$CP_ST" = "0" ] && [ -f /tmp/krc_choke_bin_$$ ]; then
         PASS=$((PASS + 1)); echo "  choke_point_${A}_exit_still_allowed: PASS"
     else
@@ -20764,7 +22795,7 @@ for A in x86_64 arm64; do
         AU_OUT="/tmp/krc_au_$$"
         TOTAL=$((TOTAL + 1))
         rm -f "$AU_OUT"
-        AU_ERR=$("$CP_KRC" --arch=$A --target=none "$AU_F" -o "$AU_OUT" 2>&1); AU_ST=$?
+        AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$AU_F" -o "$AU_OUT" 2>&1); AU_ST=$?
         if [ "$AU_ST" = "0" ]; then
             echo "FAIL: audit_${AU_B}_$A (compiled CLEAN under --target=none -- a fall-through site was missed)"
             FAIL=$((FAIL + 1))
@@ -20789,7 +22820,7 @@ done
 # checked to its final character so a hand-counted write() length (the defect
 # 563b0f3 fixed 30 of) cannot truncate the advice off the end.
 TOTAL=$((TOTAL + 1))
-AU_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$AU_D/a_exit.kr" -o /tmp/krc_au_$$ 2>&1)
+AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=none "$AU_D/a_exit.kr" -o /tmp/krc_au_$$ 2>&1)
 if echo "$AU_ERR" | grep -q "end main with \`loop { }\` instead -- there is no parent process to return a status to$"; then
     PASS=$((PASS + 1)); echo "  audit_refusal_is_actionable: PASS"
 else
@@ -20814,7 +22845,7 @@ fn println(uint64 v) -> uint64 {
 fn main() { println(7)  loop { } }
 AUEOF
 rm -f /tmp/krc_au_ov_$$
-AU_ERR=$("$CP_KRC" --arch=x86_64 --target=none "$AU_D/ov.kr" -o /tmp/krc_au_ov_$$ 2>&1); AU_ST=$?
+AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=none "$AU_D/ov.kr" -o /tmp/krc_au_ov_$$ 2>&1); AU_ST=$?
 if [ "$AU_ST" = "0" ] && [ -f /tmp/krc_au_ov_$$ ]; then
     PASS=$((PASS + 1)); echo "  audit_builtin_override_beats_refusal: PASS"
 else
@@ -20838,7 +22869,7 @@ AUEOF
 AU_POS_OK=1
 for A in x86_64 arm64; do
     rm -f /tmp/krc_au_pos_$$
-    "$CP_KRC" --arch=$A --target=none "$AU_D/pos.kr" -o /tmp/krc_au_pos_$$ >/dev/null 2>&1 \
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --target=none "$AU_D/pos.kr" -o /tmp/krc_au_pos_$$ >/dev/null 2>&1 \
         || AU_POS_OK=0
     [ -f /tmp/krc_au_pos_$$ ] || AU_POS_OK=0
 done
@@ -20872,7 +22903,7 @@ for AU_FLAG in --emit=obj; do
         TOTAL=$((TOTAL + 1))
         AU_OUT="/tmp/krc_au_lg_$$"
         rm -f "$AU_OUT"
-        AU_ERR=$("$CP_KRC" $AU_FLAG --arch=$A --target=none "$AU_D/a_time_ns.kr" -o "$AU_OUT" 2>&1); AU_ST=$?
+        AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" $AU_FLAG --arch=$A --target=none "$AU_D/a_time_ns.kr" -o "$AU_OUT" 2>&1); AU_ST=$?
         AU_TAG=$(echo "$AU_FLAG" | tr -d '-' | tr '=' '_')
         if [ "$AU_ST" != "0" ] && [ ! -f "$AU_OUT" ] \
            && echo "$AU_ERR" | grep -q "error: --target=none: 'time_ns' is not available on bare metal"; then
@@ -20893,7 +22924,7 @@ done
 for A in riscv32 xtensa; do
     TOTAL=$((TOTAL + 1))
     printf 'static uint32 sink = 0\nfn main() {\n    sink = write(1, "x", 1)\n    loop { }\n}\n' > "$AU_D/fs.kr"
-    AU_ERR=$("$CP_KRC" --arch=$A --freestanding "$AU_D/fs.kr" -o /tmp/krc_au_fs_$$ 2>&1)
+    AU_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=$A --freestanding "$AU_D/fs.kr" -o /tmp/krc_au_fs_$$ 2>&1)
     if echo "$AU_ERR" | grep -q "$A: IR op 52 not yet implemented"; then
         PASS=$((PASS + 1)); echo "  audit_${A}_freestanding_unchanged: PASS"
     else
@@ -20964,8 +22995,8 @@ for A in x86_64 arm64; do
         TOTAL=$((TOTAL + 1))
         printf 'import "%s"\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_M" "$PV_CALL" > "$PV_D/r.kr"
         rm -f "$PV_D/r.out"
-        PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/r.kr" -o "$PV_D/r.out" 2>&1); PV_ST=$?
-        PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/r.kr" 2>&1)
+        PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/r.kr" -o "$PV_D/r.out" 2>&1); PV_ST=$?
+        PV_IR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/r.kr" 2>&1)
         if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/r.out" ]; then
             echo "FAIL: provider_route_${pv_i}_$A (exit $PV_ST, no artifact: '$PV_ERR')"; FAIL=$((FAIL + 1))
         elif echo "$PV_IR" | grep -q "syscall"; then
@@ -20993,8 +23024,8 @@ for A in x86_64 arm64; do
     printf 'import "%s"\nfn main() {\n    loop { }\n}\n' "$PV_M" > "$PV_D/n.kr"
     printf 'import "%s"\nfn main() {\n    println("hi")\n    loop { }\n}\n' "$PV_M" > "$PV_D/y.kr"
     rm -f "$PV_D/n.out" "$PV_D/y.out"
-    "$PV_KRC" --arch=$A --target=none "$PV_D/n.kr" -o "$PV_D/n.out" >/dev/null 2>&1
-    "$PV_KRC" --arch=$A --target=none "$PV_D/y.kr" -o "$PV_D/y.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/n.kr" -o "$PV_D/n.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/y.kr" -o "$PV_D/y.out" >/dev/null 2>&1
     if [ ! -f "$PV_D/n.out" ] || [ ! -f "$PV_D/y.out" ]; then
         echo "FAIL: provider_dce_$A (one of the two builds produced no artifact)"; FAIL=$((FAIL + 1))
     else
@@ -21042,8 +23073,8 @@ if [ -n "$PV_OD" ]; then
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    loop { }\n}\n' > "$PV_D/n86.kr"
     printf 'import "../std/uart_16550.kr"\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/y86.kr"
     rm -f "$PV_D/n86.out" "$PV_D/y86.out"
-    "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
-    "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=x86_64 --target=none "$PV_D/n86.kr" -o "$PV_D/n86.out" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=x86_64 --target=none "$PV_D/y86.kr" -o "$PV_D/y86.out" >/dev/null 2>&1
     PV_HAS=$("$PV_OD" -D -b binary -m i386:x86-64 "$PV_D/y86.out" 2>/dev/null | grep -cE "$PV_PAT")
     PV_NOT=$("$PV_OD" -D -b binary -m i386:x86-64 "$PV_D/n86.out" 2>/dev/null | grep -cE "$PV_PAT")
     if [ "$PV_HAS" -ge 1 ] && [ "$PV_NOT" = "0" ]; then
@@ -21069,7 +23100,7 @@ for PV_B in println print println_str print_str write; do
     esac
     printf 'static uint64 sink = 0\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_C" > "$PV_D/no.kr"
     rm -f "$PV_D/no.out"
-    PV_ERR=$("$PV_KRC" --arch=x86_64 --target=none "$PV_D/no.kr" -o "$PV_D/no.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=x86_64 --target=none "$PV_D/no.kr" -o "$PV_D/no.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/no.out" ]; then
         echo "FAIL: provider_missing_refuses_$PV_B (compiled with no provider)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "error: --target=none: '$PV_B' is not available on bare metal"; then
@@ -21098,8 +23129,8 @@ fn main() {
 }
 PVEOF
     rm -f "$PV_D/hb.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/hb.kr" -o "$PV_D/hb.out" 2>&1); PV_ST=$?
-    PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/hb.kr" 2>&1)
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/hb.kr" -o "$PV_D/hb.out" 2>&1); PV_ST=$?
+    PV_IR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/hb.kr" 2>&1)
     if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/hb.out" ]; then
         echo "FAIL: provider_heap_bump_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
     elif echo "$PV_IR" | grep -qE "= alloc|dealloc v"; then
@@ -21118,7 +23149,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 p = alloc(32)\n    store64(p, 5)\n    println("v=", load64(p))\n    dealloc(p)\n    loop { }\n}\n' "$PV_M" > "$PV_D/both.kr"
     rm -f "$PV_D/both.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/both.kr" -o "$PV_D/both.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/both.kr" -o "$PV_D/both.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] && [ -f "$PV_D/both.out" ]; then
         PASS=$((PASS + 1)); echo "  provider_uart_plus_heap_$A: PASS"
     else
@@ -21141,7 +23172,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'static uint64 sink = 0\n@builtin_override\nfn write(uint64 only_one) -> uint64 { sink = only_one  return 0 }\nfn main() {\n    println("hi")\n    loop { }\n}\n' > "$PV_D/ar.kr"
     rm -f "$PV_D/ar.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar.kr" -o "$PV_D/ar.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar.kr" -o "$PV_D/ar.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar.out" ]; then
         echo "FAIL: provider_arity_write_$A (a 1-argument write provider took 3 synthesised arguments and compiled clean)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "provider declares 1 parameter(s), but print/println/print_str/println_str under --target=none lowers to 3-argument calls of it"; then
@@ -21160,7 +23191,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\n@builtin_override\nfn alloc(uint64 a, uint64 b) -> uint64 { return a + b }\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar2.kr"
     rm -f "$PV_D/ar2.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar2.kr" -o "$PV_D/ar2.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar2.kr" -o "$PV_D/ar2.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar2.out" ]; then
         echo "FAIL: provider_arity_alloc_$A (a 2-argument alloc provider took 1 synthesised argument and compiled clean)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "provider declares 2 parameter(s), but an f-string under --target=none lowers to 1-argument calls of it"; then
@@ -21173,7 +23204,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nstatic uint64 hp = 0x200000\n@builtin_override\nfn alloc(uint64 n) { hp = hp + n }\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar3.kr"
     rm -f "$PV_D/ar3.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar3.kr" -o "$PV_D/ar3.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar3.kr" -o "$PV_D/ar3.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/ar3.out" ]; then
         echo "FAIL: provider_void_alloc_$A (a void alloc provider supplied the f-string's buffer address and compiled clean)"; FAIL=$((FAIL + 1))
     elif ! echo "$PV_ERR" | grep -q "provider returns nothing, but an f-string under --target=none uses its result"; then
@@ -21188,7 +23219,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/ar4.kr"
     rm -f "$PV_D/ar4.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ar4.kr" -o "$PV_D/ar4.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ar4.kr" -o "$PV_D/ar4.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] && [ -f "$PV_D/ar4.out" ]; then
         PASS=$((PASS + 1)); echo "  provider_correct_shape_accepted_$A: PASS"
     else
@@ -21208,7 +23239,7 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nfn main() {\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/fs1.kr"
     rm -f "$PV_D/fs1.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/fs1.kr" -o "$PV_D/fs1.out" 2>&1); PV_ST=$?
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/fs1.kr" -o "$PV_D/fs1.out" 2>&1); PV_ST=$?
     if [ "$PV_ST" = "0" ] || [ -f "$PV_D/fs1.out" ]; then
         echo "FAIL: provider_fstring_needs_alloc_$A (compiled with no allocator)"; FAIL=$((FAIL + 1))
     elif echo "$PV_ERR" | grep -q "reached the emitter"; then
@@ -21223,8 +23254,8 @@ for A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     printf 'import "%s"\nimport "../std/heap_bump.kr"\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    uint64 y = 5\n    println(f"x {y}")\n    loop { }\n}\n' "$PV_M" > "$PV_D/fs2.kr"
     rm -f "$PV_D/fs2.out"
-    PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/fs2.kr" -o "$PV_D/fs2.out" 2>&1); PV_ST=$?
-    PV_IR=$("$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/fs2.kr" 2>&1)
+    PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/fs2.kr" -o "$PV_D/fs2.out" 2>&1); PV_ST=$?
+    PV_IR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none --emit=ir "$PV_D/fs2.kr" 2>&1)
     if [ "$PV_ST" != "0" ] || [ ! -f "$PV_D/fs2.out" ]; then
         echo "FAIL: provider_fstring_with_alloc_$A (exit $PV_ST: '$PV_ERR')"; FAIL=$((FAIL + 1))
     elif echo "$PV_IR" | grep -qE "syscall|= alloc"; then
@@ -21255,7 +23286,7 @@ for A in x86_64 arm64; do
             printf 'import "user_mod.kr"\nimport "%s"\nfn main() {\n    greet_twice()\n    loop { }\n}\n' "$PV_M" > "$PV_D/ord.kr"
         fi
         rm -f "$PV_D/ord.out"
-        PV_ERR=$("$PV_KRC" --arch=$A --target=none "$PV_D/ord.kr" -o "$PV_D/ord.out" 2>&1); PV_ST=$?
+        PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$A --target=none "$PV_D/ord.kr" -o "$PV_D/ord.out" 2>&1); PV_ST=$?
         if [ "$PV_ST" = "0" ] && [ -f "$PV_D/ord.out" ]; then
             PASS=$((PASS + 1)); echo "  provider_import_order_${PV_ORDER}_$A: PASS"
         else
@@ -21310,7 +23341,7 @@ hb_case() {
     printf 'import "hb.kr"\nfn main() {\n%s\n    exit(0)\n}\n' "$body" > "$HB_D/c.kr"
     rm -f "$HB_D/c.out"
     local err got
-    err=$("$PV_KRC" --arch=$ARCH "$HB_D/c.kr" -o "$HB_D/c.out" 2>&1)
+    err=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$ARCH "$HB_D/c.kr" -o "$HB_D/c.out" 2>&1)
     if [ ! -f "$HB_D/c.out" ]; then
         echo "FAIL: heap_bump_$name (build failed: '$err')"; FAIL=$((FAIL + 1)); return
     fi
@@ -21395,9 +23426,9 @@ fn main() {
 }
 PVEOF
 rm -f "$PV_D/hosted.out"
-if "$PV_KRC" --arch=$ARCH "$PV_D/hosted.kr" -o "$PV_D/hosted.out" >/dev/null 2>&1 \
+if timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" --arch=$ARCH "$PV_D/hosted.kr" -o "$PV_D/hosted.out" >/dev/null 2>&1 \
    && chmod +x "$PV_D/hosted.out" \
-   && [ "$("$PV_D/hosted.out" 2>/dev/null)" = "HOSTEDOK" ]; then
+   && [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_D/hosted.out" 2>/dev/null)" = "HOSTEDOK" ]; then
     PASS=$((PASS + 1)); echo "  provider_hosted_undisturbed: PASS"
 else
     echo "FAIL: provider_hosted_undisturbed (hosted println lost its output, or the override was not called)"
@@ -21430,7 +23461,7 @@ for PV_FLAG in --emit=obj; do
             esac
             printf 'import "%s"\nfn main() {\n    %s\n    loop { }\n}\n' "$PV_M" "$PV_C" > "$PV_D/lg.kr"
             rm -f "$PV_D/lg.out"
-            PV_ERR=$("$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lg.kr" -o "$PV_D/lg.out" 2>&1); PV_ST=$?
+            PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lg.kr" -o "$PV_D/lg.out" 2>&1); PV_ST=$?
             PV_TAG=$(echo "$PV_FLAG" | tr -d '-' | tr '=' '_')
             if [ "$PV_ST" = "0" ] || [ -f "$PV_D/lg.out" ]; then
                 echo "FAIL: provider_legacy_${PV_B}_${PV_TAG}_$A (compiled -- the legacy backend does not route to the provider, so it must refuse)"
@@ -21457,7 +23488,7 @@ for PV_FLAG in --emit=obj; do
         PV_M=$(pv_mod "$A")
         printf 'import "%s"\nimport "../std/heap_bump.kr"\nstatic uint64 sink = 0\nfn main() {\n    heap_bump_init(0x200000, 0x100000)\n    sink = write(1, "x", 1)\n    uint64 p = alloc(16)\n    dealloc(p)\n    loop { }\n}\n' "$PV_M" > "$PV_D/lgw.kr"
         rm -f "$PV_D/lgw.out"
-        PV_ERR=$("$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lgw.kr" -o "$PV_D/lgw.out" 2>&1); PV_ST=$?
+        PV_ERR=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$PV_KRC" $PV_FLAG --arch=$A --target=none "$PV_D/lgw.kr" -o "$PV_D/lgw.out" 2>&1); PV_ST=$?
         PV_TAG=$(echo "$PV_FLAG" | tr -d '-' | tr '=' '_')
         if [ "$PV_ST" = "0" ] && [ -f "$PV_D/lgw.out" ]; then
             PASS=$((PASS + 1)); echo "  provider_legacy_write_alloc_${PV_TAG}_$A: PASS"
@@ -21505,8 +23536,8 @@ tn_const_is() {
     printf 'static uint32 sink = 0\nstatic uint32 buf = 0\nfn main() {\n    sink = %s\n    loop { }\n}\n' "$want" > "$TN_D/w.kr"
     rm -f "$TN_D/e.out" "$TN_D/w.out"
     local eerr werr
-    eerr=$("$CP_KRC" "$@" "$TN_D/e.kr" -o "$TN_D/e.out" 2>&1)
-    werr=$("$CP_KRC" "$@" "$TN_D/w.kr" -o "$TN_D/w.out" 2>&1)
+    eerr=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" "$TN_D/e.kr" -o "$TN_D/e.out" 2>&1)
+    werr=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" "$TN_D/w.kr" -o "$TN_D/w.out" 2>&1)
     if [ ! -f "$TN_D/e.out" ]; then
         echo "FAIL: $name (expression build failed: '$eerr')"; FAIL=$((FAIL + 1))
     elif [ ! -f "$TN_D/w.out" ]; then
@@ -21594,9 +23625,9 @@ if [ "$ARCH" = "x86_64" ]; then
     TOTAL=$((TOTAL + 1))
     printf 'static uint64 mbuf = 0\nfn main() {\n    mbuf = alloc(512)\n    println(get_module_path(mbuf, 512))\n    exit(0)\n}\n' > "$TN_D/mprun.kr"
     rm -f "$TN_D/mprun"
-    "$CP_KRC" --arch=x86_64 --target=linux "$TN_D/mprun.kr" -o "$TN_D/mprun" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=linux "$TN_D/mprun.kr" -o "$TN_D/mprun" >/dev/null 2>&1
     chmod +x "$TN_D/mprun" 2>/dev/null
-    TN_MPOUT=$("$TN_D/mprun" 2>&1)
+    TN_MPOUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$TN_D/mprun" 2>&1)
     if [ "$TN_MPOUT" = "0" ]; then
         PASS=$((PASS + 1)); echo "  tn_module_path_linux_is_zero: PASS"
     else
@@ -21610,10 +23641,10 @@ tn_mp_same_as_linux() { # name, win-mode(artifact|nyi), flags...
     local name="$1" winmode="$2"; shift 2
     TOTAL=$((TOTAL + 1))
     rm -f "$TN_D/mp_n" "$TN_D/mp_l" "$TN_D/mp_w"
-    "$CP_KRC" "$@" --target=none "$TN_D/mp.kr" -o "$TN_D/mp_n" >/dev/null 2>&1
-    "$CP_KRC" "$@" --freestanding "$TN_D/mp.kr" -o "$TN_D/mp_l" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" --target=none "$TN_D/mp.kr" -o "$TN_D/mp_n" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" --freestanding "$TN_D/mp.kr" -o "$TN_D/mp_l" >/dev/null 2>&1
     local werr
-    werr=$("$CP_KRC" "$@" --freestanding --target=windows "$TN_D/mp.kr" -o "$TN_D/mp_w" 2>&1)
+    werr=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" "$@" --freestanding --target=windows "$TN_D/mp.kr" -o "$TN_D/mp_w" 2>&1)
     local winok=0
     if [ "$winmode" = "artifact" ]; then
         [ -f "$TN_D/mp_w" ] && ! cmp -s "$TN_D/mp_n" "$TN_D/mp_w" && winok=1
@@ -21650,8 +23681,8 @@ TOTAL=$((TOTAL + 1))
 printf 'fn main() {\n    uint64 buf = alloc(300)\n    exit(0)\n}\n' > "$TN_D/mp_nocall.kr"
 printf 'fn main() {\n    uint64 buf = alloc(300)\n    get_module_path(buf, 300)\n    exit(0)\n}\n' > "$TN_D/mp_unused.kr"
 rm -f "$TN_D/mp_nocall_w" "$TN_D/mp_unused_w"
-"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
-"$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
 if [ -f "$TN_D/mp_nocall_w" ] && [ -f "$TN_D/mp_unused_w" ]; then
     MP_NC_SZ=$(wc -c < "$TN_D/mp_nocall_w")
     MP_UN_SZ=$(wc -c < "$TN_D/mp_unused_w")
@@ -21733,8 +23764,8 @@ tn_imm() { # name, file, present-regex, absent-regex
 }
 printf 'static uint32 sink = 0\nfn main() {\n    sink = get_arch_id()\n    loop { }\n}\n' > "$TN_D/aid.kr"
 rm -f "$TN_D/aid_x86" "$TN_D/aid_a64"
-"$CP_KRC" --arch=x86_64 --target=none "$TN_D/aid.kr" -o "$TN_D/aid_x86" >/dev/null 2>&1
-"$CP_KRC" --arch=arm64  --target=none "$TN_D/aid.kr" -o "$TN_D/aid_a64" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=none "$TN_D/aid.kr" -o "$TN_D/aid_x86" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=arm64  --target=none "$TN_D/aid.kr" -o "$TN_D/aid_a64" >/dev/null 2>&1
 # mov r32, 9  vs  mov r32, 1
 tn_imm tn_arch_id_immediate_x86_64 "$TN_D/aid_x86" 'b[89a-f]09000000' 'b[89a-f]01000000'
 # movz xd, #10 (imm<<5 = 0x140) vs movz xd, #2 (imm<<5 = 0x40)
@@ -21805,12 +23836,12 @@ fi
 # claimed every site. Three live wrong lengths sat behind that blind spot the
 # whole time, all in the --emit=asm listing writer, which writes to an opened
 # file rather than to stdout/stderr:
-#   main.kr:1353  "; KernRift assembly listing\n" declared 27, real 28 -- the
+#   main.kr:1952  "; KernRift assembly listing\n" declared 27, real 28 -- the
 #                 listing header lost its newline and ran straight into
 #                 "; Architecture: x86_64". Observed on the wire.
-#   main.kr:1915  "           mfence"            declared 18, real 17 -- a NUL
+#   main.kr:2587  "           mfence"            declared 18, real 17 -- a NUL
 #                 byte after every disassembled mfence.
-#   main.kr:1997  "...          lock ..."        declared 20, real 21 -- the
+#   main.kr:2696  "...          lock ..."        declared 20, real 21 -- the
 #                 lock-prefix line lost its last ".".
 # A guard whose scope is narrower than its comment is worse than no guard: it
 # reads as coverage. Two lessons are wired in below rather than written down.
@@ -22366,7 +24397,7 @@ done
   printf 'fn main() {\n    exit(m0() + m99() - 99)\n}\n'
 } > "$GROW_DIR/imports100.kr"
 if $KRC $KRC_FLAGS "$GROW_DIR/imports100.kr" -o "$GROW_DIR/imports100" >/dev/null 2>&1 \
-   && chmod +x "$GROW_DIR/imports100" && "$GROW_DIR/imports100" >/dev/null 2>&1; then
+   && chmod +x "$GROW_DIR/imports100" && timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/imports100" >/dev/null 2>&1; then
     PASS=$((PASS + 1))
     echo "  grow_import_seen_100: PASS (100 imports, old cap 64)"
 else
@@ -22384,7 +24415,7 @@ GROW_LONG=$(printf 'a%.0s' $(seq 1 256))
 GROW_OUT=""
 if $KRC $KRC_FLAGS "$GROW_DIR/strbuf_grow.kr" -o "$GROW_DIR/strbuf_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/strbuf_grow"
-    GROW_OUT=$("$GROW_DIR/strbuf_grow" 2>/dev/null)
+    GROW_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/strbuf_grow" 2>/dev/null)
 fi
 if [ "$GROW_OUT" = "aaa" ]; then
     PASS=$((PASS + 1))
@@ -22405,7 +24436,7 @@ TOTAL=$((TOTAL + 1))
 GROW_EC=1
 if $KRC $KRC_FLAGS --legacy "$GROW_DIR/fixup_grow.kr" -o "$GROW_DIR/fixup_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/fixup_grow"
-    "$GROW_DIR/fixup_grow" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/fixup_grow" >/dev/null 2>&1
     GROW_EC=$?
 fi
 if [ "$GROW_EC" = 232 ]; then
@@ -22444,7 +24475,7 @@ TOTAL=$((TOTAL + 1))
 GROW_EC2=0
 if $KRC $KRC_FLAGS "$GROW_DIR/insn_grow.kr" -o "$GROW_DIR/insn_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/insn_grow"
-    "$GROW_DIR/insn_grow" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/insn_grow" >/dev/null 2>&1
     GROW_EC2=$?
 else
     GROW_EC2="compile-failed"
@@ -22487,7 +24518,7 @@ TOTAL=$((TOTAL + 1))
 GROW_EC3="compile-failed"
 if $KRC $KRC_FLAGS "$GROW_DIR/statics_grow.kr" -o "$GROW_DIR/statics_grow" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/statics_grow"
-    "$GROW_DIR/statics_grow" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/statics_grow" >/dev/null 2>&1
     GROW_EC3=$?
 fi
 if [ "$GROW_EC3" = 0 ]; then
@@ -22516,7 +24547,7 @@ TOTAL=$((TOTAL + 1))
 GROW_OVER_EC="compile-failed"
 if $KRC $KRC_FLAGS "$GROW_DIR/statics_over.kr" -o "$GROW_DIR/statics_over" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/statics_over"
-    "$GROW_DIR/statics_over" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/statics_over" >/dev/null 2>&1
     GROW_OVER_EC=$?
 fi
 if [ "$GROW_OVER_EC" = 0 ]; then
@@ -22542,7 +24573,7 @@ TOTAL=$((TOTAL + 1))
 GROW_AOVER_EC="compile-failed"
 if $KRC $KRC_FLAGS "$GROW_DIR/arrays_over.kr" -o "$GROW_DIR/arrays_over" >/dev/null 2>&1; then
     chmod +x "$GROW_DIR/arrays_over"
-    "$GROW_DIR/arrays_over" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$GROW_DIR/arrays_over" >/dev/null 2>&1
     GROW_AOVER_EC=$?
 fi
 if [ "$GROW_AOVER_EC" = 0 ]; then
@@ -22614,7 +24645,7 @@ rm -f "$G9SRC.body"
 if $KRC $KRC_FLAGS "$G9SRC" -o /tmp/krc_g9_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_g9_$$
     G9GOT=0
-    /tmp/krc_g9_$$ > /dev/null 2>&1 || G9GOT=$?
+    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_g9_$$ > /dev/null 2>&1 || G9GOT=$?
     if [ "$G9GOT" = "0" ]; then
         PASS=$((PASS + 1))
         echo "  static_table_grows_past_the_old_cap: PASS (6000 statics, past the table AND its hash index)"
@@ -22653,7 +24684,7 @@ TOTAL=$((TOTAL + 1))
 AET_OUT=""
 if $KRC $KRC_FLAGS "$DIR/../examples/ir_arr_elem_table_accum.kr" -o /tmp/kraet_$$ >/dev/null 2>&1; then
     chmod +x /tmp/kraet_$$
-    AET_OUT=$(/tmp/kraet_$$ 2>/dev/null)
+    AET_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/kraet_$$ 2>/dev/null)
 fi
 rm -f /tmp/kraet_$$
 if [ "$AET_OUT" = "PASS" ]; then
@@ -22674,7 +24705,7 @@ TOTAL=$((TOTAL + 1))
 AEC_OUT=""
 if $KRC $KRC_FLAGS "$DIR/../examples/ir_arr_elem_collision.kr" -o /tmp/kraec_$$ >/dev/null 2>&1; then
     chmod +x /tmp/kraec_$$
-    AEC_OUT=$(/tmp/kraec_$$ 2>/dev/null)
+    AEC_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/kraec_$$ 2>/dev/null)
 fi
 rm -f /tmp/kraec_$$
 if [ "$AEC_OUT" = "PASS" ]; then
@@ -22695,7 +24726,7 @@ TOTAL=$((TOTAL + 1))
 SVC_OUT=""
 if $KRC $KRC_FLAGS "$DIR/../examples/codegen_struct_var_collision.kr" -o /tmp/krsvc_$$ >/dev/null 2>&1; then
     chmod +x /tmp/krsvc_$$
-    SVC_OUT=$(/tmp/krsvc_$$ 2>/dev/null)
+    SVC_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krsvc_$$ 2>/dev/null)
 fi
 rm -f /tmp/krsvc_$$
 if [ "$SVC_OUT" = "PASS" ]; then
@@ -22736,7 +24767,7 @@ TOTAL=$((TOTAL + 1))
 IMP_OUT=""
 if $KRC $KRC_FLAGS "$IMP_DIR/main.kr" -o "$IMP_DIR/out" >/dev/null 2>&1; then
     chmod +x "$IMP_DIR/out"
-    IMP_OUT=$("$IMP_DIR/out" 2>/dev/null)
+    IMP_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMP_DIR/out" 2>/dev/null)
 fi
 if [ "$IMP_OUT" = "21" ]; then
     PASS=$((PASS + 1))
@@ -22759,7 +24790,7 @@ TOTAL=$((TOTAL + 1))
 IMP_OUT2=""
 if $KRC $KRC_FLAGS "$IMP_DIR/sub/topup.kr" -o "$IMP_DIR/out2" >/dev/null 2>&1; then
     chmod +x "$IMP_DIR/out2"
-    IMP_OUT2=$("$IMP_DIR/out2" 2>/dev/null)
+    IMP_OUT2=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMP_DIR/out2" 2>/dev/null)
 fi
 if [ "$IMP_OUT2" = "5" ]; then
     PASS=$((PASS + 1))
@@ -22800,7 +24831,7 @@ printf 'import "a.kr"\nimport "b.kr"\nfn main() { exit(use_a() + use_b() - 41) }
 LP_EC=1
 if $KRC $KRC_FLAGS "$LP_DIR/main.kr" -o "$LP_DIR/dedup" >/dev/null 2>&1; then
     chmod +x "$LP_DIR/dedup"
-    "$LP_DIR/dedup" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$LP_DIR/dedup" >/dev/null 2>&1
     LP_EC=$?
 fi
 if [ "$LP_EC" = 42 ]; then
@@ -22824,7 +24855,7 @@ printf 'import "%s/%s/deepmod.kr"\nimport "%s"\nfn main() { exit(deep_mod() + pr
 LP_EC2=1
 if $KRC $KRC_FLAGS "$LP_DIR/main2.kr" -o "$LP_DIR/collide" >/dev/null 2>&1; then
     chmod +x "$LP_DIR/collide"
-    "$LP_DIR/collide" >/dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$LP_DIR/collide" >/dev/null 2>&1
     LP_EC2=$?
 fi
 if [ "$LP_EC2" = 48 ]; then
@@ -22881,8 +24912,10 @@ TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
 if $KRC $KRC_FLAGS /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_shadow_$$
-    /tmp/krc_shadow_$$ ; got=$?
-    if [ "$got" = "42" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
+    if rb_timed_out "$got" "$RT_T0"; then
+        echo "FAIL: builtin_override_user_wins_ir (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$got" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  builtin_override_user_wins_ir: PASS (user body won)"
     else
@@ -22900,8 +24933,10 @@ TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn time_ns() -> uint64 {\n    uint64 acc = 0\n    uint64 i = 0\n    while i < 3 { acc = acc + 1 i = i + 1 }\n    return acc - 3\n}\nfn main() { uint64 t = time_ns() if t == 0 { exit(42) } exit(1) }\n' > /tmp/krc_shadow_$$.kr
 if $KRC $KRC_FLAGS --legacy /tmp/krc_shadow_$$.kr -o /tmp/krc_shadow_$$ > /dev/null 2>&1; then
     chmod +x /tmp/krc_shadow_$$
-    /tmp/krc_shadow_$$ ; got=$?
-    if [ "$got" = "42" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_shadow_$$ ; got=$?
+    if rb_timed_out "$got" "$RT_T0"; then
+        echo "FAIL: builtin_override_user_wins_legacy (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$got" = "42" ]; then
         PASS=$((PASS + 1))
         echo "  builtin_override_user_wins_legacy: PASS (user body won)"
     else
@@ -22956,7 +24991,7 @@ fi
 # control: a VALID stdlib import must still resolve and run
 TOTAL=$((TOTAL + 1))
 if $KRC $KRC_FLAGS examples/sha256_test.kr -o "$IMP_DIR/shaok" >/dev/null 2>&1 \
-   && "$IMP_DIR/shaok" 2>/dev/null | head -1 | grep -q "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"; then
+   && timeout -k 5 "$RUN_TEST_TIMEOUT" "$IMP_DIR/shaok" 2>/dev/null | head -1 | grep -q "^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855$"; then
     PASS=$((PASS + 1))
     echo "  import_success_control: PASS (std import resolves, FIPS vector correct)"
 else
@@ -23005,7 +25040,7 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
     fi
     chmod +x "$SMOKE_BIN" 2>/dev/null
     rm -rf "$SMOKE_WD"/* 2>/dev/null
-    (cd "$SMOKE_WD" && "$SMOKE_BIN" >/dev/null 2>&1)
+    (cd "$SMOKE_WD" && timeout -k 5 "$RUN_TEST_TIMEOUT" "$SMOKE_BIN" >/dev/null 2>&1)
     SMOKE_EC=$?
     if [ "$SMOKE_EC" -eq "$SMOKE_EXP" ]; then
         PASS=$((PASS + 1))
@@ -23046,9 +25081,11 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    S0 x\n    S199 y\n    x.a = 20\n    y.b = 22\n    exit(x.a + y.b)\n}\n'
 } > "$ST_DIR/many.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/many.kr" -o "$ST_DIR/many" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/many"; "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
+    chmod +x "$ST_DIR/many"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/many" >/dev/null 2>&1; ST_EC=$?
 else ST_EC="compile-failed"; fi
-if [ "$ST_EC" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_count_200: PASS (old cap 64)"
+if rb_timed_out "$ST_EC" "$RT_T0"; then
+    echo "FAIL: struct_count_200 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+elif [ "$ST_EC" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_count_200: PASS (old cap 64)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_count_200 (expected 42, got $ST_EC)"; fi
 
 TOTAL=$((TOTAL + 1))
@@ -23056,9 +25093,11 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    Huge h\n    h.q0 = 11\n    h.q99 = 31\n    exit(h.q0 + h.q99)\n}\n'
 } > "$ST_DIR/wide.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/wide.kr" -o "$ST_DIR/wide" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/wide"; "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
+    chmod +x "$ST_DIR/wide"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/wide" >/dev/null 2>&1; ST_EC2=$?
 else ST_EC2="compile-failed"; fi
-if [ "$ST_EC2" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_fields_100: PASS (old cap 16)"
+if rb_timed_out "$ST_EC2" "$RT_T0"; then
+    echo "FAIL: struct_fields_100 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+elif [ "$ST_EC2" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_fields_100: PASS (old cap 16)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_fields_100 (expected 42, got $ST_EC2)"; fi
 
 TOTAL=$((TOTAL + 1))
@@ -23067,9 +25106,11 @@ TOTAL=$((TOTAL + 1))
   printf 'fn main() {\n    T0 t\n    Big b\n    t.a = 20\n    b.q39 = 22\n    exit(t.a + b.q39)\n}\n'
 } > "$ST_DIR/restride.kr"
 if $KRC $KRC_FLAGS "$ST_DIR/restride.kr" -o "$ST_DIR/restride" >/dev/null 2>&1; then
-    chmod +x "$ST_DIR/restride"; "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
+    chmod +x "$ST_DIR/restride"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$ST_DIR/restride" >/dev/null 2>&1; ST_EC3=$?
 else ST_EC3="compile-failed"; fi
-if [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populated: PASS (re-base 100 entries to a wider stride)"
+if rb_timed_out "$ST_EC3" "$RT_T0"; then
+    echo "FAIL: struct_restride_populated (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+elif [ "$ST_EC3" = 42 ]; then PASS=$((PASS + 1)); echo "  struct_restride_populated: PASS (re-base 100 entries to a wider stride)"
 else FAIL=$((FAIL + 1)); echo "FAIL: struct_restride_populated (expected 42, got $ST_EC3)"; fi
 rm -rf "$ST_DIR"
 
@@ -23210,6 +25251,8 @@ fi
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
+    # Both files are tracked; a missing one is a broken tree, not a skip, and
+    # counting it as a PASS would report a check that never ran.
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_doc_agrees (docs/IR_REFERENCE.md or tests/ir_reference_citations.txt is missing, so nothing was compared)"
 else
     doc_orphan=$(python3 - "$CITE_DOC" "$CITE_MANIFEST" <<'PYEOF'
@@ -23280,7 +25323,7 @@ fi
 # The built runner binary, when present, must agree too. Built by `make kr-runner`.
 TOTAL=$((TOTAL + 1))
 if [ -x "$DIR/../build/kr-bin" ]; then
-    VER_KRBIN=$("$DIR/../build/kr-bin" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+    VER_KRBIN=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$DIR/../build/kr-bin" --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
     if [ "$VER_KRBIN" = "$VER_CHANGELOG" ]; then
         PASS=$((PASS + 1))
         echo "  version_kr_binary_matches: PASS (kr binary reports $VER_KRBIN)"
@@ -23752,8 +25795,10 @@ TOTAL=$((TOTAL + 1))
 gen_call_args 64
 rm -f "$CA_BIN"
 if $KRC --arch=$RUN_ARCH "$CA_SRC" -o "$CA_BIN" >/dev/null 2>&1 && [ -s "$CA_BIN" ]; then
-    chmod +x "$CA_BIN"; "$CA_BIN"; CA_RUN=$?
-    if [ "$CA_RUN" = "65" ]; then    # p1 + p64 = 1 + 64
+    chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_BIN"; CA_RUN=$?
+    if rb_timed_out "$CA_RUN" "$RT_T0"; then
+        echo "FAIL: call_args_64_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CA_RUN" = "65" ]; then    # p1 + p64 = 1 + 64
         PASS=$((PASS + 1)); echo "  call_args_64_accepted: PASS (compiles and returns 65)"
     else
         echo "FAIL: call_args_64_accepted (ran but returned $CA_RUN, want 65)"; FAIL=$((FAIL + 1))
@@ -23781,8 +25826,10 @@ fi
 CA_QEMU="$(command -v qemu-aarch64-static || true)"
 if [ -n "$CA_QEMU" ] && [ -s "$CA_BIN" ]; then
     TOTAL=$((TOTAL + 1))
-    chmod +x "$CA_BIN"; "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
-    if [ "$CA_RUN" = "65" ]; then
+    chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+    if rb_timed_out "$CA_RUN" "$RT_T0"; then
+        echo "FAIL: call_args_64_runs_arm64 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CA_RUN" = "65" ]; then
         PASS=$((PASS + 1)); echo "  call_args_64_runs_arm64: PASS (returns 65 under qemu)"
     else
         echo "FAIL: call_args_64_runs_arm64 (returned $CA_RUN, want 65)"; FAIL=$((FAIL + 1))
@@ -23797,8 +25844,10 @@ rm -f "$CA_BIN"
 CA_A64_ERR=$($KRC --arch=arm64 "$CA_SRC" -o "$CA_BIN" 2>&1); CA_A64_ST=$?
 if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
     if [ -n "$CA_QEMU" ]; then
-        chmod +x "$CA_BIN"; "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
-        if [ "$CA_RUN" = "26" ]; then
+        chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
+        if rb_timed_out "$CA_RUN" "$RT_T0"; then
+            echo "FAIL: call_args_25_arm64 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CA_RUN" = "26" ]; then
             PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (17th stack slot, returns 26)"
         else
             echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
@@ -23850,8 +25899,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; "$CP_BIN"; CP7_RUN=$?
-    if [ "$CP7_RUN" = "98" ]; then
+    chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP7_RUN=$?
+    if rb_timed_out "$CP7_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_args_7_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CP7_RUN" = "98" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted: PASS (runs, returns 98 -- the 7th argument arrived)"
     else
         echo "FAIL: call_ptr_args_7_accepted (returned $CP7_RUN, want 98; 21 means the 7th argument was dropped)"
@@ -23896,8 +25947,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_RUN=$?
-    if [ "$CP6_RUN" = "21" ]; then
+    chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_RUN=$?
+    if rb_timed_out "$CP6_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_args_6_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CP6_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted: PASS (compiles and returns 21)"
     else
         echo "FAIL: call_ptr_args_6_accepted (ran but returned $CP6_RUN, want 21)"; FAIL=$((FAIL + 1))
@@ -23967,8 +26020,10 @@ for CP13_MODE in "ir" "legacy"; do
     TOTAL=$((TOTAL + 1))
     rm -f "$CP_BIN"
     if $KRC --arch=$RUN_ARCH $CP13_FLAG "$CP13_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-        chmod +x "$CP_BIN"; "$CP_BIN"; CP13_RUN=$?
-        if [ "$CP13_RUN" = "51" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP13_RUN=$?
+        if rb_timed_out "$CP13_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_13_correct_$CP13_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CP13_RUN" = "51" ]; then
             PASS=$((PASS + 1)); echo "  call_ptr_args_13_correct_$CP13_MODE: PASS (returns 51)"
         else
             echo "FAIL: call_ptr_args_13_correct_$CP13_MODE (returned $CP13_RUN, want 51 -- parameter 12 spills to frame slot 0x80)"
@@ -24030,8 +26085,10 @@ for MA_N in 13 16 22 25 32 33 39 48 63 64; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MA_BIN"
         if $KRC --arch=$RUN_ARCH $MA_FLAG "$MA_SRC" -o "$MA_BIN" >/dev/null 2>&1 && [ -s "$MA_BIN" ]; then
-            chmod +x "$MA_BIN"; "$MA_BIN"; MA_RUN=$?
-            if [ "$MA_RUN" = "$MA_EXP" ]; then
+            chmod +x "$MA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MA_BIN"; MA_RUN=$?
+            if rb_timed_out "$MA_RUN" "$RT_T0"; then
+                echo "FAIL: many_args_${MA_N}_$MA_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+            elif [ "$MA_RUN" = "$MA_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  many_args_${MA_N}_$MA_MODE: PASS (returns $MA_EXP)"
             else
                 echo "FAIL: many_args_${MA_N}_$MA_MODE (returned $MA_RUN, want $MA_EXP)"; FAIL=$((FAIL + 1))
@@ -24162,8 +26219,10 @@ for MF_N in 9 12 16; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MF_BIN"
         if $KRC --arch=$RUN_ARCH $MF_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
-            chmod +x "$MF_BIN"; "$MF_BIN"; MF_RUN=$?
-            if [ "$MF_RUN" = "$MF_EXP" ]; then
+            chmod +x "$MF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MF_RUN=$?
+            if rb_timed_out "$MF_RUN" "$RT_T0"; then
+                echo "FAIL: many_float_params_${MF_N}_$MF_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+            elif [ "$MF_RUN" = "$MF_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  many_float_params_${MF_N}_$MF_MODE: PASS (returns $MF_EXP)"
             else
                 echo "FAIL: many_float_params_${MF_N}_$MF_MODE (returned $MF_RUN, want $MF_EXP -- float parameter 9+ arrives on the stack)"
@@ -24205,8 +26264,10 @@ for MX_N in 14 24 32; do
         TOTAL=$((TOTAL + 1))
         rm -f "$MF_BIN"
         if $KRC --arch=$RUN_ARCH $MX_FLAG "$MF_SRC" -o "$MF_BIN" >/dev/null 2>&1 && [ -s "$MF_BIN" ]; then
-            chmod +x "$MF_BIN"; "$MF_BIN"; MX_RUN=$?
-            if [ "$MX_RUN" = "$MX_EXP" ]; then
+            chmod +x "$MF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$MF_BIN"; MX_RUN=$?
+            if rb_timed_out "$MX_RUN" "$RT_T0"; then
+                echo "FAIL: mixed_float_int_args_${MX_N}_$MX_MODE (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+            elif [ "$MX_RUN" = "$MX_EXP" ]; then
                 PASS=$((PASS + 1)); echo "  mixed_float_int_args_${MX_N}_$MX_MODE: PASS (returns $MX_EXP)"
             else
                 echo "FAIL: mixed_float_int_args_${MX_N}_$MX_MODE (returned $MX_RUN, want $MX_EXP -- the overflow set is not positional)"
@@ -24255,8 +26316,10 @@ else
 fi
 rm -f "$CP_BIN"
 if $KRC --arch=$RUN_ARCH --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    chmod +x "$CP_BIN"; "$CP_BIN"; CP6_LG_RUN=$?
-    if [ "$CP6_LG_RUN" = "21" ]; then
+    chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CP6_LG_RUN=$?
+    if rb_timed_out "$CP6_LG_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_args_6_accepted_legacy (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CP6_LG_RUN" = "21" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy: PASS (native $RUN_ARCH, runs and returns 21)"
     else
         echo "FAIL: call_ptr_args_6_accepted_legacy (native $RUN_ARCH ran but returned $CP6_LG_RUN, want 21)"; FAIL=$((FAIL + 1))
@@ -24309,8 +26372,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$CPF_BIN"
 if $KRC --arch=$RUN_ARCH "$CPF_SRC" -o "$CPF_BIN" >/dev/null 2>&1 && [ -s "$CPF_BIN" ]; then
-    chmod +x "$CPF_BIN"; "$CPF_BIN"; CPF_RUN=$?
-    if [ "$CPF_RUN" = "0" ]; then
+    chmod +x "$CPF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPF_RUN=$?
+    if rb_timed_out "$CPF_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_f64_matches_direct (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CPF_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_f64_matches_direct: PASS (0/1/2 args and mixed int+f64, native $RUN_ARCH)"
     else
         echo "FAIL: call_ptr_f64_matches_direct (bitmask $CPF_RUN: 1=0-arg 2=1-arg 4=2-arg 8=mixed)"
@@ -24336,8 +26401,10 @@ fn main() {
 KREOF
 rm -f "$CPF_BIN"
 if $KRC --arch=$RUN_ARCH "$CPFN_SRC" -o "$CPF_BIN" >/dev/null 2>&1; then
-    chmod +x "$CPF_BIN"; "$CPF_BIN"; CPFN_RUN=$?
-    if [ "$CPFN_RUN" = "1" ]; then
+    chmod +x "$CPF_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CPF_BIN"; CPFN_RUN=$?
+    if rb_timed_out "$CPFN_RUN" "$RT_T0"; then
+        echo "FAIL: call_ptr_f64_oracle_can_fail (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$CPFN_RUN" = "1" ]; then
         PASS=$((PASS + 1)); echo "  call_ptr_f64_oracle_can_fail: PASS (unequal f64s do compare unequal)"
     else
         echo "FAIL: call_ptr_f64_oracle_can_fail (7.5 != 7.25 returned $CPFN_RUN, want 1 -- the oracle above proves nothing)"
@@ -24446,8 +26513,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 FR_ERR=$($KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" 2>&1); FR_ST=$?
 if [ "$FR_ST" = "0" ] && [ -s "$FR_BIN" ]; then
-    chmod +x "$FR_BIN"; "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "0" ]; then
+    chmod +x "$FR_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: float_literal_return_values (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  float_literal_return_values: PASS (15 checks)"
     else
         echo "FAIL: float_literal_return_values (check #$FR_RUN returned the wrong value)"
@@ -24496,8 +26565,10 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'fn sink(f32 v) -> f32 {\n if v > 1000000.0f { return sink(v - 1.0f) }\n return v\n}\nfn main() { exit(f32_to_int(sink(1.5f) * 4.0f)) }\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "6" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: f32_literal_to_f32_param_accepted (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "6" ]; then
         PASS=$((PASS + 1)); echo "  f32_literal_to_f32_param_accepted: PASS (1.5f*4 == 6)"
     else
         echo "FAIL: f32_literal_to_f32_param_accepted (want 6, got $FR_RUN)"; FAIL=$((FAIL + 1))
@@ -24516,8 +26587,10 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'struct S { f32 a }\nstruct H { S inner }\nstatic f32 g = 0.0f\nfn f64src(uint64 n) -> f64 {\n if n > 1000000 { return f64src(n - 1) }\n return 1.5\n}\nfn main() {\n S s\n s.a = f64src(1)\n H h\n h.inner.a = f64src(1)\n g = f64src(1)\n uint64 p = alloc(32)\n unsafe { *(p as f32) = f64src(1) }\n f32 r = 0.0f\n unsafe { *(p as f32) -> r }\n exit(f32_to_int((s.a + h.inner.a + g + r) * 2.0f))\n}\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "12" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: nonlocal_assign_f64_to_f32_narrows (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "12" ]; then
         PASS=$((PASS + 1)); echo "  nonlocal_assign_f64_to_f32_narrows: PASS (1.5*4*2 == 12)"
     else
         echo "FAIL: nonlocal_assign_f64_to_f32_narrows (want 12, got $FR_RUN — 0 means f64 bits landed in the f32 slot)"
@@ -24530,8 +26603,10 @@ fi
 TOTAL=$((TOTAL + 1))
 printf 'struct S { f64 b }\nfn f32src(uint64 n) -> f32 {\n if n > 1000000 { return f32src(n - 1) }\n return 2.5f\n}\nfn main() {\n S s\n s.b = f32src(1)\n exit(f64_to_int(s.b * 4.0))\n}\n' > "$FR_SRC"
 if $KRC --arch=$RUN_ARCH "$FR_SRC" -o "$FR_BIN" > /dev/null 2>&1; then
-    "$FR_BIN"; FR_RUN=$?
-    if [ "$FR_RUN" = "10" ]; then
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FR_BIN"; FR_RUN=$?
+    if rb_timed_out "$FR_RUN" "$RT_T0"; then
+        echo "FAIL: nonlocal_assign_f32_to_f64_widens (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FR_RUN" = "10" ]; then
         PASS=$((PASS + 1)); echo "  nonlocal_assign_f32_to_f64_widens: PASS (2.5*4 == 10)"
     else
         echo "FAIL: nonlocal_assign_f32_to_f64_widens (want 10, got $FR_RUN)"; FAIL=$((FAIL + 1))
@@ -24604,7 +26679,7 @@ fn main() {
 KREOF
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-    chmod +x "$FCO_BIN"; FCO_GOT=$("$FCO_BIN" 2>&1)
+    chmod +x "$FCO_BIN"; FCO_GOT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_BIN" 2>&1)
     if [ "$FCO_GOT" = "$FCO_WANT" ]; then
         PASS=$((PASS + 1)); echo "  float_call_operand_position_host: PASS (6 forms, $RUN_ARCH)"
     else
@@ -24622,7 +26697,7 @@ if [ -n "$FCO_QEMU" ]; then
     TOTAL=$((TOTAL + 1))
     rm -f "$FCO_BIN"
     if $KRC --arch=arm64 "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-        chmod +x "$FCO_BIN"; FCO_GOT=$("$FCO_QEMU" "$FCO_BIN" 2>&1)
+        chmod +x "$FCO_BIN"; FCO_GOT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_QEMU" "$FCO_BIN" 2>&1)
         if [ "$FCO_GOT" = "$FCO_WANT" ]; then
             PASS=$((PASS + 1)); echo "  float_call_operand_position_arm64: PASS (6 forms under qemu)"
         else
@@ -24650,8 +26725,10 @@ KREOF
 TOTAL=$((TOTAL + 1))
 rm -f "$FCO_BIN"
 if $KRC --arch=$RUN_ARCH "$FCO_SRC" -o "$FCO_BIN" >/dev/null 2>&1 && [ -s "$FCO_BIN" ]; then
-    chmod +x "$FCO_BIN"; "$FCO_BIN"; FCO_RUN=$?
-    if [ "$FCO_RUN" = "0" ]; then
+    chmod +x "$FCO_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$FCO_BIN"; FCO_RUN=$?
+    if rb_timed_out "$FCO_RUN" "$RT_T0"; then
+        echo "FAIL: float_call_forward_declared (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+    elif [ "$FCO_RUN" = "0" ]; then
         PASS=$((PASS + 1)); echo "  float_call_forward_declared: PASS"
     else
         echo "FAIL: float_call_forward_declared (check #$FCO_RUN wrong; f32=1 f64=2)"; FAIL=$((FAIL + 1))
@@ -24924,7 +27001,7 @@ ax_refuse arx_refuses_hosted_target "requires --target=none" --arch=x86_64 --tar
 # would have passed on the version that still emitted the epilogue, because
 # that version failed too -- for a different reason.
 TOTAL=$((TOTAL + 1))
-ax_imp_out=$(./build/krc2 --arch=x86_64 --emit=arx "$ARX_SRC" -o /tmp/krc_aximp_$$ 2>&1)
+ax_imp_out=$(timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$ARX_SRC" -o /tmp/krc_aximp_$$ 2>&1)
 if [ -s /tmp/krc_aximp_$$ ]; then
     PASS=$((PASS + 1)); echo "  arx_implies_target_none: PASS (built with no --target)"
 else
@@ -24944,7 +27021,7 @@ esac
 TOTAL=$((TOTAL + 1))
 if [ -f "$DIR/../build/krc2" ]; then ARX_RAW_KRC=$(cd "$DIR/../build" && pwd)/krc2; else ARX_RAW_KRC=""; fi
 rm -f /tmp/krc_axna_$$
-ax_na=$("$ARX_RAW_KRC" "$ARX_SRC" -o /tmp/krc_axna_$$ --target=none --emit=arx 2>&1); ax_na_st=$?
+ax_na=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARX_RAW_KRC" "$ARX_SRC" -o /tmp/krc_axna_$$ --target=none --emit=arx 2>&1); ax_na_st=$?
 rm -f /tmp/krc_axna_$$
 if [ -z "$ARX_RAW_KRC" ] || [ $ax_na_st -eq 0 ]; then
     echo "FAIL: arx_refuses_default_arch (exit=$ax_na_st, out=$(printf '%s' "$ax_na" | head -1))"; FAIL=$((FAIL + 1))
@@ -25808,7 +27885,7 @@ pdrf_run() { # <arch> <flags> <src> <runner-or-empty>
         PDRF_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     PDRF_RAN=$((PDRF_RAN + 1))
     # 7 = every check inside the program passed. 1..4 name which one failed;
@@ -25965,7 +28042,7 @@ sffa_run() { # <arch> <flags> <src> <runner-or-empty>
         SFFA_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     SFFA_RAN=$((SFFA_RAN + 1))
     # 7 = both arguments arrived in their own registers. 1..5 name which check
@@ -26035,7 +28112,7 @@ fnso_run() { # <arch> <flags> <runner-or-empty>
         return
     fi
     local _got
-    if [ -n "$3" ]; then _got=$($3 "$_bin" 2>/dev/null); else _got=$("$_bin" 2>/dev/null); fi
+    if [ -n "$3" ]; then _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" 2>/dev/null); else _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" 2>/dev/null); fi
     FNSO_RAN=$((FNSO_RAN + 1))
     if [ "$_got" != "$FNSO_WANT" ]; then
         FNSO_OK=0
@@ -26145,7 +28222,7 @@ fkn_run() { # <arch> <flags> <src> <runner-or-empty>
         FKN_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
         return
     fi
-    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    if [ -n "$4" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $4 "$_bin" >/dev/null 2>&1; else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1; fi
     local _rc=$?
     FKN_RAN=$((FKN_RAN + 1))
     [ "$_rc" = "7" ] || { FKN_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
@@ -26230,7 +28307,7 @@ f16rt_run() { # <arch> <flags> <runner-or-empty>
         return
     fi
     local _got
-    if [ -n "$3" ]; then _got=$($3 "$_bin" 2>/dev/null); else _got=$("$_bin" 2>/dev/null); fi
+    if [ -n "$3" ]; then _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" 2>/dev/null); else _got=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" 2>/dev/null); fi
     F16RT_RAN=$((F16RT_RAN + 1))
     if [ "$_got" != "$F16RT_WANT" ]; then
         F16RT_OK=0
@@ -26326,8 +28403,8 @@ fse_run() { # <arch> <flags> <runner-or-empty>
         return
     fi
     chmod +x "$_bin"
-    if [ -n "$3" ]; then $3 "$_bin" > "$FSE_GOTF" 2>/dev/null
-    else "$_bin" > "$FSE_GOTF" 2>/dev/null; fi
+    if [ -n "$3" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" > "$FSE_GOTF" 2>/dev/null
+    else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" > "$FSE_GOTF" 2>/dev/null; fi
     FSE_RAN=$((FSE_RAN + 1))
     if ! cmp -s "$FSE_GOTF" "$FSE_EXPF"; then
         FSE_OK=0
@@ -26526,8 +28603,8 @@ mrc_run() { # <arch> <flags> <runner-or-empty>
     fi
     chmod +x "$_bin"
     local _rc=0
-    if [ -n "$3" ]; then $3 "$_bin" >/dev/null 2>&1 || _rc=$?
-    else "$_bin" >/dev/null 2>&1 || _rc=$?; fi
+    if [ -n "$3" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" >/dev/null 2>&1 || _rc=$?
+    else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1 || _rc=$?; fi
     MRC_RAN=$((MRC_RAN + 1))
     if [ "$_rc" != "$MRC_WANT" ]; then
         MRC_OK=0
@@ -26630,8 +28707,8 @@ mrc_fns_run() { # <arch> <flags> <runner-or-empty>
     fi
     chmod +x "$_bin"
     local _rc=0
-    if [ -n "$3" ]; then $3 "$_bin" >/dev/null 2>&1 || _rc=$?
-    else "$_bin" >/dev/null 2>&1 || _rc=$?; fi
+    if [ -n "$3" ]; then timeout -k 5 "$RUN_TEST_TIMEOUT" $3 "$_bin" >/dev/null 2>&1 || _rc=$?
+    else timeout -k 5 "$RUN_TEST_TIMEOUT" "$_bin" >/dev/null 2>&1 || _rc=$?; fi
     MRC_FNS_RAN=$((MRC_FNS_RAN + 1))
     if [ "$_rc" != "0" ]; then
         MRC_FNS_OK=0
@@ -26778,7 +28855,7 @@ bcb_config() {
     for bcb_case in oob_var oob_const oob_edge oob_store inbounds; do
         TOTAL=$((TOTAL + 1))
         rm -f "$BCB_D/out"
-        if ! "$BCB_KRC" --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" "$BCB_KRC" --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
             echo "FAIL: arm64_legacy_bounds_$1_$bcb_case (build failed -- --debug refused or miscompiled)"
             FAIL=$((FAIL + 1))
             continue
@@ -27008,7 +29085,7 @@ printf '%s\n' 'import "../std/math_float.kr"
 fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/ok.kr"
 if $KRC --arch=$RUN_ARCH "$MIDIMP_D/ok.kr" -o "$MIDIMP_D/ok.out" > /dev/null 2>&1 &&
    chmod +x "$MIDIMP_D/ok.out" &&
-   [ "$("$MIDIMP_D/ok.out" 2>&1)" = "1.50" ]; then
+   [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MIDIMP_D/ok.out" 2>&1)" = "1.50" ]; then
     PASS=$((PASS + 1))
     echo "  midimp_top_of_file_still_works: PASS (compiles and runs on $RUN_ARCH)"
 else
@@ -27029,7 +29106,7 @@ import "../std/math_float.kr"
 fn main() -> uint32 { println_str(fmt_f64(1.5, 2))  return 0 }' > "$MIDIMP_D/cmt.kr"
 if $KRC --arch=$RUN_ARCH "$MIDIMP_D/cmt.kr" -o "$MIDIMP_D/cmt.out" > /dev/null 2>&1 &&
    chmod +x "$MIDIMP_D/cmt.out" &&
-   [ "$("$MIDIMP_D/cmt.out" 2>&1)" = "1.50" ]; then
+   [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MIDIMP_D/cmt.out" 2>&1)" = "1.50" ]; then
     PASS=$((PASS + 1))
     echo "  midimp_comment_preamble_ok: PASS (comments do not end the leading run)"
 else
@@ -27052,7 +29129,7 @@ printf '%s\n' 'import "helper.kr"
 fn main() -> uint32 { println_str(fmt_f64(midimp_helper_val(), 2))  return 0 }' > "$MIDIMP_D/multi.kr"
 if $KRC --arch=$RUN_ARCH "$MIDIMP_D/multi.kr" -o "$MIDIMP_D/multi.out" > /dev/null 2>&1 &&
    chmod +x "$MIDIMP_D/multi.out" &&
-   [ "$("$MIDIMP_D/multi.out" 2>&1)" = "2.25" ]; then
+   [ "$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$MIDIMP_D/multi.out" 2>&1)" = "2.25" ]; then
     PASS=$((PASS + 1))
     echo "  midimp_per_file_leading_run: PASS (leading run restarts at each file)"
 else
@@ -27365,10 +29442,10 @@ run_test "sep_float_f32_suffix" 'fn main() -> u64 { f32 x = 1_0.5f; if x > 10.4 
 APXA_D=$(mktemp -d)
 printf 'fn main() -> u64 {\n    print("hi")\n    return 0\n}\n' > "$APXA_D/p.kr"
 TOTAL=$((TOTAL + 1))
-if ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p.arx" >/dev/null 2>&1; then
+if timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p.arx" >/dev/null 2>&1; then
     PASS=$((PASS + 1)); echo "  arx_print_needs_no_import: PASS"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: arx_print_needs_no_import ($(./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o /dev/null 2>&1 | head -1))"
+    FAIL=$((FAIL + 1)); echo "FAIL: arx_print_needs_no_import ($(timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/p.kr" -o /dev/null 2>&1 | head -1))"
 fi
 TOTAL=$((TOTAL + 1))
 if [ -s "$APXA_D/p.arx" ] && od -An -tx1 -v "$APXA_D/p.arx" | tr -d ' \n' | grep -q "cd80"; then
@@ -27389,7 +29466,7 @@ fi
 # container: abi 1 as a byte occurs hundreds of times.
 APXM_D=$(mktemp -d)
 printf 'static u64 d = 32\nfn main(u64 svc) -> u64 { return d }\n' > "$APXM_D/m.kr"
-./build/krc2 --arch=x86_64 --target=none --emit=arxmod --mod-name=gatemod --mod-abi=3 \
+timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --target=none --emit=arxmod --mod-name=gatemod --mod-abi=3 \
     --mod-version=9 "$APXM_D/m.kr" -o "$APXM_D/m.arxm" >/dev/null 2>&1
 apxm_field() { od -An -tu"$2" -j"$1" -N"$2" -v "$APXM_D/m.arxm" | tr -d ' \n'; }
 TOTAL=$((TOTAL + 1))
@@ -27452,7 +29529,7 @@ TOTAL=$((TOTAL + 1))
 # table from 88 to 112 to make room for a second directory entry; a plain
 # container must still declare one table with its segments at 88, or every
 # existing ApexRift program stops loading.
-./build/krc2 --arch=x86_64 --target=none --emit=arx "$APXA_D/p.kr" -o "$APXM_D/plain.arx" >/dev/null 2>&1
+timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --target=none --emit=arx "$APXA_D/p.kr" -o "$APXM_D/plain.arx" >/dev/null 2>&1
 apxm_pfl=$(od -An -tu2 -j10 -N2 -v "$APXM_D/plain.arx" | tr -d ' \n')
 apxm_ptc=$(od -An -tu4 -j12 -N4 -v "$APXM_D/plain.arx" | tr -d ' \n')
 apxm_pso=$(od -An -tu8 -j72 -N8 -v "$APXM_D/plain.arx" | tr -d ' \n')
@@ -27467,7 +29544,7 @@ rm -rf "$APXM_D"
 # nothing on that arch to trap into. A row here so the x86 provider cannot be
 # widened to arm64 by accident.
 TOTAL=$((TOTAL + 1))
-apxa_a64=$(./build/krc2 --arch=arm64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p64.arx" 2>&1)
+apxa_a64=$(timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=arm64 --emit=arx "$APXA_D/p.kr" -o "$APXA_D/p64.arx" 2>&1)
 case "$apxa_a64" in
     *"not available on bare metal"*) PASS=$((PASS + 1)); echo "  arx_arm64_still_refuses: PASS" ;;
     *) FAIL=$((FAIL + 1)); echo "FAIL: arx_arm64_still_refuses (got: $(printf '%s' "$apxa_a64" | head -1))" ;;
@@ -27476,7 +29553,7 @@ esac
 # program supplied none; a board that wants its own console must keep it.
 TOTAL=$((TOTAL + 1))
 printf '@builtin_override\nfn write(uint64 fd, uint64 buf, uint64 len) -> uint64 { return 42 }\nfn main() -> u64 {\n    print("hi")\n    return 0\n}\n' > "$APXA_D/o.kr"
-if ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/o.kr" -o "$APXA_D/o.arx" >/dev/null 2>&1 \
+if timeout -k 5 "$RUN_TEST_TIMEOUT" ./build/krc2 --arch=x86_64 --emit=arx "$APXA_D/o.kr" -o "$APXA_D/o.arx" >/dev/null 2>&1 \
    && ! od -An -tx1 -v "$APXA_D/o.arx" | tr -d ' \n' | grep -q "cd80"; then
     PASS=$((PASS + 1)); echo "  arx_user_write_override_wins: PASS (no int 0x80 emitted)"
 else
@@ -31053,7 +33130,8 @@ else pe_row_bad win_legacy_out_audit "${PEU_WHY:-only $PEU_FIX SP-fixed function
 # (#143 A19d(i); spec 2.5.7, finding 24): time_ns (time_basic.kr), exec
 # (sys_envp_exec.kr), and >8-argument named calls and call_ptr
 # (call_ptr_many_args.kr) emit an SP adjustment in a function body (more
-# `sub rsp`, `sub sp, sp` and `push imm8` (6a) lines than function labels) on Linux and
+# `sub rsp`, `sub sp, sp` and `push imm8` (6a, alone on its line or, since
+# barrier-cse's whole-instruction listing, with its imm8) lines than function labels) on Linux and
 # macOS, x86_64 and arm64, --legacy.
 PEU_WHY=""; PEU_N=0
 for peu_f in fixtures/time_basic.kr fixtures/sys_envp_exec.kr fixtures/call_ptr_many_args.kr; do
@@ -31064,7 +33142,7 @@ for peu_f in fixtures/time_basic.kr fixtures/sys_envp_exec.kr fixtures/call_ptr_
                 PEU_WHY="$PEU_WHY $peu_f $peu_a $peu_os: build failed;"; continue
             fi
             PEU_L=$(grep -c '^[A-Za-z_][A-Za-z0-9_]*:$' "$T10_D/peu_sh.s")
-            if [ "$peu_a" = arm64 ]; then PEU_S=$(grep -c 'sub sp, sp' "$T10_D/peu_sh.s"); else PEU_S=$(grep -c 'sub rsp\|: 6a $\|push 0x0' "$T10_D/peu_sh.s"); fi
+            if [ "$peu_a" = arm64 ]; then PEU_S=$(grep -c 'sub sp, sp' "$T10_D/peu_sh.s"); else PEU_S=$(grep -c 'sub rsp\|: 6a $\|: 6a [0-9a-f][0-9a-f] $\|push 0x0' "$T10_D/peu_sh.s"); fi
             [ "$PEU_S" -gt "$PEU_L" ] || PEU_WHY="$PEU_WHY $peu_f $peu_a $peu_os: no body SP adjustment ($PEU_S for $PEU_L functions);"
         done
     done

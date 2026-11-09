@@ -51,7 +51,7 @@
 # first design passed with the subject broken or absent (review 2, O5).
 #
 # HARD DEPENDENCIES — absence of any is a FAILURE, never a skip. The suite's
-# existing qemu skips (tests/run_tests.sh:13419, :13899) do not increment TOTAL,
+# existing qemu skips (tests/run_tests.sh:15446, :15926) do not increment TOTAL,
 # so a skip there is indistinguishable from a pass; that pattern is exactly
 # what this gate must not copy.
 #
@@ -476,7 +476,7 @@ X86_STACK_TOP=0x90000
 # that does not exist and a grep-only parse goes green on it. Exit status
 # alone did not close that either: codegen_write_output used to ignore
 # file_write's return, so a SHORT write exited 0 (it now stops on one,
-# write_all_or_die, src/codegen.kr:20608). All three are still
+# write_all_or_die, src/codegen.kr:20648). All three are still
 # required here — exit 0, a parsable line, and on-disk size == the reported
 # filesz. The full compiler output is kept beside the artifact ($WORK survives
 # a red run) instead of going to /dev/null as the ELF form did, so a failed
@@ -1226,7 +1226,7 @@ leg1() {
     # THE REPORT-vs-entry_addr CLAUSE IS A TAUTOLOGY WITH RESPECT TO THE
     # COMPILER. Both numbers are the SAME variable: `xs_start32` in
     # emit_x86_image_stub feeds `patch_u32(xs_hdr_entry, ld + xs_start32)`
-    # (src/main.kr:3215) AND `x86stub_start32_off` -> `img_stub_off` ->
+    # (src/main.kr:3915) AND `x86stub_start32_off` -> `img_stub_off` ->
     # `entry_off` (:2806, :4311, :4897), which is what the `image:` line
     # prints. They cannot disagree, so on its own this clause catches a
     # spelling or parsing mistake in THIS SCRIPT and nothing about the
@@ -3106,7 +3106,7 @@ leg8() {
 #     the only difference. `rv_verdict` accepts either shape under one name,
 #     because what discriminates the map fault is that **`L` NEVER PRINTS**, not
 #     the tail of the capture. A control that grepped for a capture ENDING in
-#     `RP` would pass on a correct compiler too (tests/run_tests.sh:17699 carries
+#     `RP` would pass on a correct compiler too (tests/run_tests.sh:19730 carries
 #     the same warning).
 #   * THE RAM CEILING IS NOT THE MAP CEILING. `--stack-top` is validated against
 #     the 4 GiB identity map, and the compiler cannot know how much RAM the

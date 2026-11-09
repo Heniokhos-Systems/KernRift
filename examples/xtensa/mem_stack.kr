@@ -29,7 +29,7 @@
 // the parameter form below, which is what it was written to exercise and
 // what the boot test's golden output pins. The form that reaches MEMCMP
 // without touching IR_ALLOC: struct
-// pointers arrive through ordinary FUNCTION PARAMETERS (ir.kr:5956-5958
+// pointers arrive through ordinary FUNCTION PARAMETERS (ir.kr:5981-5983
 // registers a struct-typed param for field access regardless of what
 // pointer value the caller passed), so two `static u32[2]` arrays (already
 // proven via STATIC_ADDR/array machinery, byte-identical in layout to

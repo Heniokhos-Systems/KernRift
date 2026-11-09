@@ -10180,6 +10180,11 @@ fn gen_expr(uint64 node) {
             // mfence (before store)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x88); emit_byte(0x08)
+            // mfence (after store): LANGUAGE.md -- the store completes before
+            // anything after it. Without it a later load could pass the store
+            // in the store buffer (the store-buffering litmus rows saw both-zero
+            // outcomes on x86 hardware).
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore16", 8) != 0 {
@@ -10195,6 +10200,7 @@ fn gen_expr(uint64 node) {
             emit_load_rax_from_stack(pk0_vstore16)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x66); emit_byte(0x89); emit_byte(0x08)
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence after
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore32", 8) != 0 {
@@ -10210,6 +10216,7 @@ fn gen_expr(uint64 node) {
             emit_load_rax_from_stack(pk0_vstore32)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x89); emit_byte(0x08)
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence after
             return
         }
         if is_extern_call == 0 && tok_matches(wct, "vstore64", 8) != 0 {
@@ -10225,6 +10232,7 @@ fn gen_expr(uint64 node) {
             emit_load_rax_from_stack(pk0_vstore64)
             emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
             emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)   // mfence after
             return
         }
 
@@ -13686,6 +13694,8 @@ fn gen_stmt(uint64 node) {
                         } else {
                             emit_byte(0x48); emit_byte(0x89); emit_byte(0x08)
                         }
+                        // mfence (barrier after store), as for vstoreN
+                        emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
                         return
                     }
                 }
@@ -14406,21 +14416,40 @@ fn gen_stmt(uint64 node) {
         uint32 addr_child = ast_child(node)
         uint64 wa = addr_child
         gen_expr(wa)
+        // data4 = the `as TYPE` keyword when it is a signed integer (84..87,
+        // see parser.kr), else 0: a signed cast sign-extends from its width.
+        uint32 pl_sk32 = ast_data4(node)
+        uint64 pl_sk = pl_sk32
         // rax = address. Do indirect load based on type_size.
         if wts == 1 {
-            // movzbl (%rax), %eax
-            emit_byte(0x0F)
-            emit_byte(0xB6)
-            emit_byte(0x00)
+            if pl_sk != 0 {
+                // movsbq (%rax), %rax
+                emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBE); emit_byte(0x00)
+            } else {
+                // movzbl (%rax), %eax
+                emit_byte(0x0F)
+                emit_byte(0xB6)
+                emit_byte(0x00)
+            }
         } else if wts == 2 {
-            // movzwl (%rax), %eax
-            emit_byte(0x0F)
-            emit_byte(0xB7)
-            emit_byte(0x00)
+            if pl_sk != 0 {
+                // movswq (%rax), %rax
+                emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBF); emit_byte(0x00)
+            } else {
+                // movzwl (%rax), %eax
+                emit_byte(0x0F)
+                emit_byte(0xB7)
+                emit_byte(0x00)
+            }
         } else if wts == 4 {
-            // movl (%rax), %eax
-            emit_byte(0x8B)
-            emit_byte(0x00)
+            if pl_sk != 0 {
+                // movslq (%rax), %rax
+                emit_byte(0x48); emit_byte(0x63); emit_byte(0x00)
+            } else {
+                // movl (%rax), %eax
+                emit_byte(0x8B)
+                emit_byte(0x00)
+            }
         } else {
             // movq (%rax), %rax
             emit_byte(0x48)
@@ -14468,6 +14497,9 @@ fn gen_stmt(uint64 node) {
         }
         if wpl_fk == 1 { var_type_register(dest_tok, 96) }
         if wpl_fk == 2 { var_type_register(dest_tok, 95) }
+        // A signed cast types dest signed (i8..i64 = 84..87), as the float
+        // kinds above type it float, so `x < 0` / `x / 2` / `x >> 1` are signed.
+        if pl_sk != 0 { var_type_register(dest_tok, pl_sk) }
         emit_store_rax_to_stack(doff)
         return
     }
@@ -14564,6 +14596,14 @@ fn gen_stmt(uint64 node) {
             emit_byte(0x48)
             emit_byte(0x89)
             emit_byte(0x08)
+        }
+        // Volatile barrier AFTER the store too (LANGUAGE.md §12: on x86_64 the
+        // store completes before anything after it). The barrier before orders it
+        // after earlier accesses; only this one stops a later load from
+        // passing it in the store buffer.
+        if (wvf2 & 16) != 0 {
+            // mfence
+            emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
         }
         return
     }
@@ -20576,8 +20616,8 @@ static uint64 import_failed = 0
 // produced NO FILE. A release script that writes into a dist/ it has not
 // created yet therefore got a green build and no artifact.
 //
-// Checked HERE, not in codegen_write_output: main.kr:1350 (asm listing) and
-// main.kr:4953 (esp32 image) call this directly and bypass
+// Checked HERE, not in codegen_write_output: main.kr:1949 (asm listing) and
+// main.kr:5653 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {

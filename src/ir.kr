@@ -5236,6 +5236,31 @@ fn ir_lower_stmt(uint64 node) {
         // IR_FADD.
         uint64 vfk = ir_fkind_from_decl(fk)
         if vfk != 0 { ir_vreg_fkind_set(dest_v, vfk) }
+        // data4 = the `as TYPE` keyword when it is a SIGNED integer (84..87,
+        // see parser.kr). `*(p as i8) -> x` reads an i8: the load above
+        // zero-extends, so a narrower-than-word signed load is sign-extended
+        // here (shl then sar by word_bits - 8*width), and the vreg is marked
+        // signed so `x < 0`, `x / 2` and `x >> 1` pick the signed ops. Before
+        // this, ir_var_set rebound dest to an UNSIGNED vreg -- so a declared
+        // `i64 x` lost its sign at this load and the undeclared form was
+        // never signed at all.
+        uint32 pl_sk32 = ast_data4(node)
+        uint64 pl_sk = pl_sk32
+        if pl_sk != 0 {
+            uint64 pl_word = 64
+            if target_arch != 0 && target_arch != 1 { pl_word = 32 }
+            uint64 pl_sh = pl_word - type_size * 8
+            if type_size * 8 < pl_word {
+                uint64 pl_amt = ir_new_vreg()
+                ir_emit(IR_CONST, pl_amt, 0, 0, pl_sh, ir_current_bb)
+                uint64 pl_hi = ir_new_vreg()
+                ir_emit(IR_SHL, pl_hi, dest_v, pl_amt, 0, ir_current_bb)
+                uint64 pl_sx = ir_new_vreg()
+                ir_emit(IR_SAR, pl_sx, pl_hi, pl_amt, 0, ir_current_bb)
+                dest_v = pl_sx
+            }
+            ir_vreg_signed_set(dest_v, 1)
+        }
         // Bind dest variable
         uint32 dest_tok = ast_data2(node)
         ir_var_set(dest_tok, dest_v)
@@ -5440,11 +5465,11 @@ fn ir_lower_stmt(uint64 node) {
                 // Store the vreg as src in the instruction imm (via IR_ARG).
                 // Register-name resolution is arch-specific: riscv32 (arch 2)
                 // uses rv_reg_code (a0-a7/s0-s11/x0-x31, fails loud on an
-                // unknown name); x86 (arch 0) and arm64 (arch 1) keep the
-                // pre-existing x86_reg_code path byte-for-byte (arm64 IR-mode
-                // inheriting the x86 lookup here is a pre-existing bug, audit
-                // §11 — deliberately left unchanged so the bootstrap stays
-                // identical; only the arch==2 branch is new).
+                // unknown name), arm64 (arch 1) uses a64_reg_code_strict
+                // (fails loud on anything but x0-x30), and x86 (arch 0) uses
+                // x86_reg_code. arm64 used to inherit the x86 lookup here;
+                // IR_REFERENCE §13 item 11 records that as closed, and the
+                // second site below makes the same three-way choice.
                 uint32 rtok = ast_data2(wci)
                 uint64 rcode = 0
                 if target_arch == 2 {
@@ -5481,8 +5506,8 @@ fn ir_lower_stmt(uint64 node) {
                 // ir_var_set below would happily CREATE a map entry for a name
                 // that is not a declared local, so the write went nowhere.
                 asm_require_local(vtok2, ir_var_get(vtok2))
-                // Same arch-gated dispatch as the IN site above: riscv32 uses
-                // rv_reg_code (fail-loud); arch 0/1 unchanged.
+                // Same arch-gated dispatch as the IN site above: riscv32
+                // rv_reg_code, arm64 a64_reg_code_strict, x86 x86_reg_code.
                 uint64 rcode2 = 0
                 if target_arch == 2 {
                     rcode2 = rv_reg_code(rtok2)
@@ -11529,7 +11554,7 @@ fn ir_emit_x86_insn(uint64 ii) {
     }
 
     if op == 94 {
-        // IR_VSTORE: mfence + store (volatile), width in dest_v
+        // IR_VSTORE: mfence + store + mfence (volatile), width in dest_v
         uint64 addr_reg = ir_resolve_src(s1_v, 0)
         uint64 val_reg = ir_resolve_src(s2_v, 1)
         uint64 width = dest_v
@@ -11576,6 +11601,10 @@ fn ir_emit_x86_insn(uint64 ii) {
             else if (addr_reg & 7) == 5 { uint8 stm = st_modrm | 0x40; emit_byte(stm); emit_byte(0) }
             else { uint8 stm = st_modrm; emit_byte(stm) }
         }
+        // mfence AFTER the store as well (LANGUAGE.md: the store completes
+        // before anything after it). x86 lets a LATER load pass a store still
+        // in the store buffer; the mfence before only orders earlier accesses.
+        emit_byte(0x0F); emit_byte(0xAE); emit_byte(0xF0)
         return
     }
 
@@ -13869,18 +13898,26 @@ fn ir_cse_canon_set(uint64 dest, uint64 canonical) {
     unsafe { *(p as uint32) = c }
 }
 
+// Derived from ir_opt_is_side_effect: every side-effecting op invalidates
+// unless it is on the exemption list below. A hand-kept positive list drifted
+// from the side-effect list twice -- the barriers 126-130 (`a = g; dmb();
+// b = g` emitted one load of g, so the barrier ordered nothing), then FMT_UINT (74,
+// writes through a caller-supplied pointer, so `a = g; fmt_uint(p, v); b = g`
+// with p aliasing g reused the stale g), FMT_BOOL/FMT_F64 (124/125),
+// STORE_BIS (148) and MODULE_PATH (146, writes the path through buf). A new
+// side-effecting op now invalidates by default. Each exemption below writes
+// no memory a CSE-pure op reads (IR_STATIC_LOAD 77 is the only one), so
+// exempting it loses nothing; tests/run_tests.sh cse_invalidate_set_pinned
+// holds this list.
 fn ir_opt_cse_invalidates(uint64 op) -> uint64 {
-    if op == 31 { return 1 }  // STORE
-    if op == 50 { return 1 }  // CALL
-    if op == 52 { return 1 }  // SYSCALL
-    if op == 72 { return 1 }  // MEMCPY
-    if op == 76 { return 1 }  // MEMSET
-    if op == 78 { return 1 }  // STATIC_STORE
-    if op == 85 { return 1 }  // SYSCALL_RAW
-    if op == 87 { return 1 }  // CALL_IND
-    if op >= 90 && op <= 96 { return 1 }    // atomics, vstore/vload, asm
-    if op >= 109 && op <= 115 { return 1 }  // atomic RMW, exec, set_exec
-    return 0
+    if ir_opt_is_side_effect(op) == 0 { return 0 }
+    if op >= 40 && op <= 43 { return 0 }  // BR..RET_VOID: a new block bumps the epoch anyway
+    if op == 51 { return 0 }              // ARG: a register move; the CALL after it invalidates
+    if op == 70 || op == 71 { return 0 }  // ALLOC/DEALLOC: mmap/munmap; write only the fresh block's size header
+    if op >= 80 && op <= 83 { return 0 }  // EXTRACT_RDX/R8, RET2/RET3: register moves
+    if op == 119 { return 0 }             // TIME_NS: writes only a stack timespec
+    if op == 131 { return 0 }             // ARR_CHECK: traps or falls through, writes nothing
+    return 1
 }
 
 fn ir_opt_cse_is_pure(uint64 op) -> uint64 {

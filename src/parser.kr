@@ -2824,6 +2824,14 @@ fn parse_stmt() -> uint64 {
             else if type_kind == 94 { vfk = 3 }
             uint32 vf = vfk | 16
             ast_set_data3(node, vf)
+            // data4 = the `as TYPE` keyword when it is a SIGNED integer
+            // (KwInt8..KwInt64 = 84..87), else 0. `*(p as i32) -> x` reads an
+            // i32: the load sign-extends from that width, and dest is typed
+            // signed on every backend, so `x < 0`, `x / 2` and `x >> 1` are
+            // the signed operations. Without it the IR rebound dest to an
+            // untyped vreg (dropping a declared `i64 x`'s sign) and both
+            // backends zero-extended, so 0xFA as i8 read back as 250.
+            if type_kind >= 84 && type_kind <= 87 { ast_set_data4(node, type_kind) }
             return node
         }
         if cur_kind() == 34 {
@@ -2919,6 +2927,14 @@ fn parse_stmt() -> uint64 {
             else if type_kind == 95 { fk = 2 }
             else if type_kind == 94 { fk = 3 }
             ast_set_data3(node, fk)
+            // data4 = the `as TYPE` keyword when it is a SIGNED integer
+            // (KwInt8..KwInt64 = 84..87), else 0. `*(p as i32) -> x` reads an
+            // i32: the load sign-extends from that width, and dest is typed
+            // signed on every backend, so `x < 0`, `x / 2` and `x >> 1` are
+            // the signed operations. Without it the IR rebound dest to an
+            // untyped vreg (dropping a declared `i64 x`'s sign) and both
+            // backends zero-extended, so 0xFA as i8 read back as 250.
+            if type_kind >= 84 && type_kind <= 87 { ast_set_data4(node, type_kind) }
             return node
         }
         if cur_kind() == 34 {

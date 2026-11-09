@@ -10,7 +10,7 @@
 // a second pass copies them into `buf` in reverse) and returns the digit
 // count. Semantics confirmed against ir.kr's emit site (ir.kr:2910-2919,
 // "fmt_uint(buf, val) -> IR_FMT_UINT": dest = digit count, src1 = buf
-// pointer, src2 = value) and both existing twins (x86 ir.kr:10465-10543,
+// pointer, src2 = value) and both existing twins (x86 ir.kr:10490-10568,
 // arm64 ir_aarch64.kr:2235-2293) — same buf-out/dest-count-in contract on
 // every backend.
 //
