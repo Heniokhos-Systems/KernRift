@@ -6613,14 +6613,17 @@ rm -rf "$SIM_T"
 # last `ret` row to objdump -D -b binary, and require every row to START at
 # an instruction boundary and to hold exactly that instruction's bytes. The
 # round-7 compiler failed 265 rows here (legacy prefixes on their own row).
+# The objdump is $X86_OBJDUMP (x86_objdump above): an arm64 host's plain
+# objdump has no x86 target, prints no instruction for -m i386:x86-64, and
+# made every row read as off-boundary on the native ARM64 CI job.
 TOTAL=$((TOTAL + 1))
-if ! command -v objdump > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
-    skip_row x86_asm_listing_self_vs_objdump "needs objdump and python3"
+if [ -z "$X86_OBJDUMP" ] || ! command -v python3 > /dev/null 2>&1; then
+    skip_row x86_asm_listing_self_vs_objdump "needs an x86-64 objdump (objdump with i386:x86-64, or x86_64-linux-gnu-objdump) and python3"
 else
     XLS_T=$(mktemp -d "${TMPDIR:-/tmp}/krc_xls.XXXXXX")
     XLS_OUT="no listing"
     if [ -f "$DIR/../build/krc.kr" ] && $KRC --arch=x86_64 --emit=asm "$DIR/../build/krc.kr" -o "$XLS_T/self.s" > /dev/null 2>&1; then
-        XLS_OUT=$(cd "$XLS_T" && timeout -k 5 600 python3 - "$XLS_T/self.s" <<'PYEOF'
+        XLS_OUT=$(cd "$XLS_T" && X86_OBJDUMP="$X86_OBJDUMP" timeout -k 5 600 python3 - "$XLS_T/self.s" <<'PYEOF'
 import sys, re, subprocess, os, tempfile
 L = open(sys.argv[1], errors="replace").read().split("\n")
 funcs = []; cur = None
@@ -6634,7 +6637,7 @@ for name, rs in funcs:
     if not lr: continue
     rs = rs[:lr[-1] + 1]; base = rs[0][0]; fns += 1
     fd, p = tempfile.mkstemp(dir="."); os.write(fd, b"".join(b for _, b in rs)); os.close(fd)
-    o = subprocess.run(["objdump", "-D", "-b", "binary", "-mi386:x86-64", "-w", p], capture_output=True, text=True).stdout; os.unlink(p)
+    o = subprocess.run([os.environ["X86_OBJDUMP"], "-D", "-b", "binary", "-mi386:x86-64", "-w", p], capture_output=True, text=True).stdout; os.unlink(p)
     st = sorted(int(m.group(1), 16) for m in re.finditer(r"(?m)^\s+([0-9a-f]+):\t", o))
     nx = {st[i]: st[i + 1] for i in range(len(st) - 1)}; ss = set(st)
     for a, b in rs:
@@ -6885,6 +6888,11 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 QEMU_RV32=""
 if command -v qemu-riscv32-static > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32-static"
 elif command -v qemu-riscv32 > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32"; fi
+# x86_64 binaries run natively only on an x86_64 host; elsewhere (the native
+# ARM64 CI job) through qemu-x86_64, named here rather than left to binfmt,
+# so a row knows it is emulated (the time_ns row checks a trace instead).
+OR_HOST=$(uname -m)
+OR_QEMU_X86="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
 OR_PAD=""
 for ((OR_PI = 1; OR_PI <= 150; OR_PI++)); do OR_PAD="$OR_PAD    acc = acc * 3 + $OR_PI
 "; done
@@ -6908,6 +6916,11 @@ or_shape_name() {
 or_runner() {
     OR_R=""
     case $1 in
+        x86_64)
+            if [ "$OR_HOST" != x86_64 ] && [ "$OR_HOST" != amd64 ]; then
+                if [ -z "$OR_QEMU_X86" ]; then skip_row "$2" "no qemu-x86_64 (x86_64 binaries on an $OR_HOST host)"; return 1; fi
+                OR_R="$OR_QEMU_X86"
+            fi ;;
         arm64)
             if [ -z "$QEMU_A64" ]; then skip_row "$2" "no qemu-aarch64"; return 1; fi
             OR_R="$QEMU_A64" ;;
@@ -7051,7 +7064,9 @@ rm -f /tmp/krc_or_$$.kr /tmp/krc_or_$$
 #                         (137); deleted, it exits 50. arm64: qemu-aarch64
 #                         refuses seccomp, so the row runs the program under
 #                         `qemu-aarch64 -strace` and wants a clock_gettime
-#                         call in the trace. Not on riscv32 (no time_ns there)
+#                         call in the trace; so does x86_64 on a non-x86_64
+#                         host, where qemu-x86_64 runs it and refuses seccomp
+#                         too. Not on riscv32 (no time_ns there)
 #   exec 113 / exec_argv 114    exec /bin/true                 0
 #   set_exec 115                chmod +x of a scratch file     the row checks -x
 #   arr_check 131 (--debug)     arr[5] on a 2-element array    1 (the trap)
@@ -7117,6 +7132,10 @@ for OR2_K in $OR2_CASES; do
             OR2_TIME='syscall_raw(157, 22, 1, 0, 0, 0, 0)\n    time_ns()\n    syscall_raw(60, 50, 0, 0, 0, 0, 0)'
             OR2_WANT_A=$OR2_WANT
             case $OR2_ARCH in
+                x86_64)  if [ -n "$OR_R" ]; then
+                             OR2_TIME='time_ns()'
+                             [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; }
+                         fi ;;
                 arm64)   OR2_UD="0x00000000"
                          OR2_TIME='time_ns()'
                          [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; } ;;
