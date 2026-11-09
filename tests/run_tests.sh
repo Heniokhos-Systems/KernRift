@@ -9750,6 +9750,16 @@ pe_calls() {   # <pe> <x86_64|arm64>
                     done
                     printf 'span %d %d %s\n' "$slot" $((0x${B[i+9]})) "${st:-,}"
                 fi
+            elif [ "${B[i]}${B[i+1]}" = "ff15" ] && [ "${B[i+6]}${B[i+7]}${B[i+8]}" = "83f86d" ]; then
+                # The read/file_read builtin's ERROR_BROKEN_PIPE probe (#136):
+                # `call [GetLastError]` followed by `cmp eax,109`, inside the
+                # ReadFile call's own area -- so no sub/add rsp brackets it:
+                # frame `-`, and no span (the span scan keys on the 48 83 c4
+                # that follows a bracketed call).
+                disp=$(( 0x${B[i+5]}${B[i+4]}${B[i+3]}${B[i+2]} )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
+                tgt=$((va + i + 6 + disp)); slot=$(pe_slot_of "$tgt")
+                if [ -z "$slot" ]; then printf 'badiat 0x%x 0x%x\n' $((va + i)) "$tgt"; continue; fi
+                printf 'iat 0x%x %d %s -\n' $((va + i)) "$slot" "$(pe_slot_name "$f" "$idt_off" "$tgt")"
             elif [ "${B[i]}" = "e8" ] && [ $((i + 5)) -le "$n" ]; then
                 disp=$(( 0x${B[i+4]}${B[i+3]}${B[i+2]}${B[i+1]} )); [ "$disp" -ge 2147483648 ] && disp=$((disp - 4294967296))
                 printf 'direct 0x%x 0x%x\n' $((va + i)) $((va + i + 5 + disp))
@@ -27481,6 +27491,201 @@ elif "$DIR/../build/krc2" --arch=x86_64 --target=windows --emit=pe "$ALI_FX" -o 
     ali_check alias_byte_addr_windows_wine "$ALI_RC" "$ALI_D/out"
     WINEPREFIX="$ALI_D/pfx" "$(dirname "$ALI_WINE")/wineserver" -k > /dev/null 2>&1
 else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_windows_wine (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
+# --- Windows I/O builtins report failure and map std fds (#136 #138 #145 #162
+# #163 #165 #167 #168 #170 #171) ------------------------------------------------
+# On Windows, read/file_read, file_size, write and file_write return the count,
+# 0 at end of file, or -5 (-EIO) for every Win32 failure -- they used to say 0
+# or a stale stack value -- and fds 0..2 are the standard handles on every
+# backend. The SAME fixtures run on Linux (the reference: -9 where Windows says
+# -5) and as Windows PEs under Wine (x86_64); arm64 Windows has no runner, so
+# its lowering is checked statically by tests/helpers/win_file_err_shape.py,
+# function by function, located by the --emit=asm listing's labels.
+#   win_file_errors.kr    every probe twice: a print-free p_* copy and a
+#                         printing s_* copy (two frame shapes); see its header
+#   win_file_std*.kr      stdin redirected from wfs.in / piped
+#   win_file_shape.kr     print-free sh_* probes for the static rows
+WFE_D=$(mktemp -d /tmp/krwfe_XXXXXX)
+WFE_FX="$DIR/fixtures"
+WFE_KRC="$DIR/../build/krc2"
+WFE_WINE="$(wine_path)"
+WFE_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+WFE_SHAPE="$DIR/helpers/win_file_err_shape.py"
+# Lines the Windows rows do not compare (none: every probe is compared).
+WFE_SKIP=''
+wfe_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+wfe_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
+wfe_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+# wfe_build <out> <arch> <backend: ir|legacy> <target: linux|windows> <fixture>
+wfe_build() {
+    local lg="" tg=""
+    [ "$3" = "legacy" ] && lg="--legacy"
+    [ "$4" = "windows" ] && tg="--target=windows --emit=pe"
+    "$WFE_KRC" --arch="$2" $lg $tg "$WFE_FX/$5.kr" -o "$WFE_D/$1" > "$WFE_D/$1.log" 2>&1
+}
+# wfe_cmp <row> <rc> <got> <expected> [skip-regex]: rc 0 and the expected lines.
+# When <expected>.stderr exists, the run's stderr lines starting `fd2-` (the
+# fixture's own writes to fd 2; Wine may add its own noise) must equal it too.
+wfe_cmp() {
+    local g="$WFE_D/cmp.got" w="$WFE_D/cmp.want"
+    tr -d '\r' < "$3" > "$g"; cp "$4" "$w"
+    if [ -f "$4.stderr" ]; then
+        echo "--- stderr" >> "$g"; tr -d '\r' < "$WFE_D/run.err" | grep '^fd2-' >> "$g"
+        echo "--- stderr" >> "$w"; cat "$4.stderr" >> "$w"
+    fi
+    if [ -n "$5" ]; then grep -Ev "$5" "$g" > "$g.f"; mv "$g.f" "$g"; grep -Ev "$5" "$w" > "$w.f"; mv "$w.f" "$w"; fi
+    if [ "$2" = "0" ] && cmp -s "$g" "$w"; then wfe_ok "$1" "$(grep -c '' "$w") lines"
+    else wfe_bad "$1" "rc=$2; first difference: $(diff "$g" "$w" | grep '^[<>]' | head -4 | tr '\n' '|')"; fi
+}
+# wfe_wine <exe> <stdin: none|file:<path>|pipe:<text>> -> $WFE_D/wine.out, rc.
+# Status 53 with no output is Wine's fresh-prefix kernel32 race (see t10_wine):
+# one retry on a rebuilt prefix; anything else is final.
+wfe_wine() {
+    local t rc
+    mkdir -p "$WFE_D/pfx"
+    for t in 1 2; do
+        case "$2" in
+            none)   (cd "$WFE_D" && WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" < /dev/null > "$WFE_D/wine.out" 2>"$WFE_D/run.err"); rc=$? ;;
+            file:*) (cd "$WFE_D" && WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" < "${2#file:}" > "$WFE_D/wine.out" 2>"$WFE_D/run.err"); rc=$? ;;
+            pipe:*) (cd "$WFE_D" && printf '%s' "${2#pipe:}" | WINEPREFIX="$WFE_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=-all timeout 300 "$WFE_WINE" "$1" > "$WFE_D/wine.out" 2>"$WFE_D/run.err"); rc=$? ;;
+        esac
+        if [ "$rc" = "53" ] && [ ! -s "$WFE_D/wine.out" ] && [ "$t" = "1" ]; then
+            WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
+            rm -rf "$WFE_D/pfx"; mkdir -p "$WFE_D/pfx"; continue
+        fi
+        break
+    done
+    return "$rc"
+}
+# wfe_linux <row> <arch> <backend> <fixture> <expected> <stdin>
+wfe_linux() {
+    TOTAL=$((TOTAL + 1))
+    if [ "$2" = "arm64" ] && [ "$RUN_ARCH" != "arm64" ] && [ -z "$WFE_QEMU" ]; then wfe_skip "$1" "no qemu-aarch64"; return; fi
+    if [ "$2" = "x86_64" ] && [ "$RUN_ARCH" != "x86_64" ]; then wfe_skip "$1" "x86_64 binary on an $RUN_ARCH host"; return; fi
+    if ! wfe_build "$1" "$2" "$3" linux "$4"; then wfe_bad "$1" "build: $(grep -m1 error "$WFE_D/$1.log")"; return; fi
+    local run="$WFE_D/$1" rc
+    [ "$2" = "arm64" ] && [ "$RUN_ARCH" != "arm64" ] && run="$WFE_QEMU $WFE_D/$1"
+    case "$6" in
+        none)   (cd "$WFE_D" && timeout 60 $run < /dev/null > "$WFE_D/lin.out" 2>"$WFE_D/run.err"); rc=$? ;;
+        file:*) (cd "$WFE_D" && timeout 60 $run < "${6#file:}" > "$WFE_D/lin.out" 2>"$WFE_D/run.err"); rc=$? ;;
+        pipe:*) (cd "$WFE_D" && printf '%s' "${6#pipe:}" | timeout 60 $run > "$WFE_D/lin.out" 2>"$WFE_D/run.err"); rc=$? ;;
+    esac
+    wfe_cmp "$1" "$rc" "$WFE_D/lin.out" "$5"
+}
+# wfe_win <row> <backend> <fixture> <expected> <stdin>
+wfe_win() {
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$WFE_WINE" ]; then wine_na "$1"; return; fi
+    if ! wfe_build "$1.exe" x86_64 "$2" windows "$3"; then wfe_bad "$1" "build: $(grep -m1 error "$WFE_D/$1.exe.log")"; return; fi
+    wfe_wine "$1.exe" "$5"; local rc=$?
+    wfe_cmp "$1" "$rc" "$WFE_D/wine.out" "$4" "$WFE_SKIP"
+}
+# wfe_shape <row> <arch> <backend> <rules>: the IR rows use win_file_shape_ir.kr,
+# which adds sh_rd (read() exists on the IR backend only).
+wfe_shape() {
+    TOTAL=$((TOTAL + 1))
+    if ! command -v python3 > /dev/null 2>&1; then wfe_skip "$1" "no python3"; return; fi
+    local lg="" fx="win_file_shape_ir"; [ "$3" = "legacy" ] && { lg="--legacy"; fx="win_file_shape"; }
+    if ! "$WFE_KRC" --arch="$2" $lg --target=windows --emit=pe "$WFE_FX/$fx.kr" -o "$WFE_D/$1.exe" > "$WFE_D/$1.log" 2>&1 \
+       || ! "$WFE_KRC" --arch="$2" $lg --target=windows --emit=asm "$WFE_FX/$fx.kr" -o "$WFE_D/$1.s" >> "$WFE_D/$1.log" 2>&1; then
+        wfe_bad "$1" "build: $(grep -m1 error "$WFE_D/$1.log")"; return
+    fi
+    local o; o=$(python3 -I "$WFE_SHAPE" --arch "$2" $lg --rules "$4" "$WFE_D/$1.exe" "$WFE_D/$1.s" 2>&1)
+    if [ $? = 0 ]; then wfe_ok "$1" "$(echo "$o" | tail -1 | sed 's/^win_file_err_shape: PASS (//; s/)$//')"
+    else wfe_bad "$1" "$(echo "$o" | head -3 | tr '\n' '|')"; fi
+}
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then wfe_skip win_file_err_shape_selftest "no python3"
+elif WFE_O=$(python3 -I "$WFE_SHAPE" --selftest 2>&1); then wfe_ok win_file_err_shape_selftest "offset-located identical functions, duplicate label, wrong offset, missing BOOL test, clamp register"
+else wfe_bad win_file_err_shape_selftest "$WFE_O"; fi
+for WFE_B in ir legacy; do
+    WFE_S=""; [ "$WFE_B" = "legacy" ] && WFE_S="_legacy"
+    wfe_linux "win_file_errors_linux_x86_64$WFE_S" x86_64 "$WFE_B" win_file_errors "$WFE_FX/win_file_errors.linux.expected" none
+    wfe_linux "win_file_errors_linux_arm64_qemu$WFE_S" arm64 "$WFE_B" win_file_errors "$WFE_FX/win_file_errors.linux.expected" none
+    wfe_linux "win_file_std_linux_x86_64$WFE_S" x86_64 "$WFE_B" win_file_std "$WFE_FX/win_file_std.expected" "file:$WFE_FX/wfs.in"
+    wfe_linux "win_file_std_linux_arm64_qemu$WFE_S" arm64 "$WFE_B" win_file_std "$WFE_FX/win_file_std.expected" "file:$WFE_FX/wfs.in"
+    wfe_linux "win_file_std_pipe_linux_x86_64$WFE_S" x86_64 "$WFE_B" win_file_std_pipe "$WFE_FX/win_file_std_pipe.expected" "pipe:hi"
+    wfe_linux "win_file_std_pipe_linux_arm64_qemu$WFE_S" arm64 "$WFE_B" win_file_std_pipe "$WFE_FX/win_file_std_pipe.expected" "pipe:hi"
+    wfe_win "win_file_errors_windows_wine$WFE_S" "$WFE_B" win_file_errors "$WFE_FX/win_file_errors.windows.expected" none
+    wfe_win "win_file_std_windows_wine$WFE_S" "$WFE_B" win_file_std "$WFE_FX/win_file_std.expected" "file:$WFE_FX/wfs.in"
+    wfe_win "win_file_std_pipe_windows_wine$WFE_S" "$WFE_B" win_file_std_pipe "$WFE_FX/win_file_std_pipe.expected" "pipe:hi"
+    # #145, #168: the write side of the standard-stream rule
+    wfe_linux "win_file_std_write_linux_x86_64$WFE_S" x86_64 "$WFE_B" win_file_std_write "$WFE_FX/win_file_std_write.expected" none
+    wfe_linux "win_file_std_write_linux_arm64_qemu$WFE_S" arm64 "$WFE_B" win_file_std_write "$WFE_FX/win_file_std_write.expected" none
+    wfe_win "win_file_std_write_windows_wine$WFE_S" "$WFE_B" win_file_std_write "$WFE_FX/win_file_std_write.expected" none
+done
+# #171: alloc of a size whose size + 8 header add wraps returns 0 on Windows.
+# Windows rows only -- the same wrap on the other targets is #172.
+wfe_win win_alloc_wrap_windows_wine ir win_alloc_wrap "$WFE_FX/win_alloc_wrap.windows.expected" none
+wfe_win win_alloc_wrap_windows_wine_legacy legacy win_alloc_wrap "$WFE_FX/win_alloc_wrap.windows.expected" none
+# #167: print* shares the IR write arm but never exposes its result, so its
+# bytes must not move: the four Windows builds of win_print_only.kr against the
+# md5s the compiler produced before the Windows I/O fixes. Pinned at the merge
+# of win-file-errors with the pre-merge compiler (pe-unwind on main), because
+# pe-unwind's unwind tables changed every PE; 233af31's md5s held before that.
+# A change here that is intended -- a later codegen change -- re-pins the file
+# with its reason in the commit.
+TOTAL=$((TOTAL + 1))
+WFE_PB=""
+for WFE_V in "x86_64:" "x86_64:--legacy" "arm64:" "arm64:--legacy"; do
+    WFE_A=${WFE_V%%:*}; WFE_L=${WFE_V#*:}; WFE_N="windows-$WFE_A${WFE_L:+-legacy}"
+    if ! "$WFE_KRC" --arch="$WFE_A" $WFE_L --target=windows --emit=pe "$WFE_FX/win_print_only.kr" -o "$WFE_D/wpo.exe" > "$WFE_D/wpo.log" 2>&1; then
+        WFE_PB="$WFE_PB $WFE_N:build"; continue
+    fi
+    WFE_M=$(md5sum < "$WFE_D/wpo.exe" | cut -c1-32)
+    grep -qx "$WFE_M $WFE_N" "$WFE_FX/win_print_only.md5" || WFE_PB="$WFE_PB $WFE_N:$WFE_M"
+done
+if [ -z "$WFE_PB" ]; then wfe_ok win_file_errors_print_identity "4 Windows builds byte-identical to the compiler before the Windows I/O fixes"
+else wfe_bad win_file_errors_print_identity "print output moved:$WFE_PB"; fi
+# read() exists on the IR backend only
+wfe_linux win_file_errors_read_linux_x86_64 x86_64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
+wfe_linux win_file_errors_read_linux_arm64_qemu arm64 ir win_file_errors_read "$WFE_FX/win_file_errors_read.linux.expected" none
+wfe_win win_file_errors_read_builtin_windows_wine ir win_file_errors_read "$WFE_FX/win_file_errors_read.windows.expected" none
+wfe_shape win_file_errors_shape_x86_64 x86_64 ir abcdef
+wfe_shape win_file_errors_shape_x86_64_legacy x86_64 legacy abcdef
+wfe_shape win_file_errors_shape_arm64 arm64 ir abcdef
+wfe_shape win_file_errors_shape_arm64_legacy arm64 legacy abcdef
+# #170: the compiler's own read_exact (src/main.kr) and the runner's copy
+# (src/runner.kr) must never count a -errno read. Each is extracted BY NAME --
+# never by line number -- and given a main whose file_size and file_read fail
+# with the same errno, which used to make got == want: a failure reported as a
+# complete read. The two copies are kept in sync by hand; one row pins that.
+wfe_rx_src() { awk '/^fn read_exact\(/{f=1} f{print} f&&/^}/{exit}' "$DIR/../src/$1"; }
+for WFE_R in main runner; do
+    TOTAL=$((TOTAL + 1))
+    { wfe_rx_src "$WFE_R.kr"; cat "$WFE_FX/read_exact_harness_main.kr"; } > "$WFE_D/rx_$WFE_R.kr"
+    if ! grep -q '^fn read_exact(' "$WFE_D/rx_$WFE_R.kr"; then wfe_bad "read_exact_rejects_errno_$WFE_R" "no fn read_exact in src/$WFE_R.kr"
+    elif ! "$WFE_KRC" --arch="$RUN_ARCH" "$WFE_D/rx_$WFE_R.kr" -o "$WFE_D/rx_$WFE_R" > "$WFE_D/rx.log" 2>&1; then
+        wfe_bad "read_exact_rejects_errno_$WFE_R" "build: $(grep -m1 error "$WFE_D/rx.log")"
+    else
+        WFE_O=$(cd "$WFE_D" && timeout 60 "./rx_$WFE_R" 2>/dev/null)
+        if [ "$WFE_O" = "short read caught" ]; then wfe_ok "read_exact_rejects_errno_$WFE_R" "src/$WFE_R.kr, Linux"
+        else wfe_bad "read_exact_rejects_errno_$WFE_R" "got '$WFE_O' (src/$WFE_R.kr)"; fi
+    fi
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$WFE_WINE" ]; then wine_na "read_exact_rejects_errno_${WFE_R}_windows_wine"
+    elif ! "$WFE_KRC" --arch=x86_64 --target=windows --emit=pe "$WFE_D/rx_$WFE_R.kr" -o "$WFE_D/rx_$WFE_R.exe" > "$WFE_D/rx.log" 2>&1; then
+        wfe_bad "read_exact_rejects_errno_${WFE_R}_windows_wine" "build: $(grep -m1 error "$WFE_D/rx.log")"
+    else
+        wfe_wine "rx_$WFE_R.exe" none; WFE_RC=$?
+        WFE_O=$(tr -d '\r' < "$WFE_D/wine.out")
+        if [ "$WFE_RC" = "0" ] && [ "$WFE_O" = "short read caught" ]; then wfe_ok "read_exact_rejects_errno_${WFE_R}_windows_wine" "src/$WFE_R.kr, -5 and -5"
+        else wfe_bad "read_exact_rejects_errno_${WFE_R}_windows_wine" "rc=$WFE_RC got '$WFE_O'"; fi
+    fi
+done
+TOTAL=$((TOTAL + 1))
+if [ -n "$(wfe_rx_src main.kr)" ] && [ "$(wfe_rx_src main.kr)" = "$(wfe_rx_src runner.kr)" ]; then wfe_ok read_exact_copies_agree "src/main.kr and src/runner.kr"
+else wfe_bad read_exact_copies_agree "the hand-synced read_exact bodies of src/main.kr and src/runner.kr differ"; fi
+TOTAL=$((TOTAL + 1))
+if [ ! -x "$DIR/../build/kr-bin" ]; then wfe_bad runner_missing_krbo_is_an_error "no build/kr-bin (make build/kr-bin)"
+else
+    WFE_O=$(cd "$WFE_D" && timeout 30 "$DIR/../build/kr-bin" "$WFE_D/nonexistent_win_file_errors.krbo" 2>&1 >/dev/null); WFE_RC=$?
+    case "$WFE_O" in
+        "error: cannot open"*) [ "$WFE_RC" = "1" ] && wfe_ok runner_missing_krbo_is_an_error "rc 1" || wfe_bad runner_missing_krbo_is_an_error "rc=$WFE_RC" ;;
+        *) wfe_bad runner_missing_krbo_is_an_error "rc=$WFE_RC stderr '$(echo "$WFE_O" | head -c 80)'" ;;
+    esac
+fi
+[ -n "$WFE_WINE" ] && WINEPREFIX="$WFE_D/pfx" "$(dirname "$WFE_WINE")/wineserver" -k > /dev/null 2>&1
+rm -rf "$WFE_D"
 # A return type and a slice element type have no runtime width on hosted
 # targets (a `-> u8` return is not truncated; `[u8] d` and `[foo] d` index
 # alike), so the one place `addr` = uint64 shows in those positions is

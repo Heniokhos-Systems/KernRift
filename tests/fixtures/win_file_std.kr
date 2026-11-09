@@ -1,0 +1,59 @@
+// fds 0, 1 and 2 are the standard streams on Windows for every I/O builtin
+// (#163, #165): run with stdin redirected from wfs.in (4 bytes, "abcd").
+// file_size(0) is the redirected file's size; the print-free copy reads a
+// 2-byte prefix, the printing copy reads the rest to end of file, summing the
+// counts so the number of reads does not matter.
+
+fn p_size0() -> uint64 {
+    return file_size(0)
+}
+
+// Read until 2 bytes have arrived or the stream ends; an error is returned as is.
+fn p_rd2(uint64 b) -> uint64 {
+    uint64 got = 0
+    while got < 2 {
+        uint64 n = file_read(0, b + got, 2 - got)
+        if n == 0 { return got }
+        if n > 0xFFFFFFFFFFFFF000 { return n }
+        got = got + n
+    }
+    return got
+}
+
+fn s_size0() {
+    uint64 r = file_size(0)
+    int64 sr = r
+    print("size0_m ")
+    println(sr)
+}
+
+fn s_rest(uint64 b) {
+    uint64 total = 0
+    uint64 last = 0
+    uint64 going = 1
+    while going == 1 {
+        uint64 n = file_read(0, b, 64)
+        last = n
+        if n == 0 { going = 0 }
+        if n > 0xFFFFFFFFFFFFF000 { going = 0 }
+        if going == 1 { total = total + n }
+    }
+    int64 st = total
+    int64 sl = last
+    print("total_m ")
+    println(st)
+    print("eof_m ")
+    println(sl)
+}
+
+fn main() {
+    uint64 b = alloc(64)
+    int64 s0 = p_size0()
+    print("size0 ")
+    println(s0)
+    s_size0()
+    int64 r2 = p_rd2(b)
+    print("rd_p ")
+    println(r2)
+    s_rest(b)
+}

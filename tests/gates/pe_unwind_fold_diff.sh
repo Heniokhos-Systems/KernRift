@@ -17,6 +17,9 @@
 # 3. The exec family (exec_process, exec_process_argv), from a folded and
 #    from an SP-moving function, legacy and IR: each process exits with the
 #    child's status 7.
+# 4. win-file-errors' p_*/s_* probe pairs: audit verdicts, and the Wine output
+#    of the stdin-free ones against their .windows.expected (see section 4);
+#    4b. the frame bias of emit_win_rsp_lea's slot addresses.
 # Compiles run under ulimit -v 2000000 and timeout 120; Wine runs under a
 # timeout only (Wine segfaults under ulimit -v). Last line "FOLD DIFF OK"
 # (exit 0) or "FOLD DIFF FAILED: <reasons>" (exit 1).
@@ -73,5 +76,46 @@ for p in exec_process_f exec_process_m exec_process_argv_f exec_process_argv_m; 
         [ "$r" = "<rc=7>" ] || BAD="$BAD ${p}_$tag:$r"
     done
 done
+# 4. win-file-errors' probe pairs (its merge, Task 9 / spec 7.4, review #7):
+#    every p_* probe is print-free (SP-fixed when folded) and its s_* twin
+#    prints (SP-moving). On the five --legacy fixtures (win_file_errors_read is
+#    IR-only: read() has no legacy builtin), --test-out-audit on the x86_64
+#    --legacy build reports no violation, every p_* SP-fixed and every s_*
+#    SP-moving. win_file_errors.kr and win_alloc_wrap.kr (no stdin) also run
+#    under Wine, IR and --legacy: each must print its .windows.expected, and
+#    every `name V` line must equal its `name_m V` line.
+for wf in win_file_errors win_file_std win_file_std_pipe win_file_std_write win_alloc_wrap; do
+    ( ulimit -v 2000000; timeout 120 "$KRC" --legacy --arch=x86_64 --target=windows --emit=pe --test-out-audit "$ROOT/tests/fixtures/$wf.kr" -o "$OUT/${wf}_audit.exe" ) > "$OUT/${wf}_audit.log" 2>&1 || BAD="$BAD $wf:audit-build"
+    grep -q '^out-audit:' "$OUT/${wf}_audit.log" && BAD="$BAD $wf:audit-violations"
+    np=$(grep -c "^out-audit-fn: 'p_" "$OUT/${wf}_audit.log"); ns=$(grep -c "^out-audit-fn: 's_" "$OUT/${wf}_audit.log")
+    [ "$np" -gt 0 ] && [ "$(grep -c "^out-audit-fn: 'p_[A-Za-z0-9_]*' SP-fixed" "$OUT/${wf}_audit.log")" = "$np" ] || BAD="$BAD $wf:p-not-all-fixed"
+    [ "$ns" -gt 0 ] && [ "$(grep -c "^out-audit-fn: 's_[A-Za-z0-9_]*' SP-moving" "$OUT/${wf}_audit.log")" = "$ns" ] || BAD="$BAD $wf:s-not-all-moving"
+    echo "$wf audit: $np p_ SP-fixed, $ns s_ SP-moving, $(grep -c '^out-audit:' "$OUT/${wf}_audit.log") violations"
+done
+for wf in win_file_errors win_alloc_wrap; do
+    for cfg in "lg|--legacy" "ir|"; do
+        tag="${cfg%%|*}"; flags="${cfg#*|}"
+        if ! build "$ROOT/tests/fixtures/$wf.kr" "${wf}_$tag.exe" $flags; then BAD="$BAD ${wf}_$tag:build"; continue; fi
+        r=$(run "${wf}_$tag.exe")
+        [[ "$r" == *"<rc=0>" ]] || BAD="$BAD ${wf}_$tag:rc"
+        out=$(sed 's/<rc=.*>$//' <<< "$r")
+        [ "$out" = "$(tr -d '\r' < "$ROOT/tests/fixtures/$wf.windows.expected")" ] || BAD="$BAD ${wf}_$tag:not-expected"
+        mism=$(awk '{v[$1]=$2} END {for (k in v) if (k !~ /_m$/ && (k "_m") in v && v[k] != v[k "_m"]) print k}' <<< "$out" | tr '\n' ' ')
+        [ -z "$mism" ] || BAD="$BAD ${wf}_$tag:pair-mismatch($mism)"
+        echo "${wf}_$tag: $(wc -l <<< "$out") lines, $(awk '$1 ~ /_m$/' <<< "$out" | wc -l) p/s pairs${mism:+, mismatched: $mism}"
+    done
+done
+# 4b. ...and emit_win_rsp_lea's slot addresses carry the cg_slot_off bias
+#    exactly once (spec 7.2 rule 3; merge review r19, finding 7): in every
+#    p_*/s_* function of the x86_64 --legacy builds of win_file_errors.kr and
+#    win_file_std.kr, each ReadFile byte-count / GetFileSizeEx size `lea`
+#    addresses the slot the function then loads, with disp32 from 0x80 up
+#    (tests/helpers/win_rsp_lea_check.py; a missing bias is too small, a
+#    double one too large by the OUT area).
+for wf in win_file_errors win_file_std; do
+    ( cd "$ROOT"; ulimit -v 2000000; timeout 120 "$KRC" --legacy --arch=x86_64 --target=windows --emit=pe --test-listing="$OUT/${wf}_lea.lst" "tests/fixtures/$wf.kr" -o "$OUT/${wf}_lea.exe" ) > "$OUT/${wf}_lea.log" 2>&1 || BAD="$BAD $wf:lea-build"
+done
+python3 "$ROOT/tests/helpers/win_rsp_lea_check.py" "$OUT/win_file_errors_lea.lst" "$OUT/win_file_std_lea.lst" > "$OUT/rsp_lea_check.log" 2>&1 || BAD="$BAD rsp-lea-bias"
+tail -1 "$OUT/rsp_lea_check.log"
 echo "----"
 if [ -z "$BAD" ]; then echo "FOLD DIFF OK"; exit 0; else echo "FOLD DIFF FAILED:$BAD"; exit 1; fi

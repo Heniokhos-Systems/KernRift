@@ -1,0 +1,34 @@
+fw_ok 4
+fw_zero 0
+fw_ok_m 4
+fw_zero_m 0
+big 4
+big_m 4
+size 4
+size_m 4
+read2 2
+read_rest 2
+read_eof 0
+read2_m 2
+read_rest_m 2
+read_eof_m 0
+read_closed -5
+read_closed_m -5
+size_closed -5
+size_closed_m -5
+fw_closed -5
+fw_closed_m -5
+w_closed -5
+w_closed_m -5
+read_badh -5
+read_badh_m -5
+size_badh -5
+size_badh_m -5
+fw_badh -5
+fw_badh_m -5
+w_badh -5
+w_badh_m -5
+ok
+w_stdout 3
+ok
+w_stdout_m 3

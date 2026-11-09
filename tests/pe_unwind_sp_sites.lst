@@ -41,7 +41,7 @@ X15d|x64-ir|ir.kr|c7_x86_emit_die|-|moving|hosted main: the die routine's and rs
 X15q|x64-ir|ir.kr|c7_x86_emit_quote_leaf|-|moving|op 114: the quote leaf's 0x100 table
 X16|x64-ir|ir.kr|ir_emit_call_arg_group|-|excluded|@naked only (ir.kr:8753); naked bodies that move RSP are refused (spec 4.3)
 X17|x64-ir|ir.kr|ir_emit_x86_function|-|excluded|prologue/epilogue
-L1|x64-legacy|codegen.kr|emit_win_alloc_stack|-|folded|IAT builtins: 48 alloc sites (gen_expr, gen_stmt, gen_function)
+L1|x64-legacy|codegen.kr|emit_win_alloc_stack|-|folded|IAT builtins: 48 alloc sites (gen_expr 43, gen_stmt 1, gen_function 3, and emit_win_std_fd_prestep 1: the std-fd GetStdHandle pre-step of win-file-errors, 0x20, inside its builtin's cg_win_builtin_area entry); win-file-errors' emit_win_rsp_lea addresses frame slots with final, cg_slot_off-biased offsets and adds no cg_win_out_bias
 L2|x64-legacy|codegen.kr|gen_expr|-|folded|call_ptr Windows sub rsp,32+8*overflow and the shared cleanup
 L3|x64-legacy|codegen.kr|gen_expr|-|folded|every named call on Windows: sub/add rsp,win_stack
 L4|x64-legacy|codegen.kr|gen_expr|-|folded|exec_process_argv 0x4D0, exec_process 0xD0, ExitProcess

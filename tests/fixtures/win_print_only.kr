@@ -1,0 +1,20 @@
+// Every print* form and nothing else: the Windows I/O fixes (#136 #138 #167)
+// must leave print output byte-identical, because print shares the IR write
+// arm but never exposes its result. win_print_only.md5 holds the md5s of this
+// file's four Windows builds by the compiler before those fixes (233af31); the
+// row win_file_errors_print_identity compares against them.
+fn main() {
+    uint64 n = 42
+    int64 neg = 0 - 7
+    uint64 s = "a string"
+    print("plain ")
+    println("line")
+    println(n)
+    println(neg)
+    print_str(s)
+    println_str(s)
+    println("x =", n, "y =", neg)
+    println(f"f-string {n} and {neg}")
+    print(f"no newline {n}")
+    println("")
+}

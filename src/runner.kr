@@ -20,6 +20,11 @@ fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
     uint64 got = 0
     while got < want {
         uint64 n = file_read(fd, buf + got, want - got)
+        // A failed read is -errno, a huge unsigned value: never add it to the
+        // count. When file_size failed with the SAME errno the caller asked
+        // for `want` = that value, and adding it made got == want -- a
+        // failure reported as a complete read (#170).
+        if n > 0xFFFFFFFFFFFFF000 { return got }
         if n == 0 { return got }
         // A provider claiming to have written more than there was room for is
         // lying; believing it would advance `got` past the buffer.
@@ -361,6 +366,18 @@ fn main() {
     }
 
     uint64 fd = file_open(krbo_path, 0)
+    // An image that cannot be opened is an error, not something to size and
+    // read: file_size and read_exact on a -errno descriptor ran on into a
+    // segfault (#170). -errno and Windows' INVALID_HANDLE_VALUE (-1) both
+    // land above this bound.
+    if fd > 0xFFFFFFFFFFFFF000 {
+        uint64 oe = "error: cannot open '"
+        write(2, oe, str_len_r(oe))
+        write(2, krbo_path, str_len_r(krbo_path))
+        uint64 oe2 = "'\n"
+        write(2, oe2, str_len_r(oe2))
+        exit(1)
+    }
     uint64 fsize = file_size(fd)
     uint64 data = alloc(fsize)
     uint64 rgot = read_exact(fd, data, fsize)

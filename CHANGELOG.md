@@ -4,6 +4,44 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: on Windows the I/O builtins report failure, and fds 0..2 are the
+standard handles everywhere (#136, #138, #145, #163, #165, #167, #168).**
+`read`/`file_read`, `write`/`file_write` and `file_size` used to report a
+failed Win32 call as 0 -- which is also end of file and a 0-byte write -- or,
+for `file_size`, as whatever the stack slot held, so no caller's error branch
+was reachable. They now return the count (0 at end of file), or **-5 (-EIO)**
+for every failure, on all four Windows backends (x86_64 and arm64, IR and
+`--legacy`, which is also the `--emit=obj` path): a read or write that fails
+after moving data returns the count, as `read(2)` returns a short count; a
+read that ends with ERROR_BROKEN_PIPE -- the writer of an anonymous pipe has
+closed, the end of every `type x | prog.exe` -- is still 0. The cause is left
+in `GetLastError()`, so `sys_last_errno` still reports it. File descriptors 0,
+1 and 2 are the standard handles for every I/O builtin on every backend:
+`--legacy` used to read nothing from `file_read(0, ...)`, print nothing from
+`file_write(1, ...)`, and send every `write()` fd -- a file handle included --
+through GetStdHandle, so `write(h, ...)` to a file wrote nothing; `file_size(0)`
+was a stale stack value on x86_64 and 0 on arm64. The import table is unchanged (GetLastError was
+already imported), `print`/`println`/`print_str`/`println_str` output is
+byte-identical, and non-Windows output is unchanged.
+
+**Fixed: `--legacy` Windows `file_read` returned 0 for every read, and could
+crash, in a function with a few reads or enough locals (#162).** Its
+`lea r9, [rsp + bytesRead slot]` truncated the slot offset to a signed byte:
+past 0x80 ReadFile wrote its count below the stack pointer or over a live
+local, the read reported 0, and the corrupted frame could fault.
+
+**Fixed: on Windows, `alloc` of a size within 7 of 2^64 returned a non-null
+pointer to a few bytes (#171).** The size + 8 header add wrapped to a 1..7-byte
+mapping; such a size now returns 0. The same wrap exists on Linux, macOS and
+Android (mmap of 1..7 bytes succeeds) and is not changed in this release
+(#172).
+
+**Fixed: the compiler's `read_exact` counted a failed read, and `kr` crashed on
+a `.krbo` it could not open (#170).** When `file_size` and `file_read` failed
+with the same errno, the failure passed as a complete read; a missing `.krbo`
+made the runner segfault. Now a failed read is a short read, and `kr` reports
+`error: cannot open '<path>'` and exits 1.
+
 **Changed: Windows unwind tables and frames (#143).** Windows can now unwind through every KernRift function, so a fault is reported with its stack, and `RtlCaptureStackBackTrace` and debuggers see the callers. Everything below except the listing fix applies only when `target_os == 2`; every other output is byte-identical to the previous compiler, apart from that fix in arm64 `--emit=asm` listings.
 - PE images and the Windows slices of a fat build carry `.pdata` (one RUNTIME_FUNCTION per function) and `.xdata` after `.idata`, with DataDirectory[3] set; COFF objects (`--emit=obj --target=windows`) carry `.pdata`/`.xdata` with relocations, except a statics-only module, which stays one `.text` section.
 - A function whose SP moves after its prologue sets up a frame pointer (`rbp` on x86_64, `x29` on arm64); every other function is described relative to SP, with `rbp` an ordinary callee-saved register in x86_64 IR code. arm64 Windows frames pad and pair their save area to 16 and restore in exact reverse order; legacy code folds the shadow space and outgoing arguments into the fixed frame. Windows `main`'s command-line block runs after the prologue. Instruction counts against the previous compiler: within +/-0.05 % on IR, unchanged to 6.4 % fewer on legacy (tests/gates/pe_unwind_perf.sh).

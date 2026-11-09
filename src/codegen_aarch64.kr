@@ -320,6 +320,39 @@ fn emit_a64_cbz(uint64 rt, uint64 offset) {
     emit_a64(insn)
 }
 
+// Windows I/O builtin arms (#136, #138, #163, #165, #167, #168): patch a
+// branch emitted at `pos` with its base encoding `base` (CBZ/CBNZ/B.cond, the
+// imm19 field zero) so that it lands on the current out_len. The slot
+// accessors can emit more than one instruction, so no distance is ever written
+// as a constant.
+fn a64_patch_b19_here(uint64 pos, uint64 base) {
+    uint64 rel19 = a64_check_b19(out_len - pos)
+    patch_u32(pos, base | (rel19 << 5))
+}
+
+// The same for an unconditional B emitted at `pos`.
+fn a64_patch_b26_here(uint64 pos) {
+    uint64 rel26 = a64_check_b26(out_len - pos)
+    patch_u32(pos, 0x14000000 | rel26)
+}
+
+// fd -> HANDLE for a legacy arm64 Windows I/O arm, in place in its frame slot
+// (the arm64 twin of emit_win_std_fd_prestep, codegen.kr): fds 0..2 become
+// GetStdHandle(-(10 + fd)), every other value is a HANDLE and is left alone.
+// Nothing is kept in a register across the call -- x0..x17 are volatile in the
+// Windows arm64 ABI -- so the value goes back to the slot.
+fn a64_win_std_fd_prestep(uint64 slot) {
+    emit_a64_load_x0(slot)
+    emit_a64(0xF100081F)                  // cmp x0, #2
+    uint64 asfp_skip = out_len
+    emit_a64(0x54000008)                  // b.hi .h (a real HANDLE)
+    emit_a64_neg(0, 0)
+    emit_a64(0xD1002800)                  // sub x0, x0, #10
+    emit_a64_win_call_iat(IAT_GetStdHandle)
+    emit_a64_store_x0(slot)
+    a64_patch_b19_here(asfp_skip, 0x54000008)
+}
+
 // CBNZ Xt, offset (compare and branch if non-zero)
 fn emit_a64_cbnz(uint64 rt, uint64 offset) {
     uint64 rel19 = a64_check_b19(offset)
@@ -2432,14 +2465,10 @@ fn gen_expr_a64(uint64 node) {
                 uint64 wr_etr = var_frame_size & 15
                 if wr_etr != 0 { var_frame_size = var_frame_size + 16 - wr_etr }
                 emit_a64_store_x0(wr_extra)
-                // GetStdHandle: x0 = -(10 + fd)
-                emit_a64_load_x0(pk0_write)
-                emit_a64_neg(0, 0)
-                emit_a64_mov_imm(9, 10)
-                emit_a64_sub(0, 0, 9)
-                emit_a64_win_call_iat(1)
-                // Save handle to pk0_write (fd no longer needed)
-                emit_a64_store_x0(pk0_write)
+                // fd 0..2 -> GetStdHandle(-(10 + fd)), in place in pk0_write;
+                // any other value is the HANDLE itself. This used to send EVERY
+                // fd through GetStdHandle (#168).
+                a64_win_std_fd_prestep(pk0_write)
                 // WriteFile(handle, buf, len, &bytesWritten, NULL)
                 //
                 // THIS USED TO PASS NULL FOR bytesWritten, on the reasoning
@@ -2466,8 +2495,22 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(2, 0)                 // x2 = len
                 emit_a64_load_x0(pk0_write)        // x0 = handle
                 emit_a64_win_call_iat(2)
-                // x0 = bytesWritten, not the BOOL
+                // The BOOL decides (#167): the count (also for a FALSE that moved
+                // data), or -EIO (-5). The count is read only through the slot
+                // accessor.
+                uint64 gw_ok = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
                 emit_a64_load_x0(pk1_write)
+                uint64 gw_done1 = out_len
+                emit_a64(0xB5000000)               // cbnz x0, .done (data wins)
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 gw_done2 = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(gw_ok, 0x35000000)
+                // .ok: x0 = bytesWritten, not the BOOL
+                emit_a64_load_x0(pk1_write)
+                a64_patch_b19_here(gw_done1, 0xB5000000)
+                a64_patch_b26_here(gw_done2)      // .done
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_write)
@@ -2491,6 +2534,11 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_add_imm(0, 0, 8)
             if target_os == 2 {
                 // Windows ARM64: VirtualAlloc(NULL, size+8, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+                // A wrapped size + 8 (1..7) would be mapped: clamp it to
+                // all-ones so VirtualAlloc fails and the NULL path returns 0
+                // (#171). Inside this arm; the shared add is untouched.
+                emit_a64(0xF100201F)               // cmp x0, #8
+                emit_a64(0xDA9F2000)               // csinv x0, x0, xzr, hs
                 emit_a64_mov(1, 0)
                 emit_a64_mov_imm(0, 0)
                 emit_a64_mov_imm(2, 0x3000)
@@ -2633,6 +2681,9 @@ fn gen_expr_a64(uint64 node) {
                 uint64 rd_etr = var_frame_size & 15
                 if rd_etr != 0 { var_frame_size = var_frame_size + 16 - rd_etr }
                 emit_a64_store_x0(rd_extra)       // save len
+                // fd 0..2 -> GetStdHandle (#163): only now, with len parked --
+                // until the store above it lived only in x0.
+                a64_win_std_fd_prestep(pk0_fileread)
                 // Load buf into x1 first (before we reuse pk1_fileread)
                 emit_a64_load_x0(pk1_fileread)
                 emit_a64_mov(1, 0)                 // x1 = buf
@@ -2649,8 +2700,30 @@ fn gen_expr_a64(uint64 node) {
                 // x0 = handle
                 emit_a64_load_x0(pk0_fileread)
                 emit_a64_win_call_iat(4)
-                // Load bytesRead from pk1_fileread
+                // The BOOL decides (#136), tested as w0:
+                //   TRUE                      -> the count (0 = end of file)
+                //   FALSE, count > 0          -> the count (data moved)
+                //   FALSE, ERROR_BROKEN_PIPE  -> the count, 0: end of a pipe
+                //   FALSE, anything else      -> -EIO (-5)
+                // The count is read only through the frame-slot accessor.
+                uint64 grf_ok1 = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
+                emit_a64_load_x0(pk1_fileread)     // x0 = count
+                uint64 grf_done1 = out_len
+                emit_a64(0xB5000000)               // cbnz x0, .done (data wins)
+                emit_a64_win_call_iat(IAT_GetLastError)
+                emit_a64(0x7101B41F)               // cmp w0, #109 (ERROR_BROKEN_PIPE)
+                uint64 grf_ok2 = out_len
+                emit_a64(0x54000000)               // b.eq .ok
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 grf_done2 = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(grf_ok1, 0x35000000)
+                a64_patch_b19_here(grf_ok2, 0x54000000)
+                // .ok: load bytesRead from pk1_fileread
                 emit_a64_load_x0(pk1_fileread)
+                a64_patch_b19_here(grf_done1, 0xB5000000)
+                a64_patch_b26_here(grf_done2)      // .done
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_fileread)
@@ -2685,6 +2758,8 @@ fn gen_expr_a64(uint64 node) {
                 uint64 fw_etr = var_frame_size & 15
                 if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_a64_store_x0(fw_extra)
+                // fd 0..2 -> GetStdHandle (#145), with len parked.
+                a64_win_std_fd_prestep(pk0_filewrite)
                 // Same fix as write() above: bytesWritten was NULL and the
                 // BOOL was returned, so file_write reported 1 for every
                 // successful write. pk1_filewrite becomes the output slot,
@@ -2699,8 +2774,22 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_mov(2, 0)                 // x2 = len
                 emit_a64_load_x0(pk0_filewrite)    // x0 = handle
                 emit_a64_win_call_iat(2)
-                // x0 = bytesWritten, not the BOOL
+                // The BOOL decides (#167): the count (also for a FALSE that moved
+                // data), or -EIO (-5). The count is read only through the slot
+                // accessor.
+                uint64 gfw_ok = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
                 emit_a64_load_x0(pk1_filewrite)
+                uint64 gfw_done1 = out_len
+                emit_a64(0xB5000000)               // cbnz x0, .done (data wins)
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 gfw_done2 = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(gfw_ok, 0x35000000)
+                // .ok: x0 = bytesWritten, not the BOOL
+                emit_a64_load_x0(pk1_filewrite)
+                a64_patch_b19_here(gfw_done1, 0xB5000000)
+                a64_patch_b26_here(gfw_done2)      // .done
             } else {
                 emit_a64_mov(2, 0)
                 emit_a64_load_x0(pk1_filewrite)
@@ -2737,6 +2826,8 @@ fn gen_expr_a64(uint64 node) {
                 // Windows ARM64: GetFileSizeEx(handle, &size)
                 // Use temp_slot_1 as the output buffer (in our frame, no SP manipulation)
                 emit_a64_store_x0(temp_slot_0)
+                // fd 0..2 -> GetStdHandle (#165), in place in temp_slot_0.
+                a64_win_std_fd_prestep(temp_slot_0)
                 // Zero temp_slot_1 first
                 emit_a64_mov_imm(0, 0)
                 emit_a64_store_x0(temp_slot_1)
@@ -2745,8 +2836,17 @@ fn gen_expr_a64(uint64 node) {
                 // x1 = &temp_slot_1 (pointer to output in our frame)
                 emit_a64_add_imm(1, 31, a64_var_base + temp_slot_1)
                 emit_a64_win_call_iat(8)
-                // Load size from temp_slot_1
+                // The BOOL decides (#138): the size, or -EIO (the slot was
+                // zeroed, but 0 is a valid size).
+                uint64 gfs_ok = out_len
+                emit_a64(0x35000000)               // cbnz w0, .ok
+                emit_a64(0x92800080)               // movn x0, #4 (x0 = -5, -EIO)
+                uint64 gfs_done = out_len
+                emit_a64(0x14000000)               // b .done
+                a64_patch_b19_here(gfs_ok, 0x35000000)
+                // .ok: load size from temp_slot_1
                 emit_a64_load_x0(temp_slot_1)
+                a64_patch_b26_here(gfs_done)       // .done
             } else {
                 emit_a64_mov(19, 0)
                 emit_a64_mov_imm(1, 0)

@@ -5118,6 +5118,86 @@ fn emit_x64_rsp_adj(uint64 ext, uint64 n) {
     uw_sp_moves()
 }
 
+// ---------------------------------------------------------------------------
+// Windows I/O builtin helpers (#136, #138, #162, #163, #165, #167, #168)
+// ---------------------------------------------------------------------------
+//
+// The Windows arms of read/file_read/file_size/write/file_write/alloc turn a
+// Win32 BOOL into the Linux-shaped result (a count, 0 at EOF, or -EIO = -5)
+// with a few short forward branches. Each is emitted as a placeholder rel8 and
+// patched here once its target is known. The arms are a few dozen bytes long,
+// so a distance past 127 is a compiler bug, not a property of the program, and
+// it stops the build instead of silently wrapping.
+fn win_patch_rel8(uint64 pos) {
+    uint64 dist = out_len - pos - 1
+    if dist > 127 {
+        write(2, "internal error: Windows I/O arm rel8 branch out of range\n", 57)
+        exit(1)
+    }
+    uint8 d = dist
+    uint64 p = out_buf + pos
+    unsafe { *(p as uint8) = d }
+}
+
+// lea <reg>, [rsp + off] for a FRAME SLOT address handed to a Win32 call.
+//
+// The disp8 form is SIGNED. The legacy file_read arm used to emit its
+// `lea r9, [rsp + br_slot]` with the slot offset truncated to a byte, so in any
+// function whose frame had grown past 0x80 -- and every legacy Windows
+// file_read reserves two more slots -- it assembled as `lea r9, [rsp-0x70]`:
+// ReadFile wrote its byte count below rsp or over a live local, file_read
+// returned 0, and the stack could be corrupted into a crash (#162).
+//
+// The encoding is chosen from the FINAL displacement, never from the logical
+// slot offset, so that anything added to the offset before it is encoded (a
+// frame bias) can never resurrect the truncation. REX.W, plus REX.R for
+// r8-r15; below 0x80 the bytes are exactly the old ones (4C 8D 4C 24 d8 for
+// r9, 48 8D 54 24 d8 for rdx). Callers pass the FINAL offset, already
+// biased by cg_slot_off; nothing is added here.
+fn emit_win_rsp_lea(uint64 reg, uint64 final_off) {
+    uint64 rex = 0x48
+    if reg >= 8 { rex = 0x4C }
+    uint8 rx = rex
+    uint64 r3 = reg & 7
+    emit_byte(rx); emit_byte(0x8D)
+    if final_off < 128 {
+        uint8 m8 = 0x44 | (r3 << 3)
+        uint8 o8 = final_off
+        emit_byte(m8); emit_byte(0x24); emit_byte(o8)
+    } else {
+        uint8 m32 = 0x84 | (r3 << 3)
+        emit_byte(m32); emit_byte(0x24); emit_u32_le(final_off)
+    }
+}
+
+// fd -> HANDLE for a legacy Windows I/O arm, in place in its frame slot.
+//
+// 0, 1 and 2 are the standard streams: GetStdHandle(-(10 + fd)). Every other
+// value is a HANDLE from file_open and is left alone. This is the rule the IR
+// read/write arms have always used; the legacy file_read, file_size and
+// file_write arms passed 0..2 straight through as a HANDLE (stdin read as
+// empty, file_write(1, ...) printed nothing: #163, #165, #145), and legacy
+// write() sent EVERY fd through GetStdHandle (#168). The comparison is
+// unsigned, so a pseudo-handle such as -1 is never mistaken for a std fd.
+//
+// Call it only once every argument of the builtin is parked in its slot: the
+// GetStdHandle call clobbers rax, rcx, rdx and r8-r11. On return rax holds the
+// slot's value on both paths; the cache is cleared anyway.
+fn emit_win_std_fd_prestep(uint64 slot) {
+    emit_load_rax_from_stack(slot)
+    emit_byte(0x48); emit_byte(0x83); emit_byte(0xF8); emit_byte(0x02)   // cmp rax, 2
+    emit_byte(0x77); uint64 sfp_skip = out_len; emit_byte(0)             // ja .h (a real HANDLE)
+    emit_neg_rax()
+    emit_sub_rax_imm8(10)
+    emit_mov_rcx_rax()
+    uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
+    emit_win_call_iat(IAT_GetStdHandle)
+    uw_sp_site_set("L1"); emit_win_free_stack(0x20)
+    emit_store_rax_to_stack(slot)
+    win_patch_rel8(sfp_skip)
+    rax_invalidate()
+}
+
 // mov rcx, rax (Windows 1st arg)
 fn emit_mov_rcx_rax() {
     emit_byte(0x48)
@@ -7617,16 +7697,13 @@ fn gen_expr(uint64 node) {
                 uint64 wr_etr = var_frame_size & 15
                 if wr_etr != 0 { var_frame_size = var_frame_size + 16 - wr_etr }
                 emit_store_rax_to_stack(extra_tmp)
-                // GetStdHandle: rcx = -(10 + fd)
+                // fd 0..2 -> GetStdHandle(-(10 + fd)); any other value is the
+                // HANDLE itself. This used to send EVERY fd through
+                // GetStdHandle, so write(h, ...) to a file wrote nothing and
+                // returned 0 (#168).
+                emit_win_std_fd_prestep(pk0_write)
                 emit_load_rax_from_stack(pk0_write)
-                emit_neg_rax()
-                emit_sub_rax_imm8(10)
-                emit_mov_rcx_rax()
-                uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
-                emit_win_call_iat(1)
-                uw_sp_site_set("L1"); emit_win_free_stack(0x20)
-                // rax = handle
-                emit_mov_rcx_rax()
+                emit_mov_rcx_rax()                      // rcx = handle
                 emit_load_rax_from_stack(pk1_write)
                 // mov rdx, rax (buf)
                 emit_mov_rdx_rax()
@@ -7647,8 +7724,17 @@ fn gen_expr(uint64 node) {
                 // lea r9, [rsp+0x28] -- &bytesWritten
                 emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)
                 emit_win_call_iat(2)
-                // mov eax, [rsp+0x28] -- the count, not the BOOL
-                emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)
+                // The count, not the BOOL -- and -EIO (-5) when the BOOL says the
+                // write failed and nothing moved (#167). [rsp+0x28] is this
+                // call's own scratch inside its area, not a frame slot.
+                emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+                emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28] (flags kept)
+                emit_byte(0x75); uint64 lw_d1 = out_len; emit_byte(0)              // jnz .d (TRUE)
+                emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+                emit_byte(0x75); uint64 lw_d2 = out_len; emit_byte(0)              // jnz .d (data wins)
+                emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+                win_patch_rel8(lw_d1)
+                win_patch_rel8(lw_d2)
                 uw_sp_site_set("L1"); emit_win_free_stack(0x30)
             } else {
                 // rax = len -> rdx
@@ -7700,6 +7786,14 @@ fn gen_expr(uint64 node) {
             // add rax, 8 — allocate 8 extra bytes for size header
             emit_byte(0x48); emit_byte(0x83); emit_byte(0xC0); emit_byte(8)
             if target_os == 2 {
+                // A size within 7 of 2^64 wraps size + 8 to 1..7 bytes, which
+                // VirtualAlloc maps: a non-null pointer to a few bytes (#171).
+                // Only a wrap makes it < 8; clamp that to all-ones so the call
+                // fails and the NULL path returns 0. First thing in this arm,
+                // so the shared add above and the other targets are untouched.
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xF8); emit_byte(0x08)   // cmp rax, 8
+                emit_byte(0x48); emit_byte(0x19); emit_byte(0xC9)                     // sbb rcx, rcx (-1 if rax < 8)
+                emit_byte(0x48); emit_byte(0x09); emit_byte(0xC8)                     // or rax, rcx
                 // Windows: VirtualAlloc(NULL, size, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
                 // rax = size+8
                 emit_mov_rdx_rax()
@@ -7876,6 +7970,9 @@ fn gen_expr(uint64 node) {
                 uint64 rd_etr = var_frame_size & 15
                 if rd_etr != 0 { var_frame_size = var_frame_size + 16 - rd_etr }
                 emit_store_rax_to_stack(extra_tmp)
+                // fd 0..2 -> GetStdHandle (#163): only now, with every argument
+                // parked -- until the store above, len lived only in rax.
+                emit_win_std_fd_prestep(pk0_fileread)
                 uint64 br_slot = extra_tmp + 8
                 // Zero bytesRead slot
                 emit_mov_rax_imm(0)
@@ -7889,16 +7986,45 @@ fn gen_expr(uint64 node) {
                 // r8d = nNumberOfBytesToRead (truncate to 32-bit)
                 // mov r8d, eax
                 emit_byte(0x41); emit_byte(0x89); emit_byte(0xC0)
-                // lea r9, [rsp + br_slot]
-                emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24)
-                uint8 br8 = br_slot
-                emit_byte(br8)
+                // lea r9, [rsp + br_slot] -- disp8 or disp32 by the final
+                // offset. This used to truncate the slot to a byte (#162).
+                emit_win_rsp_lea(9, br_slot)
                 uw_sp_site_set("L1"); emit_win_alloc_stack(0x30)
                 emit_win_stack_arg5(0)                  // lpOverlapped = NULL
                 emit_win_call_iat(4)                    // call ReadFile
+                // The BOOL decides (#136). Inside the area only a tag is made
+                // in eax -- no frame slot is touched while rsp is moved:
+                //   TRUE                          -> tag 0 (use the count)
+                //   FALSE + ERROR_BROKEN_PIPE     -> tag 0 (end of a pipe: the
+                //                                    count is 0, which is EOF)
+                //   FALSE + anything else         -> tag 1 (failed)
+                // GetLastError runs in this call's own shadow space and does
+                // not change the error, so sys_last_errno still sees it.
+                emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+                emit_byte(0xB8); emit_u32_le(0)                                     // mov eax, 0 (tag 0)
+                emit_byte(0x75); uint64 lrf_t1 = out_len; emit_byte(0)              // jnz .t
+                emit_win_call_iat(IAT_GetLastError)
+                emit_byte(0x83); emit_byte(0xF8); emit_byte(0x6D)                   // cmp eax, 109 (ERROR_BROKEN_PIPE)
+                emit_byte(0xB8); emit_u32_le(0)                                     // mov eax, 0 (flags kept)
+                emit_byte(0x74); uint64 lrf_t2 = out_len; emit_byte(0)              // je .t
+                emit_byte(0xB8); emit_u32_le(1)                                     // mov eax, 1 (tag 1)
+                win_patch_rel8(lrf_t1)
+                win_patch_rel8(lrf_t2)
                 uw_sp_site_set("L1"); emit_win_free_stack(0x30)
-                // Return bytesRead (not the BOOL)
+                // Count, or -EIO. A FALSE that still moved data returns the
+                // count, as read(2) returns a short count (ERROR_MORE_DATA on a
+                // message-mode pipe); the tag survives the load in edx.
+                emit_byte(0x89); emit_byte(0xC2)                                    // mov edx, eax (tag)
+                rax_invalidate()
                 emit_load_rax_from_stack(br_slot)
+                emit_byte(0x48); emit_byte(0x85); emit_byte(0xC0)                   // test rax, rax
+                emit_byte(0x75); uint64 lrf_d1 = out_len; emit_byte(0)              // jnz .d (data wins)
+                emit_byte(0x85); emit_byte(0xD2)                                    // test edx, edx
+                emit_byte(0x74); uint64 lrf_d2 = out_len; emit_byte(0)              // jz .d (count 0)
+                emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+                win_patch_rel8(lrf_d1)
+                win_patch_rel8(lrf_d2)
+                rax_invalidate()
             } else {
                 emit_mov_rdx_rax()
                 emit_load_rax_from_stack(pk1_fileread)
@@ -7934,6 +8060,9 @@ fn gen_expr(uint64 node) {
                 uint64 fw_etr = var_frame_size & 15
                 if fw_etr != 0 { var_frame_size = var_frame_size + 16 - fw_etr }
                 emit_store_rax_to_stack(extra_tmp)
+                // fd 0..2 -> GetStdHandle (#145: file_write(1, ...) passed 1
+                // as a HANDLE and printed nothing). Only now, with len parked.
+                emit_win_std_fd_prestep(pk0_filewrite)
                 emit_load_rax_from_stack(pk0_filewrite)
                 emit_mov_rcx_rax()
                 emit_load_rax_from_stack(pk1_filewrite)
@@ -7951,8 +8080,16 @@ fn gen_expr(uint64 node) {
                 // [rsp+0x28] and zeroed it, so its out-param was right all
                 // along -- it just returned rax, WriteFile's BOOL, and threw
                 // the count away. file_write reported 1 for every successful
-                // write.
-                emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28]
+                // write. And the BOOL decides (#167): a failed write is -EIO (-5)
+                // unless data moved, never the zeroed count.
+                emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+                emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28] (flags kept)
+                emit_byte(0x75); uint64 lfw_d1 = out_len; emit_byte(0)              // jnz .d (TRUE)
+                emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+                emit_byte(0x75); uint64 lfw_d2 = out_len; emit_byte(0)              // jnz .d (data wins)
+                emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+                win_patch_rel8(lfw_d1)
+                win_patch_rel8(lfw_d2)
                 uw_sp_site_set("L1"); emit_win_free_stack(0x30)
             } else {
                 emit_mov_rdx_rax()
@@ -7996,17 +8133,25 @@ fn gen_expr(uint64 node) {
                 // Windows: GetFileSizeEx(handle, &size)
                 // rcx = handle, rdx = pointer to output uint64
                 emit_store_rax_to_stack(temp_slot_0)
+                // fd 0..2 -> GetStdHandle (#165), then the handle from the slot.
+                emit_win_std_fd_prestep(temp_slot_0)
+                emit_load_rax_from_stack(temp_slot_0)
                 emit_mov_rcx_rax()
                 // Use stack for output: lea rdx, [rsp + temp_slot_1]
-                emit_byte(0x48); emit_byte(0x8D); emit_byte(0x54)
-                emit_byte(0x24)
-                uint8 ts1 = temp_slot_1
-                emit_byte(ts1)
+                emit_win_rsp_lea(2, temp_slot_1)
                 uw_sp_site_set("L1"); emit_win_alloc_stack(0x20)
                 emit_win_call_iat(8)  // GetFileSizeEx
                 uw_sp_site_set("L1"); emit_win_free_stack(0x20)
-                // Load size from temp_slot_1
+                // The BOOL decides (#138): the size, or -EIO -- never the stale
+                // slot a failed call leaves behind. `add rsp` changed the
+                // flags but not eax, so the BOOL is taken from eax here.
+                emit_byte(0x89); emit_byte(0xC1)                                    // mov ecx, eax (BOOL)
                 emit_load_rax_from_stack(temp_slot_1)
+                emit_byte(0x85); emit_byte(0xC9)                                    // test ecx, ecx
+                emit_byte(0x75); uint64 lfs_d = out_len; emit_byte(0)               // jnz .d
+                emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+                win_patch_rel8(lfs_d)
+                rax_invalidate()
             } else {
                 emit_mov_rdi_rax()
                 // lseek(fd, 0, SEEK_END=2) -> rax = size

@@ -780,6 +780,11 @@ fn read_exact(uint64 fd, uint64 buf, uint64 want) -> uint64 {
     uint64 got = 0
     while got < want {
         uint64 n = file_read(fd, buf + got, want - got)
+        // A failed read is -errno, a huge unsigned value: never add it to the
+        // count. When file_size failed with the SAME errno the caller asked
+        // for `want` = that value, and adding it made got == want -- a
+        // failure reported as a complete read (#170).
+        if n > 0xFFFFFFFFFFFFF000 { return got }
         if n == 0 { return got }
         // A provider claiming to have written more than there was room for is
         // lying; believing it would advance `got` past the buffer.
@@ -3810,7 +3815,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // --emit=image: raw headerless flat binary. header_size = 0 FROM THE
         // START — the rv_raw shape (:2423-2427) — never truncation of an
         // emitted ELF. a64_compute_va maps file offset -> 0x400000 + offset
-        // (codegen_aarch64.kr:6996) and the ADRP page arithmetic is baked
+        // (codegen_aarch64.kr:7096) and the ADRP page arithmetic is baked
         // from that map, so chopping a 0x78-byte header off a finished ELF
         // shifts every offset by a non-page amount and leaves every baked
         // page_off 0x78 too large — the image boots to SILENCE at any
@@ -3970,7 +3975,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
     // that ordering is the entire design. a64_compute_va maps a file offset
     // to 0x400000 + offset with no notion of a header
-    // (codegen_aarch64.kr:6996), and every ADRP page computation is baked
+    // (codegen_aarch64.kr:7096), and every ADRP page computation is baked
     // from that map DURING codegen. Emitting the prefix first therefore moves
     // the payload and re-bakes the page arithmetic around it in one step, with
     // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
@@ -4267,7 +4272,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // codegen so no local stub/symbol is emitted; the call
                     // site records an R_RISCV_CALL_PLT relocation instead
                     // (mirror of gen_function/gen_function_a64's extern
-                    // early-return, codegen.kr:14456 / codegen_aarch64.kr:6205).
+                    // early-return, codegen.kr:14601 / codegen_aarch64.kr:6305).
                     uint32 rv_ann_flags = ast_data4(wchild)
                     uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at

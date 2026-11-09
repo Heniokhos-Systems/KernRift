@@ -1,0 +1,36 @@
+// The IR-only twin of win_file_shape.kr: the same sh_* probes plus sh_rd, the
+// read() builtin, which --legacy does not have. sh_rd and sh_read compile to
+// byte-identical code on the IR backend, which is exactly why the helper
+// locates functions by their listing offset and never by content.
+
+fn sh_read(uint64 fd, uint64 b, uint64 n) -> uint64 {
+    return file_read(fd, b, n)
+}
+
+fn sh_rd(uint64 fd, uint64 b, uint64 n) -> uint64 {
+    return read(fd, b, n)
+}
+
+fn sh_size(uint64 fd) -> uint64 {
+    return file_size(fd)
+}
+
+fn sh_write(uint64 fd, uint64 b, uint64 n) -> uint64 {
+    return write(fd, b, n)
+}
+
+fn sh_fwrite(uint64 fd, uint64 b, uint64 n) -> uint64 {
+    return file_write(fd, b, n)
+}
+
+fn sh_alloc(uint64 n) -> uint64 {
+    return alloc(n)
+}
+
+fn main() -> uint32 {
+    uint64 b = sh_alloc(16)
+    uint64 x = sh_fwrite(1, "ab", 2) + sh_write(1, "cd", 2)
+    x = x + sh_size(0) + sh_read(0, b, 4) + sh_rd(0, b, 4)
+    uint32 rc = x & 0x7F
+    return rc
+}

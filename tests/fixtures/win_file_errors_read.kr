@@ -1,0 +1,58 @@
+// The read() builtin (IR only; --legacy has none) reports failure like
+// file_read does (#136): the count, 0 at end of file, or -5 on Windows where
+// Linux says -9. Each probe twice, print-free and printing, as in
+// win_file_errors.kr; the good reads open their own files.
+
+fn p_rd(uint64 h, uint64 b, uint64 n) -> uint64 {
+    return read(h, b, n)
+}
+
+fn p_good(uint64 path, uint64 b) -> uint64 {
+    uint64 h = file_open(path, 0)
+    uint64 n = read(h, b, 16)
+    file_close(h)
+    return n
+}
+
+fn s_rd(uint64 tag, uint64 h, uint64 b, uint64 n) {
+    uint64 r = read(h, b, n)
+    int64 sr = r
+    print_str(tag)
+    print(" ")
+    println(sr)
+}
+
+fn s_good(uint64 tag, uint64 path, uint64 b) {
+    uint64 h = file_open(path, 0)
+    uint64 n = read(h, b, 16)
+    file_close(h)
+    int64 sn = n
+    print_str(tag)
+    print(" ")
+    println(sn)
+}
+
+fn show(uint64 tag, uint64 v) {
+    int64 sv = v
+    print_str(tag)
+    print(" ")
+    println(sv)
+}
+
+fn main() {
+    uint64 b = alloc(32)
+    uint64 hp = file_open("wfr_p.tmp", 1)
+    file_write(hp, "abcd", 4)
+    file_close(hp)
+    uint64 hm = file_open("wfr_m.tmp", 1)
+    file_write(hm, "abcd", 4)
+    file_close(hm)
+    show("rd_good", p_good("wfr_p.tmp", b))
+    s_good("rd_good_m", "wfr_m.tmp", b)
+    uint64 c = file_open("wfr_p.tmp", 0)
+    file_close(c)
+    show("rd_closed", p_rd(c, b, 4))
+    s_rd("rd_closed_m", c, b, 4)
+    show("rd_badh", p_rd(0x7FFFFFF0, b, 4))
+    s_rd("rd_badh_m", 0x7FFFFFF0, b, 4)
+}

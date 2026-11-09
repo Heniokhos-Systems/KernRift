@@ -1003,7 +1003,23 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_a64_mov(2, 12)               // x2 = len
         emit_a64_mov(1, 11)               // x1 = buf
         emit_a64_win_call_iat(2)          // WriteFile
-        emit_a64(0xB94003E0)              // ldr w0, [sp]   — bytesWritten (zero-extends)
+        // write()/file_write() hand the count to the program, so the BOOL
+        // decides (#167): the count (also for a FALSE that moved data), or
+        // -EIO (-5). print* shares this arm but never exposes the result: its
+        // bytes stay exactly as they were.
+        if ir_win_sc_result_visible() != 0 {
+            emit_a64(0xB94003E9)          // ldr w9, [sp]   — bytesWritten
+            uint64 awf_ok1 = out_len
+            emit_a64(0x35000000)          // cbnz w0, .ok (TRUE)
+            uint64 awf_ok2 = out_len
+            emit_a64(0x35000009)          // cbnz w9, .ok (data wins)
+            emit_a64(0x92800089)          // movn x9, #4 (x9 = -5, -EIO)
+            a64_patch_b19_here(awf_ok1, 0x35000000)
+            a64_patch_b19_here(awf_ok2, 0x35000009)
+            emit_a64(0xAA0903E0)          // .ok: mov x0, x9
+        } else {
+            emit_a64(0xB94003E0)          // ldr w0, [sp]   — bytesWritten (zero-extends)
+        }
         emit_a64_add_sp_imm(16)           // add sp, sp, #16
     }
 
@@ -1036,8 +1052,34 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_a64_mov(2, 12)               // x2 = len
         emit_a64_mov(1, 11)               // x1 = buf
         emit_a64_win_call_iat(4)          // ReadFile
-        emit_a64(0xB94003E0)              // ldr w0, [sp]   — bytesRead (zero-extends)
-        emit_a64_add_sp_imm(16)           // add sp, sp, #16
+        // The BOOL decides (#136), tested as w0 (a 32-bit BOOL leaves the
+        // upper half of x0 unspecified):
+        //   TRUE                      -> the count at [sp] (0 = end of file)
+        //   FALSE, count > 0          -> the count (data moved, as read(2)'s
+        //                                short count)
+        //   FALSE, ERROR_BROKEN_PIPE  -> the count, which is 0: end of a pipe
+        //   FALSE, anything else      -> -EIO (-5); the cause stays in
+        //                                GetLastError for sys_last_errno
+        // Nothing lives in a volatile register across the GetLastError call:
+        // the count is reloaded from [sp].
+        uint64 arf_ok1 = out_len
+        emit_a64(0x35000000)              // cbnz w0, .ok
+        emit_a64(0xB94003E9)              // ldr w9, [sp]
+        uint64 arf_ok2 = out_len
+        emit_a64(0x35000009)              // cbnz w9, .ok (data wins)
+        emit_a64_win_call_iat(IAT_GetLastError)
+        emit_a64(0x7101B41F)              // cmp w0, #109 (ERROR_BROKEN_PIPE)
+        uint64 arf_ok3 = out_len
+        emit_a64(0x54000000)              // b.eq .ok
+        emit_a64(0x92800080)              // movn x0, #4 (x0 = -5, -EIO)
+        uint64 arf_done = out_len
+        emit_a64(0x14000000)              // b .done
+        a64_patch_b19_here(arf_ok1, 0x35000000)
+        a64_patch_b19_here(arf_ok2, 0x35000009)
+        a64_patch_b19_here(arf_ok3, 0x54000000)
+        emit_a64(0xB94003E0)              // .ok: ldr w0, [sp]   — bytesRead (zero-extends)
+        a64_patch_b26_here(arf_done)
+        emit_a64_add_sp_imm(16)           // .done: add sp, sp, #16
     }
 
     if abstract_nr == 2 {
@@ -1077,6 +1119,16 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // lseek(fd, offset, whence): GetFileSizeEx(handle, &size)
         // Used by file_size() builtin. SEEK_SET rewind return is unused, so this is safe.
         // IR_ARG: x0=handle, x1=offset, x2=whence
+        // fd 0..2 are the standard streams (#165): GetStdHandle(-(fd + 10));
+        // any other value is a HANDLE. x1/x2 are dead here and x11 is set
+        // after the call, so nothing is kept in a volatile register across it.
+        emit_a64(0xF100081F)              // cmp x0, #2
+        uint64 afs_h = out_len
+        emit_a64(0x54000008)              // b.hi .h (a real HANDLE)
+        emit_a64_neg(0, 0)
+        emit_a64(0xD1002800)              // sub x0, x0, #10
+        emit_a64_win_call_iat(IAT_GetStdHandle)
+        a64_patch_b19_here(afs_h, 0x54000008)
         // Allocate 16 bytes on scratchpad for output
         emit_a64_add_imm(11, 31, ir_a64_scratch_off)
         // Zero the output area
@@ -1086,6 +1138,14 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_a64_mov(1, 11)
         // x0 = handle (already in place)
         emit_a64_win_call_iat(8)          // GetFileSizeEx
+        // The BOOL decides (#138): the size, or -EIO; the output slot is
+        // zeroed above, but 0 is a valid size, so it cannot stand for failure.
+        uint64 afs_ok = out_len
+        emit_a64(0x35000000)              // cbnz w0, .ok
+        emit_a64(0x92800080)              // movn x0, #4 (x0 = -5, -EIO)
+        uint64 afs_done = out_len
+        emit_a64(0x14000000)              // b .done
+        a64_patch_b19_here(afs_ok, 0x35000000)
         // x11 is caller-saved (x0..x18) and is clobbered by the IAT call.
         // Recompute it from SP before loading the result — otherwise the
         // ldr dereferences whatever GetFileSizeEx left in x11 and the
@@ -1094,6 +1154,7 @@ fn ir_emit_arm64_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_a64_add_imm(11, 31, ir_a64_scratch_off)
         // Load size from [X11]
         emit_a64_ldr(0, 11, 0)
+        a64_patch_b26_here(afs_done)      // .done
     }
 
     // Move result to dest
@@ -1969,6 +2030,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // ----- IR_SYSCALL (52) -----
     if op == 52 {
         if target_os == 2 {
+            ir_win_sc_origin = ir_insn_origin_at(ii)
             ir_emit_arm64_win_syscall(imm, dest_v, dst_r)
             return
         }
@@ -2015,6 +2077,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // Windows ARM64: VirtualAlloc(NULL, size+8, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
             emit_a64_mov_imm(0, 0)
             emit_a64_add_imm(1, size_reg, 8)
+            // A wrapped size + 8 (1..7, from a size within 7 of 2^64) would be
+            // mapped: clamp it to all-ones so VirtualAlloc fails and the NULL
+            // path returns 0 (#171). A constant size needs it only if it is
+            // itself in the wrap range (print's own buffers stay unchanged).
+            if s1_v != 0 || imm > 0xFFFFFFFFFFFFFFF7 {
+                emit_a64(0xF100203F)          // cmp x1, #8
+                emit_a64(0xDA9F2021)          // csinv x1, x1, xzr, hs
+            }
             emit_a64_mov_imm(2, 0x3000)
             emit_a64_mov_imm(3, 4)
             emit_a64_win_call_iat(6)

@@ -85,3 +85,21 @@ wineserver
 # SKIP-only labels: printed only when a Linux tool is missing; when they run, these rows report under other names (cpw_* rows, uefi_win64_call_ptr_placement)
 call_ptr_windows_shadow_overflow
 uefi_win64_call_ptr_ir
+
+# win-file-errors: its row helpers (wfe_win, wfe_wine), the shape checker
+# (tests/helpers/win_file_err_shape.py), fixture and missing-file names, and
+# the "_windows_wine" suffix its read_exact template rows are built with
+wfe_win
+wfe_wine
+win_file_err_shape
+win_alloc_wrap
+win_file_errors
+win_file_errors_read
+win_file_shape
+win_file_shape_ir
+win_file_std
+win_file_std_pipe
+win_file_std_write
+win_print_only
+nonexistent_win_file_errors
+_windows_wine

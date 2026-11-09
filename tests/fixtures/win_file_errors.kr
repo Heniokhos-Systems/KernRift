@@ -1,0 +1,211 @@
+// The Windows I/O builtins report failure the way Linux does (#136, #138,
+// #162, #167): a count, 0 at end of file, or a negative errno -- -5 (EIO) for
+// every Win32 failure -- where Windows used to say 0 or a stale stack value.
+//
+// Every probe runs twice: once in a print-free p_* function (an SP-fixed frame
+// once #143 folds the legacy outgoing area) and once inline in an s_* function
+// that also prints (an SP-moving frame), so each lowering is exercised in both
+// frame shapes. A probe that changes state (a write, a sequential read) gets its
+// own file and handle per copy; a stateless one (a closed or invalid handle, a
+// fresh open) is simply repeated. The expected output is
+// win_file_errors.linux.expected / .windows.expected, line for line.
+
+fn show(uint64 tag, uint64 v) {
+    int64 sv = v
+    print_str(tag)
+    print(" ")
+    println(sv)
+}
+
+// ---- print-free copies ------------------------------------------------------
+
+fn p_fw(uint64 h, uint64 buf, uint64 n) -> uint64 {
+    return file_write(h, buf, n)
+}
+
+fn p_w(uint64 h, uint64 buf, uint64 n) -> uint64 {
+    return write(h, buf, n)
+}
+
+fn p_read(uint64 h, uint64 buf, uint64 n) -> uint64 {
+    return file_read(h, buf, n)
+}
+
+fn p_size(uint64 h) -> uint64 {
+    return file_size(h)
+}
+
+fn p_fsize(uint64 path) -> uint64 {
+    uint64 h = file_open(path, 0)
+    uint64 sz = file_size(h)
+    file_close(h)
+    return sz
+}
+
+// Sixteen locals and two reads: the legacy backend's bytesRead slot lands past
+// 0x80 here, where a disp8 `lea r9, [rsp+slot]` used to go negative (#162).
+fn p_big(uint64 path) -> uint64 {
+    uint64 a0 = 1
+    uint64 a1 = 2
+    uint64 a2 = 3
+    uint64 a3 = 4
+    uint64 a4 = 5
+    uint64 a5 = 6
+    uint64 a6 = 7
+    uint64 a7 = 8
+    uint64 a8 = 9
+    uint64 a9 = 10
+    uint64 a10 = 11
+    uint64 a11 = 12
+    uint64 a12 = 13
+    uint64 a13 = 14
+    uint64 a14 = 15
+    uint64 a15 = 16
+    uint64 bb = alloc(32)
+    uint64 h = file_open(path, 0)
+    uint64 n1 = file_read(h, bb, 2)
+    uint64 n2 = file_read(h, bb + 2, 16)
+    file_close(h)
+    uint64 sum = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15
+    if sum != 136 { return 999 }
+    return n1 + n2
+}
+
+// ---- copies that print (SP-moving) ------------------------------------------
+
+fn s_fw(uint64 tag, uint64 h, uint64 buf, uint64 n) {
+    uint64 r = file_write(h, buf, n)
+    int64 sr = r
+    print_str(tag)
+    print(" ")
+    println(sr)
+}
+
+fn s_w(uint64 tag, uint64 h, uint64 buf, uint64 n) {
+    uint64 r = write(h, buf, n)
+    int64 sr = r
+    print_str(tag)
+    print(" ")
+    println(sr)
+}
+
+fn s_read(uint64 tag, uint64 h, uint64 buf, uint64 n) {
+    uint64 r = file_read(h, buf, n)
+    int64 sr = r
+    print_str(tag)
+    print(" ")
+    println(sr)
+}
+
+fn s_size(uint64 tag, uint64 h) {
+    uint64 r = file_size(h)
+    int64 sr = r
+    print_str(tag)
+    print(" ")
+    println(sr)
+}
+
+fn s_fsize(uint64 tag, uint64 path) {
+    uint64 h = file_open(path, 0)
+    uint64 sz = file_size(h)
+    file_close(h)
+    int64 ssz = sz
+    print_str(tag)
+    print(" ")
+    println(ssz)
+}
+
+fn s_big(uint64 tag, uint64 path) {
+    uint64 a0 = 1
+    uint64 a1 = 2
+    uint64 a2 = 3
+    uint64 a3 = 4
+    uint64 a4 = 5
+    uint64 a5 = 6
+    uint64 a6 = 7
+    uint64 a7 = 8
+    uint64 a8 = 9
+    uint64 a9 = 10
+    uint64 a10 = 11
+    uint64 a11 = 12
+    uint64 a12 = 13
+    uint64 a13 = 14
+    uint64 a14 = 15
+    uint64 a15 = 16
+    uint64 bb = alloc(32)
+    uint64 h = file_open(path, 0)
+    uint64 n1 = file_read(h, bb, 2)
+    uint64 n2 = file_read(h, bb + 2, 16)
+    file_close(h)
+    uint64 sum = a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15
+    uint64 r = n1 + n2
+    if sum != 136 { r = 999 }
+    int64 sr = r
+    print_str(tag)
+    print(" ")
+    println(sr)
+}
+
+fn main() {
+    uint64 b = alloc(64)
+    uint64 bad = 0x7FFFFFF0
+
+    // 1. one file per copy, written through file_write
+    uint64 hp = file_open("wfe_p.tmp", 1)
+    show("fw_ok", p_fw(hp, "abcd", 4))
+    show("fw_zero", p_fw(hp, "abcd", 0))
+    file_close(hp)
+    uint64 hm = file_open("wfe_m.tmp", 1)
+    s_fw("fw_ok_m", hm, "abcd", 4)
+    s_fw("fw_zero_m", hm, "abcd", 0)
+    file_close(hm)
+
+    // 2. big frames, before anything reopens a file in mode 1 (which truncates)
+    show("big", p_big("wfe_p.tmp"))
+    s_big("big_m", "wfe_m.tmp")
+
+    // 3. size on a fresh open
+    show("size", p_fsize("wfe_p.tmp"))
+    s_fsize("size_m", "wfe_m.tmp")
+
+    // 4. sequential reads, one handle per copy; both closed before step 5, and
+    //    nothing opens a handle between those closes and the step-5 probes
+    uint64 rp = file_open("wfe_p.tmp", 0)
+    show("read2", p_read(rp, b, 2))
+    show("read_rest", p_read(rp, b, 64))
+    show("read_eof", p_read(rp, b, 64))
+    uint64 rm = file_open("wfe_m.tmp", 0)
+    s_read("read2_m", rm, b, 2)
+    s_read("read_rest_m", rm, b, 64)
+    s_read("read_eof_m", rm, b, 64)
+    file_close(rp)
+    file_close(rm)
+
+    // 5. a closed handle
+    show("read_closed", p_read(rp, b, 4))
+    s_read("read_closed_m", rp, b, 4)
+    show("size_closed", p_size(rp))
+    s_size("size_closed_m", rp)
+
+    // 6. a closed handle, for the write side (a separate file)
+    uint64 wc = file_open("wfe_w.tmp", 1)
+    file_close(wc)
+    show("fw_closed", p_fw(wc, "x", 1))
+    s_fw("fw_closed_m", wc, "x", 1)
+    show("w_closed", p_w(wc, "x", 1))
+    s_w("w_closed_m", wc, "x", 1)
+
+    // 7. a value that was never a handle (above 2, so not a standard stream)
+    show("read_badh", p_read(bad, b, 4))
+    s_read("read_badh_m", bad, b, 4)
+    show("size_badh", p_size(bad))
+    s_size("size_badh_m", bad)
+    show("fw_badh", p_fw(bad, "x", 1))
+    s_fw("fw_badh_m", bad, "x", 1)
+    show("w_badh", p_w(bad, "x", 1))
+    s_w("w_badh_m", bad, "x", 1)
+
+    // 8. stdout through write
+    show("w_stdout", p_w(1, "ok\n", 3))
+    s_w("w_stdout_m", 1, "ok\n", 3)
+}

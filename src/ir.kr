@@ -237,11 +237,32 @@ static uint64 ir_current_src_tok = 0
 // have to say "syscall" six different ways. The lowering records the name
 // here instead (via ir_emit_syscall), and the trap emitters on all three IR
 // backends read it back, so the refusal names the construct the programmer
-// actually wrote. That is what makes the guard's output a worklist.
+// actually wrote. That is what makes the guard's output a worklist. The
+// Windows write arms read it too (ir_win_sc_origin, below): write() and
+// file_write() get the failure check, print* keeps its bytes.
 //
 // Zero means "no name recorded" and every reader falls back to a generic
 // label -- never a guessed one: a wrong attribution is worse than a vague one.
 static uint64 ir_insn_origin = 0
+
+// The origin of the IR_SYSCALL being lowered by a Windows shim, copied from
+// ir_insn_origin by the op-52 dispatch on target_os == 2 only. The write arms
+// of ir_emit_x86_win_syscall / ir_emit_arm64_win_syscall read it: write() and
+// file_write() hand their count to the program, so a failed WriteFile must
+// become -EIO there (#167); print/println/print_str/println_str share the arm
+// but never expose a result, so their bytes stay as they were.
+static uint64 ir_win_sc_origin = 0
+
+// 1 when the IR_SYSCALL being lowered by a Windows shim hands its result to the
+// program: write() and file_write(), or an unrecorded origin (correctness wins
+// over size there). 0 for print/println/print_str/println_str.
+fn ir_win_sc_result_visible() -> uint64 {
+    uint64 o = ir_win_sc_origin
+    if o == 0 { return 1 }
+    if str_eq(o, "write") != 0 { return 1 }
+    if str_eq(o, "file_write") != 0 { return 1 }
+    return 0
+}
 
 @export
 fn ir_set_current_src_tok(uint64 tok) { ir_current_src_tok = tok }
@@ -8529,7 +8550,25 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)
         emit_win_call_iat(2)          // call WriteFile
         // rax = BOOL, the count is at [rsp+0x28]. Load it, zero-extended.
-        emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28]
+        //
+        // write() and file_write() hand the count to the program, so the BOOL
+        // decides (#167): the count, the count of a FALSE that still moved
+        // data (a partial transfer), or -EIO (-5) -- a failed write used to
+        // report its zeroed count, 0, which is also what a 0-length write
+        // reports. print/println/print_str/println_str share this arm but
+        // never expose the result, so their bytes stay exactly as they were.
+        if ir_win_sc_result_visible() != 0 {
+            emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+            emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28] (flags kept)
+            emit_byte(0x75); uint64 xwf_d1 = out_len; emit_byte(0)              // jnz .d (TRUE)
+            emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+            emit_byte(0x75); uint64 xwf_d2 = out_len; emit_byte(0)              // jnz .d (data wins)
+            emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+            win_patch_rel8(xwf_d1)
+            win_patch_rel8(xwf_d2)
+        } else {
+            emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28]
+        }
         emit_win_free_stack(0x30)
     }
 
@@ -8562,12 +8601,38 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         // [rsp+0x20] = NULL (lpOverlapped, 5th arg on stack)
         emit_byte(0x48); emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x20)
         emit_u32_le(0)
+        // mov dword [rsp+0x28], 0 -- ReadFile zeroes the count itself before
+        // any work, so this is defence in depth, as on the write side.
+        emit_byte(0xC7); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28); emit_u32_le(0)
         // lea r9, [rsp+0x28] (&bytesRead, in our scratch area)
         emit_byte(0x4C); emit_byte(0x8D); emit_byte(0x4C); emit_byte(0x24); emit_byte(0x28)
         emit_win_call_iat(4)          // ReadFile (IAT slot 4)
-        // rax = BOOL, actual bytes read (DWORD) at [rsp+0x28]
-        // Load bytes read into eax (zero-extends to rax)
-        emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28]
+        // rax = BOOL, the count (DWORD) is at [rsp+0x28]. The BOOL decides
+        // (#136): a failed read used to report its zeroed count, which is
+        // exactly what end of file reports, so no caller could see an error.
+        //   TRUE                       -> the count (0 = end of file)
+        //   FALSE, count > 0           -> the count: data moved (ERROR_MORE_DATA
+        //                                 on a message-mode pipe), as read(2)
+        //                                 returns a short count
+        //   FALSE, ERROR_BROKEN_PIPE   -> 0: the writer of an anonymous pipe
+        //                                 closed, which IS end of file
+        //   FALSE, anything else       -> -EIO (-5); the cause stays in
+        //                                 GetLastError for sys_last_errno
+        // GetLastError runs in this area's own shadow space and clobbers only
+        // what ReadFile already clobbered.
+        emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+        emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x28)  // mov eax, [rsp+0x28] (flags kept)
+        emit_byte(0x75); uint64 xrf_d1 = out_len; emit_byte(0)              // jnz .d (TRUE)
+        emit_byte(0x85); emit_byte(0xC0)                                    // test eax, eax
+        emit_byte(0x75); uint64 xrf_d2 = out_len; emit_byte(0)              // jnz .d (data wins)
+        emit_win_call_iat(IAT_GetLastError)
+        emit_byte(0x83); emit_byte(0xF8); emit_byte(0x6D)                   // cmp eax, 109 (ERROR_BROKEN_PIPE)
+        emit_byte(0xB8); emit_u32_le(0)                                     // mov eax, 0 (flags kept)
+        emit_byte(0x74); uint64 xrf_d3 = out_len; emit_byte(0)              // je .d (end of a pipe)
+        emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+        win_patch_rel8(xrf_d1)
+        win_patch_rel8(xrf_d2)
+        win_patch_rel8(xrf_d3)
         emit_win_free_stack(0x30)
     }
 
@@ -8635,11 +8700,26 @@ fn ir_emit_x86_win_syscall(uint64 abstract_nr, uint64 dest_v, uint64 dst_r) {
         ir_emit_mov_r64_r64(1, 7)    // rcx = handle
         // sub rsp, 0x30 (shadow + space for output)
         emit_win_alloc_stack(0x30)
+        // fd 0..2 are the standard streams (#165): GetStdHandle(-(fd + 10)),
+        // inside this area's own shadow space; any other value is a HANDLE.
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xF9); emit_byte(0x02)   // cmp rcx, 2
+        emit_byte(0x77); uint64 xfs_h = out_len; emit_byte(0)                 // ja .h (a real HANDLE)
+        emit_byte(0x48); emit_byte(0x83); emit_byte(0xC1); emit_byte(0x0A)   // add rcx, 10
+        emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD9)                     // neg rcx
+        emit_win_call_iat(IAT_GetStdHandle)
+        emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)                     // mov rcx, rax
+        win_patch_rel8(xfs_h)
         // lea rdx, [rsp+32] (&size output)
         emit_byte(0x48); emit_byte(0x8D); emit_byte(0x54); emit_byte(0x24); emit_byte(0x20)
         emit_win_call_iat(8)          // GetFileSizeEx (IAT slot 8)
-        // Load the size from [rsp+32]
-        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x20)
+        // The BOOL decides (#138): the size, or -EIO -- never the stale
+        // qword a failed call leaves at [rsp+32]. Both abstract-8 calls of a
+        // file_size get this arm; the second one's result is discarded.
+        emit_byte(0x85); emit_byte(0xC0)                                      // test eax, eax
+        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x44); emit_byte(0x24); emit_byte(0x20)  // mov rax, [rsp+32] (flags kept)
+        emit_byte(0x75); uint64 xfs_d = out_len; emit_byte(0)                 // jnz .d
+        emit_byte(0x48); emit_byte(0xC7); emit_byte(0xC0); emit_u32_le(0xFFFFFFFB)  // mov rax, -5 (-EIO)
+        win_patch_rel8(xfs_d)
         emit_win_free_stack(0x30)
     }
 
@@ -10156,6 +10236,19 @@ fn ir_emit_x86_insn(uint64 ii) {
             ir_emit_mov_r64_r64(2, size_reg)    // rdx = size
             // add rdx, 8
             emit_byte(0x48); emit_byte(0x83); emit_byte(0xC2); emit_byte(0x08)
+            // size + 8 wraps for a size within 7 of 2^64, to a length of 1..7
+            // bytes that VirtualAlloc happily maps -- and the caller got a
+            // non-null pointer to "2^64 - 5" bytes (#171). Only a wrap can make
+            // the length < 8, so clamp that case to all-ones: VirtualAlloc then
+            // fails and the NULL path below returns 0. (rax is free: the size
+            // is already pushed and copied.) A constant size is known here: it
+            // needs the clamp only if it is itself in the wrap range, so the
+            // compiler's own buffers (print's 4096 bytes, ...) are unchanged.
+            if s1_v != 0 || imm > 0xFFFFFFFFFFFFFFF7 {
+                emit_byte(0x48); emit_byte(0x83); emit_byte(0xFA); emit_byte(0x08)   // cmp rdx, 8
+                emit_byte(0x48); emit_byte(0x19); emit_byte(0xC0)                     // sbb rax, rax (-1 if rdx < 8)
+                emit_byte(0x48); emit_byte(0x09); emit_byte(0xC2)                     // or rdx, rax
+            }
             ir_emit_mov_r64_imm64(8, 0x3000)    // r8 = MEM_COMMIT|MEM_RESERVE
             ir_emit_mov_r64_imm64(9, 4)          // r9 = PAGE_READWRITE
             emit_win_alloc_stack(0x20)
@@ -10921,6 +11014,7 @@ fn ir_emit_x86_insn(uint64 ii) {
             return
         }
         if target_os == 2 {
+            ir_win_sc_origin = ir_insn_origin_at(ii)
             ir_emit_x86_win_syscall(imm, dest_v, dst_r)
             return
         }

@@ -1463,12 +1463,24 @@ needed.
 | `println(a, b, ...)` | Same, plus a newline. |
 | `print_str(s)` | Print a null-terminated string from a pointer variable (for results of `int_to_str`, `fmt_hex`, etc.). |
 | `println_str(s)` | Same, plus a newline. |
-| `write(fd, buf, len)` | Write `len` bytes from `buf` to file descriptor `fd`. |
+| `write(fd, buf, len)` | Write `len` bytes from `buf` to file descriptor `fd`. Returns bytes written, or a negative errno (Windows: −5 for every failure). |
+| `read(fd, buf, len)` | Read up to `len` bytes into `buf` (IR backend only; `--legacy` has no `read`). Same results as `file_read`. |
 | `file_open(path, flags)` | Open a file. Returns a descriptor. |
-| `file_read(fd, buf, len)` | Read up to `len` bytes. Returns bytes read. |
-| `file_write(fd, buf, len)` | Write `len` bytes. Returns bytes written. |
+| `file_read(fd, buf, len)` | Read up to `len` bytes. Returns the count, 0 at end of file, or a negative errno (Windows: −5 for every failure, the cause in `sys_last_errno`; a pipe whose writer has closed is end of file, 0). |
+| `file_write(fd, buf, len)` | Write `len` bytes. Returns bytes written, or a negative errno (Windows: −5 for every failure). |
 | `file_close(fd)` | Close a descriptor. |
-| `file_size(fd)` | Return the size of an open file. |
+| `file_size(fd)` | Size of an open file, or a negative errno (Windows: −5). Linux, Android and macOS rewind the file to offset 0 (two `lseek`s); Windows leaves the position unchanged. On a pipe or console the result is not a file size (Linux −ESPIPE; Windows −5, 0, or the bytes currently buffered). |
+
+On every target, descriptors 0, 1 and 2 are the standard input, output and
+error for every I/O builtin (`read`, `file_read`, `write`, `file_write`,
+`file_size`); on Windows they become `GetStdHandle(−(10 + fd))`, and any other
+value is a handle from `file_open`. A Windows failure is reported as −5 (EIO)
+whatever its cause; `sys_last_errno` (`std/sys.kr`) gives the cause, mapped to a
+Linux errno, if called immediately after the failing builtin.
+
+**macOS caveat:** a failing system call on macOS currently returns a
+**positive** errno (Darwin sets the carry flag; the builtins do not negate it),
+so `is_errno` does not recognise it there. This is a known defect (#164).
 
 **f-strings** (v2.8.3): `f"x = {x}, pi ≈ {3.14}"` interpolates each
 `{expr}` with the same type-directed formatter `print` uses. The literal
@@ -3421,13 +3433,14 @@ Address Table (IAT) against `kernel32.dll`:
 | Builtin            | kernel32 import            |
 |--------------------|----------------------------|
 | `exit`             | `ExitProcess`              |
-| `write`            | `GetStdHandle` + `WriteFile` |
-| `read`             | `GetStdHandle` + `ReadFile` |
+| `write`            | `GetStdHandle` (fd 0–2) + `WriteFile` |
+| `read`             | `GetStdHandle` (fd 0–2) + `ReadFile` (+ `GetLastError` on failure) |
 | `alloc`            | `VirtualAlloc`             |
 | `dealloc`          | `VirtualFree`              |
 | `file_open`        | `CreateFileA`              |
-| `file_read`        | `ReadFile`                 |
-| `file_write`       | `WriteFile`                |
+| `file_read`        | `GetStdHandle` (fd 0–2) + `ReadFile` (+ `GetLastError` on failure) |
+| `file_write`       | `GetStdHandle` (fd 0–2) + `WriteFile` |
+| `file_size`        | `GetStdHandle` (fd 0–2) + `GetFileSizeEx` |
 | `file_close`       | `CloseHandle`              |
 | `exec_process`     | `CreateProcessA` + `WaitForSingleObject` + `GetExitCodeProcess` + `ExitProcess` |
 | `set_executable`   | no-op (Windows has no executable bit) |
