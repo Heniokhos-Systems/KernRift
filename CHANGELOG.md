@@ -4,6 +4,39 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: a skipped test row is no longer counted as a pass, or not counted
+at all.** `tests/run_tests.sh` had about 120 skip sites outside `skip_row`:
+48 added to PASS while printing SKIP (every Wine row without Wine through
+`wine_na`, the qemu, python3, readelf and x86-only rows, the README count gate
+on a partial run, and the arm64-host duplicates), 4 passed a row one of whose
+legs never ran (`os_prune_arch_hosted_runs`, `vga_attr_packs_bg_high_fg_low`,
+`esp32_hello_image`, `call_args_25_arm64`), and 68 printed SKIP without
+counting the row at all. A box without Wine or qemu therefore reported a clean
+run. Every one now goes through `skip_row`, which counts it in a SKIP total
+(the results line reads `P/T passed, F failed, S skipped`); `make gate`
+(`REQUIRE_FULL_RUN=1 make test`) turns every skip into a FAIL that names the
+missing tool, for merge and release gating; no CI workflow sets it. The alias rows that used to "skip" on an arm64 host now run
+their second leg on x86_64 under qemu instead. A tripwire row,
+`no_skip_counted_as_pass`, reads the suite as text (line by line, joining
+`\` continuations; it is not a shell parser) and fails on output that says
+skip anywhere but `skip_row`, unless it is a failure message (`FAIL: ...` or
+`name: FAIL ...`), and on any assignment to PASS on the line of, or next to,
+output saying a leg did not run. Output includes echo and printf (piped,
+tee'd or redirected, also `\echo`, `/bin/echo`, behind `command`,
+`builtin`, `env`, `xargs`, `timeout N`, `stdbuf`, `nice` or a leading
+redirection, and, as a fallback, an echo or printf word anywhere in a
+command's unquoted text), `cat`/`tee` heredocs not
+written to a file and here-strings, the echo inside an `eval` or an `sh -c`,
+and the arguments of helpers and aliases defined above that echo them
+(loggers, and PASS helpers such as `t10_ok` and `c7_ok`, whose reason must not
+say a leg did not run).
+Its known misses include skip wording built in a variable, a PASS assignment
+more than one line from that wording, a heredoc written to a file, and a line
+marked `# tripwire: not a skip`; a second row,
+`skip_tripwire_catches_each_bypass`, runs the scanner over a fixture for each
+bypass review has found (44 so far) and a fixture of non-skips. (An earlier
+version of this entry said thirty sites; the first commit converted 23.)
+
 **Fixed: on Windows the I/O builtins report failure, and fds 0..2 are the
 standard handles everywhere (#136, #138, #145, #163, #165, #167, #168).**
 `read`/`file_read`, `write`/`file_write` and `file_size` used to report a

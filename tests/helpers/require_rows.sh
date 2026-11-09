@@ -21,9 +21,10 @@
 #   4. no line of the log says a checker rule was "disabled by" the test-only
 #      PE_UNWIND_CHECK_DISABLE knob (a disabled rule prints PASS);
 #   5. no FAIL line names a row outside <known_reds>, and the suite's own
-#      failure count (`=== Results: X/Y passed, N failed ===`) equals the
-#      number of known reds, which also catches a FAIL printed in some other
-#      shape.
+#      failure count (`=== Results: X/Y passed, N failed ===`, or with
+#      suite-skip-hygiene's `, S skipped` counter, which must then be 0)
+#      equals the number of known reds, which also catches a FAIL printed in
+#      some other shape.
 set -u
 LOG="${1:?usage: require_rows.sh <suite.log> <manifest> <known_reds>}"
 MAN="${2:?manifest}"; RED="${3:?known reds}"
@@ -73,11 +74,15 @@ done < <(grep -E 'disabled by PE_UNWIND_CHECK_DISABLE' "$LOG")
 while IFS= read -r n; do
     [ -n "${ISRED[$n]+x}" ] || problem "row '$n' FAILED and is not a known red"
 done < <( { grep -oE '^FAIL: [^ (]+' "$LOG" | sed 's/^FAIL: //'; grep -oE '^  [^ ]+: FAIL' "$LOG" | sed 's/^  //; s/: FAIL$//'; } | sed 's/:$//' | sort -u)
-res=$(grep -E '^=== Results: [0-9]+/[0-9]+ passed, [0-9]+ failed ===' "$LOG" | tail -1)
+res=$(grep -E '^=== Results: [0-9]+/[0-9]+ passed, [0-9]+ failed(, [0-9]+ skipped)? ===' "$LOG" | tail -1)
 if [ -z "$res" ]; then problem "no '=== Results' line: the suite did not finish"
 else
     nf=$(sed -E 's/.* ([0-9]+) failed.*/\1/' <<< "$res")
     [ "$nf" = "$nred" ] || problem "the suite reports $nf failed, the known-red list has $nred"
+    # suite-skip-hygiene's counter: every SKIP is counted, and REQUIRE_FULL_RUN=1
+    # (the local gate's mode) turns each into a FAIL, so a local run has none.
+    ns=$(sed -nE 's/.* ([0-9]+) skipped ===$/\1/p' <<< "$res")
+    [ -z "$ns" ] || [ "$ns" = 0 ] || problem "the suite reports $ns skipped; the local gate runs with REQUIRE_FULL_RUN=1, which allows none"
 fi
 if [ "$bad" = 0 ]; then
     echo "require_rows: OK ($nman manifest rows PASS once each; $nred known reds FAIL once each; $res)"

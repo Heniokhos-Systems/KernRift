@@ -18,16 +18,17 @@ Makefile's `SRCS`) into `build/krc.kr` and self-compiles it to
 `build/krc2`. All sources are one compilation unit, so every function is
 globally visible across files.
 
-## The pre-PR gate: `make check`
+## The pre-PR check: `make check`
 
-Run **`make check`** before submitting anything. It is the real CI gate
-and runs, aborting on the first failure:
+Run **`make check`** before submitting anything. It is the CI check (the
+merge and release gate is `make gate`, below) and runs, aborting on the
+first failure:
 
 1. **Bootstrap fixed point** — `krc3 == krc4` byte-for-byte (the compiler
    compiles itself to a stable fixed point).
 2. **Test suite** — run it as `make test`, never as bare `bash
    tests/run_tests.sh` (which defaults `KRC` to `build/krc3` with no `--arch`
-   and reports mass failures on a healthy tree). 2043 tests on this tree.
+   and reports mass failures on a healthy tree). 2045 tests on this tree.
 3. **IR-vs-legacy differential** — `tests/diff_ir_legacy.sh` and
    `diff_ir_legacy_stdout.sh` compile+run each probe on all four backends
    (IR/legacy × x86_64/arm64, arm64 under `qemu-aarch64-static`) and
@@ -40,27 +41,36 @@ and runs, aborting on the first failure:
 
 `make test` runs only step 2; `make bootstrap` only step 1.
 
+`make test` reports a skipped row as SKIP, never as a pass, so a partial
+toolchain still gives a usable answer. **For merge and release gating run
+`make gate`** (`REQUIRE_FULL_RUN=1 make test`; no CI workflow sets it, so a
+release is gated by running it by hand on a host with every tool): in that
+mode every skip is a FAIL -- a
+missing tool (wine, qemu, python3), or the README row-count gate on a partial
+toolchain -- and the failure names the missing tool, so the gate passes only
+when every row ran and passed.
+
 ### Local merge gates: `make pe-gate` (and `make gate`)
 
 CI may skip rows whose tools its runner lacks (Wine, qemu, LLVM, clang), so a
 green CI run does not prove every row ran. Two local gates do:
 
 - **`make pe-gate`** — the gate of the Windows unwind-table work (#143): it
-  runs the suite to `build/pe-gate.log` (`PE_GATE_LOG=...` to change it) and
-  then `tests/helpers/require_rows.sh` on that log. It passes only when every
-  row of `tests/pe_unwind_rows.lst` PASSes exactly once, no Windows or
-  emulator row (`wine`, `qemu`, `windows`, `win_`, `_win`, `c7_` in the name)
-  SKIPs, every known red in `tests/pe_unwind_known_reds.lst` FAILs exactly
-  once (and nothing else fails), and no checker rule was switched off. The
+  runs the suite as `make gate` does (`make test` under `REQUIRE_FULL_RUN=1`,
+  so any row that cannot run is a FAIL) to `build/pe-gate.log`
+  (`PE_GATE_LOG=...` to change it) and then `tests/helpers/require_rows.sh`
+  on that log. It passes only when every row of `tests/pe_unwind_rows.lst`
+  PASSes exactly once, nothing is skipped, every known red in
+  `tests/pe_unwind_known_reds.lst` FAILs exactly once (and nothing else
+  fails), and no checker rule was switched off. The
   suite itself reports the known reds as failures, so read the
   `require_rows:` line, not the suite's exit status. It needs Wine,
   qemu-user, python3, clang, lld-link, llvm-dlltool, llvm-readobj,
   llvm-objdump and llvm-mc installed.
-- **`make gate`** (`REQUIRE_FULL_RUN=1 make test`) — added by the
-  suite-skip-hygiene branch when it merges: it makes any skip of a required
-  row a failure across the whole suite. The two are complementary: `make
-  gate` refuses skips; `make pe-gate` also pins the #143 rows by name and
-  checks the known reds both ways.
+- **`make gate`** (`REQUIRE_FULL_RUN=1 make test`, above): it makes any
+  skip of a required row a failure across the whole suite. The two are
+  complementary: `make gate` refuses skips; `make pe-gate` also pins the
+  #143 rows by name and checks the known reds both ways.
 
 ## Source structure
 

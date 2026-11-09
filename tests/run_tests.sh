@@ -39,9 +39,35 @@ RUN_ARCH="x86_64"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 PASS=0
 FAIL=0
+SKIP=0
 TOTAL=0
+
+# Every skipped row goes through skip_row: it counts in SKIP (never in PASS)
+# and prints one uniform line. The row must already be in TOTAL -- a site
+# whose row is not counted yet increments TOTAL itself first.
+#
+# REQUIRE_FULL_RUN=1 is the mode for merge and release gating: every skip is
+# a FAIL, whatever its reason -- a missing tool (wine, python3, a qemu), or
+# the README gate on a partial toolchain. A run in this mode passes only if
+# every row ran and passed. The default (0) keeps a skip a SKIP, for
+# development on a partial box.
+REQUIRE_FULL_RUN="${REQUIRE_FULL_RUN:-0}"
+skip_row() {
+    if [ "$REQUIRE_FULL_RUN" = 1 ]; then
+        FAIL=$((FAIL + 1))
+        echo "FAIL: $1 (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure: $2)"
+        return
+    fi
+    SKIP=$((SKIP + 1))
+    SKIP_NAMES="$SKIP_NAMES$1
+"
+    echo "  $1: SKIP ($2)"
+}
+# Every skipped row's name, one per line.
+SKIP_NAMES=""
 # Wine selection (one rule for every Wine row). KR_WINE unset: use `wine` from PATH, and
-# a missing wine is a declared SKIP (wine_na). KR_WINE set but empty or not an executable
+# a missing wine is a SKIP through skip_row (wine_na), so a REQUIRE_FULL_RUN=1 run fails
+# and names wine. KR_WINE set but empty or not an executable
 # file is a misconfiguration: wine_path yields nothing and wine_na FAILS, so a mistyped
 # path cannot turn the Windows-run rows into a green SKIP.
 KR_WINE_BAD=""
@@ -51,7 +77,7 @@ fi
 wine_path() { [ -n "$KR_WINE_BAD" ] && return 0; echo "${KR_WINE:-$(command -v wine 2>/dev/null || true)}"; }
 wine_na() {   # <row>: no usable wine -- SKIP if none was asked for, FAIL if KR_WINE is wrong
     if [ -n "$KR_WINE_BAD" ]; then FAIL=$((FAIL + 1)); echo "FAIL: $1 ($KR_WINE_BAD)"
-    else PASS=$((PASS + 1)); echo "  $1: SKIP (no wine; set KR_WINE=<path to wine>)"; fi
+    else skip_row "$1" "no wine; set KR_WINE=<path to wine>"; fi
 }
 
 run_test() {
@@ -1127,7 +1153,7 @@ run_test "asm_block" 'fn main() { asm { "nop"; "nop"; "nop" }; exit(7) }' 7
 if [ "$ARCH" != "aarch64" ]; then
     run_test "asm_hex" 'fn main() { asm("0x90"); exit(5) }' 5
 else
-    echo "  asm_hex: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL+1)); skip_row asm_hex "x86-only"
 fi
 
 # Signedness must survive a CALL RESULT used directly as an operand.
@@ -1247,7 +1273,7 @@ if [ "$ARCH" != "aarch64" ]; then
     }
     fn main() { raw_exit() }' 42
 else
-    echo "  naked_fn: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL+1)); skip_row naked_fn "x86-only"
 fi
 
 # @noreturn annotation (should compile fine)
@@ -2227,8 +2253,8 @@ NK_ASM3="/tmp/krc_naked_a3_$$.s"
 # Both x86_64 rows COMPILE only (they disassemble the listing, they never
 # execute it), so pinning --arch=x86_64 is correct here.
 if ! command -v objdump >/dev/null 2>&1 || ! command -v xxd >/dev/null 2>&1; then
-    echo "  naked_stub_no_callee_saved_x86: SKIP (objdump/xxd not installed)"
-    echo "  naked_isr_common_no_callee_saved: SKIP (objdump/xxd not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row naked_stub_no_callee_saved_x86 "objdump/xxd not installed"
+    TOTAL=$((TOTAL + 1)); skip_row naked_isr_common_no_callee_saved "objdump/xxd not installed"
 else
     TOTAL=$((TOTAL + 1))
     NK1_OK=1
@@ -3262,7 +3288,7 @@ fi
 # arm64 host whose objdump cannot disassemble x86 at all, which is how these
 # rows came to FAIL with "no disassembly produced" instead of skipping.
 if [ -z "$X86_OBJDUMP" ] || ! command -v xxd >/dev/null 2>&1; then
-    echo "  call_ptr_windows_shadow_overflow: SKIP (no x86-capable objdump, or xxd missing)"
+    TOTAL=$((TOTAL + 1)); skip_row call_ptr_windows_shadow_overflow "no x86-capable objdump, or xxd missing"
 else
     # Disassemble `main`'s bytes from a --target=windows --legacy --emit=asm
     # listing as Win64 x86-64, in Intel syntax. nk_bytes (defined above) pulls
@@ -3385,7 +3411,7 @@ fi
 # artifact (the OVMF boot in tests/target_none/boot_gate.sh L7 is what proves
 # the same bytes EXECUTE against real firmware).
 if ! command -v objdump >/dev/null 2>&1; then
-    echo "  uefi_win64_call_ptr_ir: SKIP (objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row uefi_win64_call_ptr_ir "objdump not installed"
 else
     UEFI_CP_SRC='static uint64 sink = 0
 fn svc(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e) -> uint64 { return ((((a + b) + c) + d) + e) }
@@ -3430,9 +3456,9 @@ fn main(uint64 image_handle, uint64 system_table) -> uint64 {
     # empty text trivially contains none. A vacuous pass is the one outcome a
     # gate must never produce, so all three skip together.
     if [ -z "$X86_OBJDUMP" ]; then
-        echo "  uefi_win64_entry_params: SKIP (no x86-capable objdump)"
-        echo "  uefi_win64_call_ptr_placement: SKIP (no x86-capable objdump)"
-        echo "  uefi_win64_not_sysv: SKIP (no x86-capable objdump)"
+        TOTAL=$((TOTAL + 1)); skip_row uefi_win64_entry_params "no x86-capable objdump"
+        TOTAL=$((TOTAL + 1)); skip_row uefi_win64_call_ptr_placement "no x86-capable objdump"
+        TOTAL=$((TOTAL + 1)); skip_row uefi_win64_not_sysv "no x86-capable objdump"
     else
     # Entry: ImageHandle in rcx, SystemTable in rdx (Win64), read into the
     # callee-saved homes the IR backend picks. SysV would read rdi/rsi.
@@ -3654,8 +3680,8 @@ if [ "$ARCH" != "aarch64" ]; then
     fi
     rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
 else
-    echo "  msr_compile: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
-    echo "  msr_wrmsr_compile: SKIP (x86-only)"; PASS=$((PASS+1)); TOTAL=$((TOTAL+1))
+    TOTAL=$((TOTAL+1)); skip_row msr_compile "x86-only"
+    TOTAL=$((TOTAL+1)); skip_row msr_wrmsr_compile "x86-only"
 fi
 
 # --- Dead Code Elimination test ---
@@ -3851,8 +3877,7 @@ fi
 # Skip on non-x86_64 hosts where KRC_FLAGS targets arm64.
 TOTAL=$((TOTAL + 1))
 if [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
-    PASS=$((PASS + 1))
-    echo "  emit_obj_readelf: SKIP (non-x86_64 host)"
+    skip_row emit_obj_readelf "non-x86_64 host"
 elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
     sections=$(readelf -S /tmp/krc_obj_$$.o 2>/dev/null)
     has_text=$(echo "$sections" | grep -c '\.text')
@@ -3868,8 +3893,7 @@ elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
         echo "  emit_obj_readelf: FAIL (text=$has_text symtab=$has_symtab main=$has_main add=$has_add)"
     fi
 else
-    PASS=$((PASS + 1))
-    echo "  emit_obj_readelf: SKIP (readelf not found or .o missing)"
+    skip_row emit_obj_readelf "readelf not found or .o missing"
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
@@ -3906,8 +3930,7 @@ else
         FAIL=$((FAIL + 1))
         echo "FAIL: export_symbol_global (compilation with --emit=obj failed)"
     else
-        PASS=$((PASS + 1))
-        echo "  export_symbol_global: SKIP (readelf not found)"
+        skip_row export_symbol_global "readelf not found"
     fi
 fi
 rm -f /tmp/krc_export_$$.kr /tmp/krc_export_$$.o
@@ -4016,8 +4039,7 @@ print('OK: sections non-overlapping, .text = ' + text.hex())
         echo "  emit_obj_large_symtab_structure: FAIL (compilation failed)"
     fi
 else
-    PASS=$((PASS + 1))
-    echo "  emit_obj_large_symtab_structure: SKIP (no python3)"
+    skip_row emit_obj_large_symtab_structure "no python3"
 fi
 rm -f "$BIGSYM_KR" "$BIGSYM_O"
 
@@ -5126,7 +5148,7 @@ fn inc() { c = c + 1 }
 fn main() { inc(); inc(); inc(); inc(); exit(c) }' 4
         _adb_run "println"  'fn main() { println("android bionic"); exit(7) }' 7
     else
-        echo "  android_emulator: SKIP (ANDROID_EMULATOR=1 but no device online)"
+        TOTAL=$((TOTAL + 1)); skip_row android_emulator "ANDROID_EMULATOR=1 but no device online"
     fi
 fi
 
@@ -6269,7 +6291,7 @@ $KRC --arch=x86_64 /tmp/krc_fnaddr3_$$.kr -o /dev/null --emit=elf > /tmp/krc_fna
 grep -q "undefined function 'no_such_function_here'" /tmp/krc_fnaddr3_out_$$.txt \
     || fnaddr2_err="$fnaddr2_err an-absent-name-lost-its-own-message"
 if [ -z "$fnaddr2_err" ]; then
-    PASS=$((PASS + 1)); echo "  fnaddr_string_literal_still_resolves: PASS (called through it, and absent names still named)"
+    PASS=$((PASS + 1)); echo "  fnaddr_string_literal_still_resolves: PASS (called through it, and absent names still named)"   # tripwire: not a skip -- every leg ran; "absent" is about names
 else
     FAIL=$((FAIL + 1)); echo "FAIL: fnaddr_string_literal_still_resolves ($fnaddr2_err)"
 fi
@@ -6410,7 +6432,7 @@ if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf 
             FAIL=$((FAIL + 1)); echo "FAIL: naked_alternative_out_constraint_works ($nakedalt_err)"
         fi
     else
-        PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: SKIP (compiles; no qemu-aarch64-static to run it)"
+        skip_row naked_alternative_out_constraint_works "compiles; no qemu-aarch64-static to run it"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -6608,7 +6630,7 @@ fn main() -> uint32 {
 }
 IDTCEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_selector_and_limit: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_selector_and_limit "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../idtcs_tmp_$$.kr" -o "$IDTCS_K" >/dev/null 2>&1 \
   || ! $KRC --target=none --arch=x86_64 --emit=image --reset-vector \
@@ -6672,7 +6694,7 @@ fn main() -> uint32 {
 }
 IDTFEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_reports_four_faults: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_reports_four_faults "no qemu-system-x86_64"
 else
     idtf_ok=1
     idtf_notes=""
@@ -6792,7 +6814,7 @@ fn main() -> uint32 {
 }
 IDTHEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  idt_common_handler_hook: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row idt_common_handler_hook "no qemu-system-x86_64"
 else
     idthk_ok=1
     idthk_notes=""
@@ -6876,7 +6898,7 @@ rm -f "$DIR/../idthk_in_$$.kr" "$DIR/../idthk_tmp_$$.kr" "/tmp/idthk_$$.log"
 # multi-block loop at all.
 TOTAL=$((TOTAL + 1))
 if ! command -v gunzip >/dev/null 2>&1 || ! command -v gzip >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  gzip_stored_roundtrips: PASS (SKIPPED -- no gzip/gunzip)"
+    skip_row gzip_stored_roundtrips "no gzip/gunzip"
 elif ! $KRC --arch=$RUN_ARCH "$DIR/../examples/gzip_stored.kr" -o /tmp/krgz_$$ >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: gzip_stored_roundtrips (compile failed)"
 else
@@ -6949,7 +6971,7 @@ cmp -s "$lcb_dir/dry.kr" "$lcb_dir/orig.kr" || { lcb_ok=0; lcb_why="--dry-run mo
 "$DIR/../build/krc2" lc undo "$lcb_dir/dry.kr" >/dev/null 2>&1
 [ "$?" != "0" ] || { lcb_ok=0; lcb_why="undo with no backup exited 0"; }
 if [ "$lcb_ok" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"
+    PASS=$((PASS + 1)); echo "  lc_fix_backup_and_undo: PASS (backup==original, undo restores, dry-run inert, missing backup errors)"   # tripwire: not a skip -- every leg ran; a missing backup is the case tested
 else
     FAIL=$((FAIL + 1)); echo "FAIL: lc_fix_backup_and_undo ($lcb_why)"
 fi
@@ -7316,7 +7338,7 @@ rm -f "$DIR/../mnem_tmp_$$.kr" /tmp/mnem_$$.o
 # x86_64 and says so otherwise rather than pretending to have covered it.
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); echo "  asm_push_pop_mov_runtime: PASS (SKIPPED -- x86-only mnemonics, host is $RUN_ARCH)"
+    skip_row asm_push_pop_mov_runtime "x86-only mnemonics, host is $RUN_ARCH"
 else
     cat > "$DIR/../mnemr_tmp_$$.kr" <<'MNREOF'
 fn mov_through(u64 a) -> u64 {
@@ -7398,7 +7420,7 @@ fi
 # the click was never seen, and a keystroke went missing -- 3 of 3 checks red.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row mouse_gui_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$MG_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
 else
@@ -7582,7 +7604,7 @@ fn main() {
     exit(9)
 }' 9
 else
-    echo "  x86_nonprivileged_surface: SKIP (std/x86.kr is x86_64-only by construction; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1)); skip_row x86_nonprivileged_surface "std/x86.kr is x86_64-only by construction; host is $RUN_ARCH"
 fi
 
 # The whole point of both modules: they compile with no OS underneath.
@@ -7631,7 +7653,7 @@ CR2EOF
     fi
     rm -f "$DIR/../cr2_tmp_$$.kr" /tmp/cr2_$$
 else
-    PASS=$((PASS + 1)); echo "  asm_cr2_encoding: PASS (SKIPPED -- x86_64 only)"
+    skip_row asm_cr2_encoding "x86_64 only"
 fi
 
 cat > "$DIR/../bm_tmp_$$.kr" <<'BMEOF'
@@ -7719,7 +7741,7 @@ fi
 # python3; noted rather than failed when absent, like the ESP rows above.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (pixel check SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row ramfb_example_draws "pixel check: no qemu-system-x86_64/python3"
 elif [ ! -f "$RFB_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
 else
@@ -7836,7 +7858,7 @@ rm -f "$DIR/../fwm_tmp_$$.kr" /tmp/fwm_$$.img
 #   wr=1       DMA write path, against -device ramfb.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-aarch64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  fw_cfg_mmio_answers_on_virt: PASS (SKIPPED -- no qemu-system-aarch64; compile row above is the only coverage)"
+    skip_row fw_cfg_mmio_answers_on_virt "no qemu-system-aarch64; compile row above is the only coverage"
 else
 cat > "$DIR/../fwmx_tmp_$$.kr" <<'FWMXEOF'
 import "std/uart_pl011.kr"
@@ -8046,7 +8068,7 @@ fi
 # Both halves were confirmed load-bearing by breaking each on purpose.
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (SKIPPED -- no qemu-system-x86_64/python3)"
+    skip_row bare_console_example_runs "no qemu-system-x86_64/python3"
 elif [ ! -f "$BCON_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
 else
@@ -8153,6 +8175,7 @@ fn main() { vga_move_cursor(1, 1)  exit(9) }
 VA2EOF
 va_ok=1
 va_note=""
+va_skip=""
 # host arch, natively
 if $KRC --arch=$RUN_ARCH "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr_$$ >/dev/null 2>&1; then
     chmod +x /tmp/vattr_$$
@@ -8175,7 +8198,7 @@ if [ -n "$va_emu" ]; then
         va_ok=0; va_note="$va_other build (pure helpers should not drag in x86 asm)"
     fi
 else
-    va_note="$va_other SKIPPED, no emulator"
+    va_skip="the $va_other leg did not run: no qemu-$va_other-static"
 fi
 # port I/O on arm64 must be refused, loudly
 va_err=$($KRC --arch=arm64 "$DIR/../vattr2_tmp_$$.kr" -o /tmp/vattr3_$$ 2>&1)
@@ -8193,7 +8216,9 @@ if [ -f /tmp/vattr3_$$ ]; then
 elif ! printf '%s' "$va_err" | grep -qE "unrecognized asm instruction|unknown arm64 inline-asm constraint register"; then
     va_ok=0; va_note="refused, but with an unrecognised message: $(printf '%s' "$va_err" | head -1)"
 fi
-if [ "$va_ok" = "1" ]; then
+if [ "$va_ok" = "1" ] && [ -n "$va_skip" ]; then
+    skip_row vga_attr_packs_bg_high_fg_low "$va_skip"
+elif [ "$va_ok" = "1" ]; then
     PASS=$((PASS + 1)); echo "  vga_attr_packs_bg_high_fg_low: PASS (both arches; port I/O still refused on arm64${va_note:+; $va_note})"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: vga_attr_packs_bg_high_fg_low ($va_note)"
@@ -8318,7 +8343,7 @@ ASMBINDEOF
     fi
     rm -f "$DIR/../asmbind_tmp_$$.kr"
 else
-    PASS=$((PASS + 1)); echo "  asm_constraint_out_rax_binds: SKIP (RUN_ARCH=$RUN_ARCH, x86 machine code)"
+    skip_row asm_constraint_out_rax_binds "RUN_ARCH=$RUN_ARCH, x86 machine code"
 fi
 
 # --- std/uart_16550.kr is a provider layered on std/serial.kr ----------------
@@ -8378,7 +8403,7 @@ fn main() -> uint64 {
 }
 UPROVEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_provider_prints_on_serial: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_provider_prints_on_serial "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../uprov_tmp_$$.kr" -o /tmp/uprov_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_provider_prints_on_serial (compile failed)"
@@ -8423,7 +8448,7 @@ fn main() -> uint64 {
 }
 USUEOF
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  uart16550_beside_serial_import: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row uart16550_beside_serial_import "no qemu-system-x86_64"
 elif ! $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
             --stack-top=0x90000 "$DIR/../usu_tmp_$$.kr" -o /tmp/usu_$$.img >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: uart16550_beside_serial_import (compile failed)"
@@ -8614,7 +8639,7 @@ fi
 #     evaluates to 0x0 in this dialect.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_enumerates_default_machine: PASS (SKIPPED -- no qemu-system-x86_64)"
+    skip_row pci_enumerates_default_machine "no qemu-system-x86_64"
 elif [ "$PCI_BUILT" = "0" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: pci_enumerates_default_machine (compile failed)"
     $KRC --target=none --arch=x86_64 --emit=image --load-addr=0x100000 \
@@ -8649,7 +8674,7 @@ fi
 # Take two devices away. A baked list passes the row above and fails here.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_tracks_the_machine: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_tracks_the_machine "no qemu image"
 else
     pci_boot /tmp/pcicut_$$.log -vga none -net none
     pci_bad=""
@@ -8677,7 +8702,7 @@ fi
 # is its high half and pci_bar_next must skip to 6, not 5.
 TOTAL=$((TOTAL + 1))
 if [ "$PCI_HAVE_QEMU" = "0" ] || [ "$PCI_BUILT" = "0" ]; then
-    PASS=$((PASS + 1)); echo "  pci_64bit_bar_consumes_two_slots: PASS (SKIPPED -- no qemu image)"
+    skip_row pci_64bit_bar_consumes_two_slots "no qemu image"
 else
     pci_boot /tmp/pcirng_$$.log -device virtio-rng-pci
     pci_bad=""
@@ -8773,6 +8798,454 @@ else
 fi
 rm -f /tmp/krc_migtypes_$$.kr
 
+# --- No skip is counted as a pass, or goes uncounted (tripwire over this file)
+# A row that cannot run goes through skip_row, which counts it in SKIP and,
+# under REQUIRE_FULL_RUN=1, fails it. Sites used to print SKIP and add to PASS,
+# print SKIP and count nothing, or pass a row one of whose legs never ran, so a
+# box without a tool reported a clean run. This row reads this file, line by
+# line as text (it is not a shell parser; a line ending in \ is joined with the
+# next, and so is an echo whose double quote is still open), and fails on:
+#   - output that says skip / skipped / skipping in any case, other than
+#     skip_row's own line and other than a failure message (one that starts
+#     "FAIL:", or the "name: FAIL" form followed by a space, "(" or ":").
+#     Output includes: every echo or printf command (also \echo, /bin/echo,
+#     and behind command / builtin / env / exec / nohup / xargs / timeout N /
+#     stdbuf / nice / ionice / setsid or a leading redirection such as >&2 or
+#     2>/dev/null -- and, as a fallback for any other wrapper, an echo or
+#     printf word anywhere in a command's unquoted text), its words with redirections
+#     taken out wherever they stand, up to the first unquoted | ; & ( ) { } or
+#     comment, so a piped, tee'd or redirected echo counts and a value inside
+#     $( ) does not; the body of a cat or tee heredoc not redirected to a file
+#     (>&2 and 2>&1 are not files); a cat or tee here-string (<<<); the echo
+#     inside an eval's or an sh -c / bash -c argument; and the arguments of
+#     any function defined above (NAME() { or function NAME {) whose body
+#     echoes a variable, and of an alias for echo or printf -- a logger or a
+#     PASS helper;
+#   - any assignment to PASS -- PASS=..., PASS+=, ((PASS++)), $((++PASS)),
+#     let / read / declare / local / export / printf -v PASS -- on the same
+#     line as, or the line after, output that says a leg did not run: skip,
+#     missing, absent, not installed, not found, unavailable, (did) not run,
+#     or no qemu / wine / python / gcc / objdump / readelf / xxd / emulator /
+#     runner / device; or such output on the line after a PASS assignment (for
+#     a heredoc: the line after it ends, against everything it printed); and a
+#     call to any function defined above whose body assigns PASS (t10_ok,
+#     c7_ok, ...) with such words in its arguments; and a PASS assignment on
+#     the line right after a FAIL-form message that says so (the "foo: FAIL
+#     (no) -- SKIP" disguise; not after else / elif / ;; / }), or later on the
+#     same line with no else / elif / ;; / } between them.
+# Known misses, including: skip wording built in a variable or split across
+# quotes, a PASS assignment more than one line from the wording, PASS reached
+# through a variable name, a heredoc written to a file, a function used before
+# it is defined, look-alike Unicode letters, and lines marked "# tripwire: not
+# a skip". A line whose wording only looks like a skip ends in that marker with
+# the reason; the lines of these two rows carry SKIP-TRIPWIRE-OWN-LINE. The
+# next row checks the scanner itself against each bypass review has found.
+SKP_AWK='   # SKIP-TRIPWIRE-OWN-LINE
+    BEGIN { SQ = sprintf("%c", 39); HD = "<" "<"; HS = "<" "<" "<" }   # SKIP-TRIPWIRE-OWN-LINE
+    function code(l)     { return (l !~ /^[ \t]*#/) && (l !~ /SKIP-TRIPWIRE-OWN-LINE/) && (l !~ /# tripwire: not a skip/) }   # SKIP-TRIPWIRE-OWN-LINE
+    function skel(l,   i, c, n, sq, dq, o) {   # SKIP-TRIPWIRE-OWN-LINE
+        n = length(l); o = ""; sq = 0; dq = 0   # SKIP-TRIPWIRE-OWN-LINE
+        for (i = 1; i <= n; i++) {   # SKIP-TRIPWIRE-OWN-LINE
+            c = substr(l, i, 1)   # SKIP-TRIPWIRE-OWN-LINE
+            if (sq) { if (c == SQ) { sq = 0; o = o c } else o = o "X"; continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "\\") { o = o "XX"; i++; continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (dq) { if (c == "\"") { dq = 0; o = o c } else o = o "X"; continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "\"") dq = 1   # SKIP-TRIPWIRE-OWN-LINE
+            else if (c == SQ) sq = 1   # SKIP-TRIPWIRE-OWN-LINE
+            else if (c == "#" && (i == 1 || substr(l, i - 1, 1) ~ /[ \t]/)) break   # SKIP-TRIPWIRE-OWN-LINE
+            o = o c   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        QS = sq ? 1 : (dq ? 2 : 0)   # SKIP-TRIPWIRE-OWN-LINE
+        return o   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function isfail(s) {   # SKIP-TRIPWIRE-OWN-LINE
+        sub(/^[ \t]*(echo|printf)[ \t]+(-[a-zA-Z]+[ \t]+)*/, "", s)   # SKIP-TRIPWIRE-OWN-LINE
+        sub(/^\$?"/, "", s); if (substr(s, 1, 1) == SQ) s = substr(s, 2)   # SKIP-TRIPWIRE-OWN-LINE
+        sub(/^(\\n)+/, "", s)   # SKIP-TRIPWIRE-OWN-LINE
+        return (s ~ /^[ \t]*FAIL:/) || (s ~ /^[ \t]*[^ \t:"]+: FAIL([ \t(:]|$)/)   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function unredir(s,   sk, o, i, n, c, j) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(s); n = length(sk); o = ""   # SKIP-TRIPWIRE-OWN-LINE
+        for (i = 1; i <= n; i++) {   # SKIP-TRIPWIRE-OWN-LINE
+            c = substr(sk, i, 1)   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == ">" || c == "<") {   # SKIP-TRIPWIRE-OWN-LINE
+                sub(/[0-9]+$/, "", o); j = i   # SKIP-TRIPWIRE-OWN-LINE
+                while (substr(sk, j, 1) ~ /[<>]/) j++   # SKIP-TRIPWIRE-OWN-LINE
+                if (substr(sk, j, 1) == "&") { j++; while (substr(sk, j, 1) ~ /[0-9-]/) j++ }   # SKIP-TRIPWIRE-OWN-LINE
+                else { while (substr(sk, j, 1) ~ /[ \t]/) j++; while (j <= n && substr(sk, j, 1) !~ /[ \t]/) j++ }   # SKIP-TRIPWIRE-OWN-LINE
+                o = o " "; i = j - 1; continue   # SKIP-TRIPWIRE-OWN-LINE
+            }   # SKIP-TRIPWIRE-OWN-LINE
+            o = o substr(s, i, 1)   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        return o   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function cmdtext(s,   sk, w, a, r, g) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(s)   # SKIP-TRIPWIRE-OWN-LINE
+        for (g = 0; g < 8; g++) {   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*((if|then|elif|else|do|while|until|time|!)[ \t]+)*([A-Za-z_][A-Za-z0-9_]*=[^ \t]*[ \t]+)*/) && RLENGTH > 0) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1) }   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*[0-9]*(>>?|<)&?[ \t]*[^ \t]+[ \t]*/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1); continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*(command|builtin|exec|nohup|xargs|env|stdbuf|setsid)([ \t]+-[^ \t]*)*[ \t]+/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1); continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*timeout([ \t]+(-[sk][ \t]+[^ \t-][^ \t]*|-[^ \t]+))*[ \t]+[0-9.]+[smhd]?[ \t]+/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1); continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (match(sk, /^[ \t]*(nice|ionice)([ \t]+(-[ncpt][ \t]*-?[0-9]+|-[^ \t]+))*[ \t]+/)) { s = substr(s, RLENGTH + 1); sk = substr(sk, RLENGTH + 1); continue }   # SKIP-TRIPWIRE-OWN-LINE
+            break   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        if (!match(sk, /^[^ \t]+/)) { CW = ""; return "" }   # SKIP-TRIPWIRE-OWN-LINE
+        w = substr(s, 1, RLENGTH); a = substr(s, RLENGTH + 1)   # SKIP-TRIPWIRE-OWN-LINE
+        sub(/^\\/, "", w); sub(/^.*\//, "", w)   # SKIP-TRIPWIRE-OWN-LINE
+        CW = w; return a   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function segtext(s,   a, r, k) {   # SKIP-TRIPWIRE-OWN-LINE
+        a = cmdtext(s)   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW == "echo" || CW == "printf") { r = CW " " unredir(a); if (isfail(r)) { FT = FT " " r; return "" } return r }   # SKIP-TRIPWIRE-OWN-LINE
+        if ((CW == "sh" || CW == "bash" || CW == "dash") && match(a, /^[ \t]*(-[a-z]+[ \t]+)*-[a-z]*c[ \t]+/)) { a = substr(a, RLENGTH + 1); CW = "eval" }   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW == "eval") { r = a; sub(/^[ \t]*/, "", r); if (substr(r, 1, 1) == SQ || substr(r, 1, 1) == "\"") r = substr(r, 2); return (r ~ /(^|[ \t;])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/ && !isfail(r)) ? r : "" }   # SKIP-TRIPWIRE-OWN-LINE
+        if ((CW == "cat" || CW == "tee") && (k = index(a, HS)) > 0) { r = substr(a, k + 3); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
+        if (CW in OUTF) { r = unredir(a); return isfail(r) ? "" : r }   # SKIP-TRIPWIRE-OWN-LINE
+        return ""   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function anyecho(s,   r, p) {   # SKIP-TRIPWIRE-OWN-LINE
+        if (!match(s, /(^|[;&|{(! \t])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/)) return ""   # SKIP-TRIPWIRE-OWN-LINE
+        r = substr(s, RSTART); sub(/^[;&|{(! \t]/, "", r); sub(/^\\/, "", r); sub(/^\/[a-z\/]*\//, "", r)   # SKIP-TRIPWIRE-OWN-LINE
+        r = unredir(r)   # SKIP-TRIPWIRE-OWN-LINE
+        if (isfail(r)) { FT = FT " " r; return "" }   # SKIP-TRIPWIRE-OWN-LINE
+        return r   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function lineout(l,   sk, n, i, c, st, d, v, start, acc, s, k2, a) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(l); n = length(sk); d = 0; start = 1; acc = ""; VIA = ""; FT = ""; FTPOS = 0   # SKIP-TRIPWIRE-OWN-LINE
+        for (i = 1; i <= n + 1; i++) {   # SKIP-TRIPWIRE-OWN-LINE
+            c = (i <= n) ? substr(sk, i, 1) : ";"   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "$" && substr(sk, i + 1, 1) == "{") { while (i <= n && substr(sk, i, 1) != "}") i++; continue }   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "&" && i > 1 && substr(sk, i - 1, 1) ~ /[<>]/) continue   # SKIP-TRIPWIRE-OWN-LINE
+            if (c == "&" && substr(sk, i + 1, 1) == ">") continue   # SKIP-TRIPWIRE-OWN-LINE
+            if (c ~ /[;|&(){}`]/) {   # SKIP-TRIPWIRE-OWN-LINE
+                v = 0; for (k2 = 1; k2 <= d; k2++) if (VAL[k2]) v = 1   # SKIP-TRIPWIRE-OWN-LINE
+                if (!v) {   # SKIP-TRIPWIRE-OWN-LINE
+                    s = segtext(substr(l, start, i - start))   # SKIP-TRIPWIRE-OWN-LINE
+                    if (s == "" && !(CW in PASSF)) s = anyecho(substr(l, start, i - start))   # SKIP-TRIPWIRE-OWN-LINE
+                    if (s != "") acc = acc " " s   # SKIP-TRIPWIRE-OWN-LINE
+                    if (FT != "" && FTPOS == 0 && (skipword(FT) || legword(FT))) FTPOS = start   # SKIP-TRIPWIRE-OWN-LINE
+                    if (CW in PASSF) { a = cmdtext(substr(l, start, i - start)); if (skipword(a) || legword(a)) PVIA = PVIA " " CW }   # SKIP-TRIPWIRE-OWN-LINE
+                }   # SKIP-TRIPWIRE-OWN-LINE
+                if (c == "(") { d++; VAL[d] = (i > 1 && substr(sk, i - 1, 1) == "$") }   # SKIP-TRIPWIRE-OWN-LINE
+                else if (c == ")" && d > 0) d--   # SKIP-TRIPWIRE-OWN-LINE
+                start = i + 1   # SKIP-TRIPWIRE-OWN-LINE
+            }   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        return acc   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function skipword(t) { t = tolower(t); return t ~ /(^|[^a-z_])skip(ped|ping|s)?([^a-z_]|$)/ }   # SKIP-TRIPWIRE-OWN-LINE
+    function legword(t)  { t = tolower(t); return t ~ /(^|[^a-z_])(missing|absent|not installed|not found|unavailable|did not run|not run|no (qemu|wine|python3?|gcc|objdump|readelf|xxd|emulator|runner|device))([^a-z_]|$)/ }   # SKIP-TRIPWIRE-OWN-LINE
+    function passinc(l)  { if (!code(l)) return 0; l = substr(l, 1, length(skel(l))) " "; return (l ~ /(^|[^A-Za-z0-9_$])PASS[ \t]*[-+*\/%]?=([^=]|$)/) || (l ~ /(\+\+|--)[ \t]*PASS[^A-Za-z0-9_]/) || (l ~ /(^|[^A-Za-z0-9_$])PASS[ \t]*(\+\+|--)/) || (l ~ /printf[ \t]+-v[ \t]*"?PASS[^A-Za-z0-9_]/) || (l ~ /(^|[^A-Za-z0-9_])(let|read|declare|typeset|local|export|readonly)[ \t]([^|;&]*[^A-Za-z0-9_$])?PASS[^A-Za-z0-9_]/) }   # SKIP-TRIPWIRE-OWN-LINE
+    function redir(sk,   r) {   # SKIP-TRIPWIRE-OWN-LINE
+        while (match(sk, /(^|[^0-9&<>])>>?[ \t]*/)) {   # SKIP-TRIPWIRE-OWN-LINE
+            r = substr(sk, RSTART + RLENGTH); sk = r   # SKIP-TRIPWIRE-OWN-LINE
+            if (r !~ /^&/ && r !~ /^\/dev\/(stdout|stderr|tty)/) return 1   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        return 0   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    function hdopen(l,   sk, p, q, rest, w, n, pre) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(l); n = 0; q = 0   # SKIP-TRIPWIRE-OWN-LINE
+        while ((p = index(substr(sk, q + 1), HD)) > 0) {   # SKIP-TRIPWIRE-OWN-LINE
+            p = q + p; q = p + 1   # SKIP-TRIPWIRE-OWN-LINE
+            if (substr(sk, p + 2, 1) == "<" || (p > 1 && substr(sk, p - 1, 1) == "<")) { q = p + 2; continue }   # SKIP-TRIPWIRE-OWN-LINE
+            pre = substr(sk, 1, p - 1)   # SKIP-TRIPWIRE-OWN-LINE
+            if (pre ~ /\(\([^)]*$/) continue   # SKIP-TRIPWIRE-OWN-LINE
+            rest = substr(l, p + 2)   # SKIP-TRIPWIRE-OWN-LINE
+            hdtab = (substr(rest, 1, 1) == "-"); if (hdtab) rest = substr(rest, 2)   # SKIP-TRIPWIRE-OWN-LINE
+            sub(/^[ \t]*/, "", rest); sub(/^["\\]/, "", rest); if (substr(rest, 1, 1) == SQ) rest = substr(rest, 2)   # SKIP-TRIPWIRE-OWN-LINE
+            if (!match(rest, /^[A-Za-z_][A-Za-z0-9_]*/)) continue   # SKIP-TRIPWIRE-OWN-LINE
+            hddelim = substr(rest, 1, RLENGTH); n++   # SKIP-TRIPWIRE-OWN-LINE
+            gsub(/[<>]&/, "  ", pre); sub(/.*[;|&({]/, "", pre); sub(/^[ \t]*/, "", pre); w = pre; sub(/[ \t].*/, "", w); sub(/^\\/, "", w); sub(/^.*\//, "", w)   # SKIP-TRIPWIRE-OWN-LINE
+            hdout = (w == "cat" || w == "tee") && !redir(sk)   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        return n   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    inhd {   # SKIP-TRIPWIRE-OWN-LINE
+        b = $0; if (hdtab) sub(/^\t+/, "", b)   # SKIP-TRIPWIRE-OWN-LINE
+        if (b == hddelim) { inhd = 0; prev = "#"; pt = hdtext; pft = ""; next }   # SKIP-TRIPWIRE-OWN-LINE
+        t = (hdout && b !~ /# tripwire: not a skip/ && !isfail(b)) ? b : ""   # SKIP-TRIPWIRE-OWN-LINE
+        if (t != "" && skipword(t)) print NR ": skip printed in a heredoc: " substr(b, 1, 90)   # SKIP-TRIPWIRE-OWN-LINE
+        else if (passinc(prev) && t != "" && legword(t)) print NR ": PASS where a leg did not run: " substr(b, 1, 90)   # SKIP-TRIPWIRE-OWN-LINE
+        if (t != "") hdtext = hdtext " " t   # SKIP-TRIPWIRE-OWN-LINE
+        prev = "#"; pt = t; pft = ""; next   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    { cur = (pend != "") ? pend $0 : $0 }   # SKIP-TRIPWIRE-OWN-LINE
+    code(cur) && njoin < 40 && (cur ~ /\\$/ && cur !~ /\\\\$/) { skel(cur); if (QS != 1) { pend = substr(cur, 1, length(cur) - 1) " "; njoin++; next } }   # SKIP-TRIPWIRE-OWN-LINE
+    code(cur) && njoin < 40 { s0 = skel(cur); if (QS == 2 && s0 ~ /(^|[;&|{(! \t])\\?(\/[a-z\/]*)?(echo|printf)[ \t]/) { pend = cur " "; njoin++; next } }   # SKIP-TRIPWIRE-OWN-LINE
+    { pend = ""; njoin = 0; PVIA = ""; FT = ""; FTPOS = 0; t = code(cur) ? lineout(cur) : ""; ft = (FT != "" && (skipword(FT) || legword(FT))) ? FT : ""; fpos = FTPOS }   # SKIP-TRIPWIRE-OWN-LINE
+    infn { FB = FB "\n" cur; if (cur ~ ("^" FIND "}")) { infn = 0; fnclass(FN, FB) } }   # SKIP-TRIPWIRE-OWN-LINE
+    function fnclass(nm, body,   L, k, m, keep) {   # SKIP-TRIPWIRE-OWN-LINE
+        if (nm == "skip_row") return   # SKIP-TRIPWIRE-OWN-LINE
+        keep = PVIA   # SKIP-TRIPWIRE-OWN-LINE
+        m = split(body, L, "\n")   # SKIP-TRIPWIRE-OWN-LINE
+        for (k = 1; k <= m; k++) {   # SKIP-TRIPWIRE-OWN-LINE
+            if (passinc(L[k])) PASSF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
+            if (lineout(L[k]) ~ /\$([A-Za-z_0-9@*]|\{)/) OUTF[nm] = 1   # SKIP-TRIPWIRE-OWN-LINE
+        }   # SKIP-TRIPWIRE-OWN-LINE
+        PVIA = keep   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    cur !~ /^[ \t]*#/ && cur ~ /^[ \t]*alias[ \t]+[A-Za-z_][A-Za-z0-9_]*=["\\]?(\/[a-z\/]*)?(echo|printf)([^A-Za-z0-9_]|$)/ { AN = cur; sub(/^[ \t]*alias[ \t]+/, "", AN); sub(/=.*/, "", AN); OUTF[AN] = 1 }   # SKIP-TRIPWIRE-OWN-LINE
+    cur !~ /^[ \t]*#/ && (match(cur, /^[ \t]*(function[ \t]+)?[A-Za-z_][A-Za-z0-9_]*[ \t]*\(\)[ \t]*\{/) || match(cur, /^[ \t]*function[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*\{/)) {   # SKIP-TRIPWIRE-OWN-LINE
+        FN = cur; sub(/^[ \t]*(function[ \t]+)?/, "", FN); sub(/[ \t]*[({].*/, "", FN)   # SKIP-TRIPWIRE-OWN-LINE
+        FIND = cur; sub(/[^ \t].*/, "", FIND)   # SKIP-TRIPWIRE-OWN-LINE
+        FB = substr(cur, RLENGTH + 1)   # SKIP-TRIPWIRE-OWN-LINE
+        if (skel(FB) ~ /\}[ \t;]*$/) fnclass(FN, FB); else infn = 1   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    PVIA != "" { print NR ": PASS where a leg did not run (through a PASS helper): " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    cur !~ /^[ \t]*#/ && cur !~ /SKIP-TRIPWIRE-OWN-LINE/ && (h = hdopen(cur)) > 0 { if (h > 1) print NR ": two heredocs on one line (the tripwire follows one)"; inhd = 1; hdtext = "" }   # SKIP-TRIPWIRE-OWN-LINE
+    t != "" && skipword(t) && cur !~ /^[ \t]*echo "  \$1: SKIP \(\$2\)"$/ { print NR ": skip printed outside skip_row: " substr(cur, 1, 90); prev = cur; pt = t; next }   # SKIP-TRIPWIRE-OWN-LINE
+    passinc(cur) && ((t != "" && legword(t)) || (pt != "" && (legword(pt) || skipword(pt)))) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    passinc(prev) && t != "" && (legword(t) || skipword(t)) { print NR ": PASS where a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    ft != "" && fpos > 0 && failthenpass(substr(cur, fpos)) { print NR ": PASS after a FAIL-form message on the same line that says a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    function failthenpass(a,   sk, b) {   # SKIP-TRIPWIRE-OWN-LINE
+        sk = skel(a) " "   # SKIP-TRIPWIRE-OWN-LINE
+        if (!match(sk, /(^|[^A-Za-z0-9_$])(PASS[ \t]*([-+*\/%]?=|\+\+)|\+\+[ \t]*PASS)/)) return 0   # SKIP-TRIPWIRE-OWN-LINE
+        b = substr(sk, 1, RSTART)   # SKIP-TRIPWIRE-OWN-LINE
+        return b !~ /(^|[;&| \t])(else|elif)([; \t]|$)|;;|\}/   # SKIP-TRIPWIRE-OWN-LINE
+    }   # SKIP-TRIPWIRE-OWN-LINE
+    passinc(cur) && pft != "" && cur !~ /^[ \t]*(else|elif|;;|\})/ { print NR ": PASS right after a FAIL-form message that says a leg did not run: " substr(cur, 1, 90) }   # SKIP-TRIPWIRE-OWN-LINE
+    { prev = cur; pt = t; pft = (ft != "" && fpos > 0 && skel(substr(cur, fpos)) !~ /(^|[;&| \t])(fi|done|esac|else|elif)([; \t]|$)|;;/) ? ft : "" }   # SKIP-TRIPWIRE-OWN-LINE
+    END { if (inhd) print "heredoc " hddelim " never ends"; if (infn) print "function " FN " never ends" }   # SKIP-TRIPWIRE-OWN-LINE
+'   # SKIP-TRIPWIRE-OWN-LINE
+TOTAL=$((TOTAL + 1))
+SKP_HITS=$(awk "$SKP_AWK" "$DIR/run_tests.sh")   # SKIP-TRIPWIRE-OWN-LINE
+if [ -z "$SKP_HITS" ]; then   # SKIP-TRIPWIRE-OWN-LINE
+    PASS=$((PASS + 1)); echo "  no_skip_counted_as_pass: PASS (every skip in run_tests.sh goes through skip_row)"   # SKIP-TRIPWIRE-OWN-LINE
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: no_skip_counted_as_pass (use skip_row, or mark a false alarm: $(printf '%s\n' "$SKP_HITS" | head -5 | tr '\n' ';'))"   # SKIP-TRIPWIRE-OWN-LINE
+fi
+
+# The scanner against fixtures: each bypass review found must be caught --
+# round 15: "fail" anywhere in the text exempted it, a piped or tee'd echo was
+# exempt, PASS=$((1 + PASS)), $((++PASS)) and $(expr ...) were not seen as
+# increments, heredoc output was not read; round 16: a redirection before the
+# words, a heredoc to stderr, echo and PASS helpers (t10_ok, c7_ok, loggers),
+# eval, \ continuations, a multi-line quoted echo, here-strings, /bin/echo
+# and \echo, the "FAIL-safe SKIP" disguise; round 17: echo behind command,
+# builtin, env, xargs or a leading >&2 / 2>/dev/null (round 15 caught those),
+# sh -c / bash -c, function NAME {, a logger echoing a local copy, an alias
+# for echo, a "FAIL (no) -- SKIP" message followed by a PASS; round 18:
+# timeout 5 echo and stdbuf -oL echo (round 15 caught those), an unknown
+# wrapper before echo, a FAIL message and a PASS on one line -- and shapes that are not skips
+# (FAIL messages and FAIL helpers, a value grepped for "skip" or made in $( ),
+# a source file written from a heredoc, a shift inside $(( )), a PASS helper
+# with a plain reason, the results line) must not be.
+TOTAL=$((TOTAL + 1))
+SKP_TD=$(mktemp -d "${TMPDIR:-/tmp}/skp_tripwire.XXXXXX")
+SKP_BAD=""; SKP_N=0
+skp_case() {   # skp_case NAME hit|clean < fixture
+    cat > "$SKP_TD/$1.sh"
+    SKP_N=$((SKP_N + 1))
+    local n; n=$(awk "$SKP_AWK" "$SKP_TD/$1.sh" | wc -l)
+    if [ "$2" = hit ] && [ "$n" -eq 0 ]; then SKP_BAD="$SKP_BAD $1(missed)"; fi
+    if [ "$2" = clean ] && [ "$n" -ne 0 ]; then SKP_BAD="$SKP_BAD $1(false-alarm:$(awk "$SKP_AWK" "$SKP_TD/$1.sh" | head -1))"; fi
+}
+skp_case fail_word_in_the_reason hit <<'SKPEOF'
+echo "  foo: SKIP (qemu failed to start)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case piped_into_tee hit <<'SKPEOF'
+echo "  foo: SKIP (no wine)" | tee -a "$LOG"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case pass_one_plus_pass hit <<'SKPEOF'
+echo "  foo: PASS (qemu missing)"
+PASS=$((1 + PASS))
+SKPEOF
+skp_case pass_preincrement hit <<'SKPEOF'
+echo "  foo: PASS (qemu missing)"
+PASS=$((++PASS))
+SKPEOF
+skp_case pass_expr hit <<'SKPEOF'
+echo "  foo: PASS (qemu missing)"
+PASS=$(expr $PASS + 1)
+SKPEOF
+skp_case pass_bare_preincrement hit <<'SKPEOF'
+echo "  foo: PASS (wine absent)"; : $((++PASS))
+SKPEOF
+skp_case heredoc_output hit <<'SKPEOF'
+cat <<EOF
+  foo: SKIP (no wine)
+EOF
+PASS=$((PASS + 1))
+SKPEOF
+skp_case heredoc_tab_stripped hit <<'SKPEOF'
+if true; then
+	cat <<-'EOF'
+	  foo: skipped, no qemu
+	EOF
+fi
+SKPEOF
+skp_case redirect_before_the_words hit <<'SKPEOF'
+echo >&2 "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case printf_redirect_before_the_words hit <<'SKPEOF'
+printf >&2 '  foo: SKIP (no wine)\n'
+PASS=$((PASS + 1))
+SKPEOF
+skp_case fd_redirect_before_the_words hit <<'SKPEOF'
+echo 1>&2 "  foo: SKIP (no wine)"
+SKPEOF
+skp_case heredoc_to_stderr hit <<'SKPEOF'
+cat >&2 <<EOF
+  foo: SKIP (no wine)
+EOF
+SKPEOF
+skp_case heredoc_2_to_1 hit <<'SKPEOF'
+cat 2>&1 <<EOF
+  foo: SKIP (no wine)
+EOF
+SKPEOF
+skp_case echo_wrapper hit <<'SKPEOF'
+say() { echo "$@"; }
+say "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case logger_wrapper hit <<'SKPEOF'
+log() { echo "[$(date +%T)] $*"; }
+log "  foo: skipped (no wine)"
+SKPEOF
+skp_case pass_helper_with_skip_reason hit <<'SKPEOF'
+t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+t10_ok foo "skipped (no wine)"
+SKPEOF
+skp_case pass_helper_with_missing_leg hit <<'SKPEOF'
+c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+c7_ok foo "qemu missing"
+SKPEOF
+skp_case multi_line_pass_helper hit <<'SKPEOF'
+pass_row() {
+    PASS=$((PASS + 1))
+    echo "  $1: PASS ($2)"
+}
+pass_row foo "wine missing"
+SKPEOF
+skp_case eval_single_quoted hit <<'SKPEOF'
+eval 'echo "  foo: SKIP (no wine)"'
+PASS=$((PASS + 1))
+SKPEOF
+skp_case eval_double_quoted hit <<'SKPEOF'
+eval "echo '  foo: SKIP (no wine)'"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case backslash_continuation hit <<'SKPEOF'
+echo \
+    "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case multi_line_quoted_echo hit <<'SKPEOF'
+echo "  foo:
+SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case cat_here_string hit <<'SKPEOF'
+cat <<< "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case tee_here_string hit <<'SKPEOF'
+tee -a "$LOG" <<< "  foo: SKIP"
+SKPEOF
+skp_case bin_echo hit <<'SKPEOF'
+/bin/echo "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case backslash_echo hit <<'SKPEOF'
+\echo "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case fail_safe_disguise hit <<'SKPEOF'
+echo "  foo: FAIL-safe SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case command_echo hit <<'SKPEOF'
+command echo "  foo: SKIP (no wine)"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case builtin_echo hit <<'SKPEOF'
+builtin echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case env_echo hit <<'SKPEOF'
+env LC_ALL=C echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case xargs_echo hit <<'SKPEOF'
+printf 'x' | xargs echo "  foo: SKIP"
+SKPEOF
+skp_case redirect_first hit <<'SKPEOF'
+>&2 echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case file_redirect_first hit <<'SKPEOF'
+2>/dev/null echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case sh_c hit <<'SKPEOF'
+sh -c 'echo "  foo: SKIP (no wine)"'
+PASS=$((PASS + 1))
+SKPEOF
+skp_case bash_c hit <<'SKPEOF'
+bash -c "echo '  foo: SKIP (no wine)'"
+SKPEOF
+skp_case function_keyword_helper hit <<'SKPEOF'
+function ok3 { PASS=$((PASS + 1)); echo "  $1: PASS ($2)"; }
+ok3 foo "skipped: no wine"
+SKPEOF
+skp_case logger_local_copy hit <<'SKPEOF'
+note() { local m=$1; echo "$m"; }
+note "  foo: SKIP (no wine)"
+SKPEOF
+skp_case alias_for_echo hit <<'SKPEOF'
+alias say=echo
+say "  foo: SKIP (no wine)"
+SKPEOF
+skp_case fail_form_then_pass hit <<'SKPEOF'
+echo "  foo: FAIL (no) -- SKIP"
+PASS=$((PASS + 1))
+SKPEOF
+skp_case timeout_echo hit <<'SKPEOF'
+timeout 5 echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case stdbuf_echo hit <<'SKPEOF'
+stdbuf -oL echo "  foo: SKIP"
+SKPEOF
+skp_case nice_echo hit <<'SKPEOF'
+nice -n 5 echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case unknown_wrapper_echo hit <<'SKPEOF'
+mywrap --flag 5 echo "  foo: SKIP (no wine)"
+SKPEOF
+skp_case fail_and_pass_on_one_line hit <<'SKPEOF'
+echo "FAIL: foo (no wine)"; PASS=$((PASS + 1))
+SKPEOF
+skp_case not_skips clean <<'SKPEOF'
+echo "FAIL: foo (skipped, and REQUIRE_FULL_RUN=1 makes every skip a failure)"
+echo "  foo: FAIL (qemu skipped the leg)"
+printf 'FAIL: %s skipped\n' foo
+if echo "$OUT" | grep -qi skip; then FAIL=$((FAIL + 1)); fi
+cat > "$F" <<'EOF'
+fn main() { // skip the rest
+    exit(0)
+}
+EOF
+PASS=$((PASS + 1)); echo "  foo: PASS (both legs ran)"
+X=$(( 1 << n ))
+echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="   # tripwire: not a skip
+c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
+c7_bad foo "qemu skipped the leg"
+echo >&2 "FAIL: foo (skipped)"
+X=$(echo skip)
+t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+t10_ok foo "both legs ran"
+if [ -z "$_miss" ]; then PASS=$((PASS + 1)); echo "  foo: PASS"
+else FAIL=$((FAIL + 1)); echo "FAIL: foo (missing:$_miss)"; fi
+if [ -z "$W" ]; then echo "FAIL: foo (no wine)"; FAIL=$((FAIL + 1)); else PASS=$((PASS + 1)); fi
+grep -q "echo SKIP" "$F" && echo ok
+SKPEOF
+rm -rf "$SKP_TD"
+if [ -z "$SKP_BAD" ]; then   # SKIP-TRIPWIRE-OWN-LINE
+    PASS=$((PASS + 1)); echo "  skip_tripwire_catches_each_bypass: PASS ($SKP_N fixtures: $((SKP_N - 1)) bypasses caught, the non-skips left alone)"   # SKIP-TRIPWIRE-OWN-LINE
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: skip_tripwire_catches_each_bypass ($SKP_BAD)"   # SKIP-TRIPWIRE-OWN-LINE
+fi
+
 # --- Bootstrap test ---
 echo ""
 echo "--- Bootstrap test ---"
@@ -8799,8 +9272,7 @@ if [ -f "$DIR/../build/krc.kr" ]; then
     fi
     rm -f /tmp/krc_bootstrap_$$.kr /tmp/krc2_$$ /tmp/krc3_$$ /tmp/krc4_$$
 else
-    echo "  bootstrap: SKIP (no build/krc.kr)"
-    PASS=$((PASS + 1))
+    skip_row bootstrap "no build/krc.kr"
 fi
 
 echo ""
@@ -8953,8 +9425,7 @@ if shoff + shnum * 64 != len(d):
             echo "  emit_obj_no_extern: FAIL (truncated ELF)"
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  emit_obj_no_extern: SKIP (no python3)"
+        skip_row emit_obj_no_extern "no python3"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -9020,8 +9491,7 @@ print(f'ok: file={len(d)} total_uncomp={total_uncomp}')
             echo "  lz4_real_compression: FAIL"
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  lz4_real_compression: SKIP (no python3)"
+        skip_row lz4_real_compression "no python3"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -9044,8 +9514,17 @@ fn main() {
 KREOF
 KRCBIN="$DIR/../build/krc2"
 cat "$DIR/../src/bcj.kr" "$DIR/../src/runner.kr" > /tmp/krc_rt_kr_$$.kr
-if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
-   && "$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1; then
+# Both compiles are the compiler's own job, so either failing is a FAIL of
+# this row -- never a skip: a regression in compiling src/runner.kr or
+# src/bcj.kr is exactly what this row exists to catch, and no other row
+# builds the runner.
+RT_FAT_OK=0; RT_RUN_OK=0
+"$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 && RT_FAT_OK=1
+"$KRCBIN" --arch=$ARCH /tmp/krc_rt_kr_$$.kr -o /tmp/krc_rt_kr_$$ > /dev/null 2>&1 && RT_RUN_OK=1
+if [ "$RT_FAT_OK" != "1" ] || [ "$RT_RUN_OK" != "1" ]; then
+    FAIL=$((FAIL + 1))
+    echo "  krbo_roundtrip: FAIL (compile failed: fat .krbo ok=$RT_FAT_OK, runner (runner.kr+bcj.kr) ok=$RT_RUN_OK)"
+else
     chmod +x /tmp/krc_rt_kr_$$
     out=$(/tmp/krc_rt_kr_$$ /tmp/krc_rt_$$.krbo 2>&1)
     code=$?
@@ -9056,11 +9535,12 @@ if "$KRCBIN" /tmp/krc_rt_$$.kr -o /tmp/krc_rt_$$.krbo > /dev/null 2>&1 \
         FAIL=$((FAIL + 1))
         echo "  krbo_roundtrip: FAIL (out='$out' code=$code)"
     fi
-else
-    PASS=$((PASS + 1))
-    echo "  krbo_roundtrip: SKIP (runner build)"
 fi
-rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo /tmp/krc_rt_kr_$$
+# Keep the runner this row built: custom_fat_single below uses it (no other
+# row builds one, and dist/kr only exists after `make dist`).
+RT_RUNNER=""
+if [ "$RT_RUN_OK" = "1" ]; then RT_RUNNER="/tmp/krc_rt_kr_$$"; fi
+rm -f /tmp/krc_rt_$$.kr /tmp/krc_rt_kr_$$.kr /tmp/krc_rt_$$.krbo
 
 echo ""
 echo "--- float types ---"
@@ -9583,13 +10063,12 @@ if [ -n "$OSPA_WHY" ]; then
 elif ! echo "$OSPA_RAN" | grep -q ":ran"; then
     FAIL=$((FAIL + 1))
     echo "  os_prune_arch_hosted_runs: FAIL (no leg could run on this host:$OSPA_RAN )"
+elif echo "$OSPA_RAN" | grep -q "SKIP"; then
+    # One leg could not run: the row is only half checked, so it is a skip.
+    skip_row os_prune_arch_hosted_runs "one leg did not run:$OSPA_RAN"
 else
     PASS=$((PASS + 1))
-    if echo "$OSPA_RAN" | grep -q "SKIP"; then
-        echo "  os_prune_arch_hosted_runs: PASS, one leg SKIP ($OSPA_RAN )"
-    else
-        echo "  os_prune_arch_hosted_runs: PASS ($OSPA_RAN )"
-    fi
+    echo "  os_prune_arch_hosted_runs: PASS ($OSPA_RAN )"
 fi
 # (6) The whole get_arch_id crosstable, through the IR: for every target,
 #     `if get_arch_id() == <its documented id> { r = 77 } else { r = 88 }`
@@ -9842,7 +10321,7 @@ for rwi in "win_import_routes_fat_win_x64 win-x64 3 x86_64 32" "win_import_route
     if [ ! -s "$RWI_DIR/o.krbo" ]; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(echo "$RWI_ERR" | head -1))"
     elif ! command -v python3 > /dev/null 2>&1; then
-        PASS=$((PASS + 1)); echo "  $1: SKIP (no python3)"
+        skip_row "$1" "no python3"
     elif ! python3 "$DIR/helpers/krbo_slice.py" "$RWI_DIR/o.krbo" "$3" "$RWI_DIR/o.exe"; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (could not extract slice $3)"
     else
@@ -10298,7 +10777,7 @@ WSR_ERR=$($KRC --targets="$WSR_HOST" "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR
 if [ ! -s "$WSR_DIR/o.krbo" ]; then
     FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (refused: $(printf '%s' "$WSR_ERR" | head -1))"
 elif ! command -v python3 > /dev/null 2>&1; then
-    PASS=$((PASS + 1)); echo "  win_syscall_raw_fat_linux_only_builds: PASS, run SKIP (no python3)"
+    skip_row win_syscall_raw_fat_linux_only_builds "built; the run needs python3"
 elif ! python3 "$DIR/helpers/krbo_slice.py" "$WSR_DIR/o.krbo" "$WSR_ID" "$WSR_DIR/o.bin"; then
     FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (could not extract slice $WSR_ID)"
 else
@@ -10322,7 +10801,7 @@ for wsr in "win_import_unguarded_fat_win_x64 win-x64 3 x86_64 32" "win_import_un
     if [ ! -s "$WSR_DIR/o.krbo" ]; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(printf '%s' "$WSR_ERR" | head -1))"
     elif ! command -v python3 > /dev/null 2>&1; then
-        PASS=$((PASS + 1)); echo "  $1: SKIP (no python3)"
+        skip_row "$1" "no python3"
     elif ! python3 "$DIR/helpers/krbo_slice.py" "$WSR_DIR/o.krbo" "$3" "$WSR_DIR/o.exe"; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (could not extract slice $3)"
     else
@@ -10415,8 +10894,8 @@ echo "--- extern fn (libc linking) ---"
 # links to host libc.
 HOST_M=$(uname -m)
 if [ "$HOST_M" != "x86_64" ] && [ "$HOST_M" != "amd64" ]; then
-    echo "  extern_libc_write: SKIP (non-x86_64 host toolchain)"
-    echo "  extern_libc_strlen_write: SKIP (non-x86_64 host toolchain)"
+    TOTAL=$((TOTAL + 1)); skip_row extern_libc_write "non-x86_64 host toolchain"
+    TOTAL=$((TOTAL + 1)); skip_row extern_libc_strlen_write "non-x86_64 host toolchain"
 elif command -v gcc > /dev/null 2>&1; then
     TOTAL=$((TOTAL + 1))
     cat > /tmp/krc_ext_$$.kr <<'KREOF'
@@ -10471,8 +10950,8 @@ KREOF
     fi
     rm -f /tmp/krc_ext2_$$.kr /tmp/krc_ext2_$$.o /tmp/krc_ext2_linked_$$
 else
-    echo "  extern_libc_write: SKIP (gcc not available)"
-    echo "  extern_libc_strlen_write: SKIP (gcc not available)"
+    TOTAL=$((TOTAL + 1)); skip_row extern_libc_write "gcc not available"
+    TOTAL=$((TOTAL + 1)); skip_row extern_libc_strlen_write "gcc not available"
 fi
 
 echo ""
@@ -10589,12 +11068,12 @@ KREOF
             rm -f /tmp/krc_extres_$$.kr /tmp/krc_extres_$$.o /tmp/krc_extres_bin_$$
         done
     else
-        echo "  extern_resolved_via_obj_link: SKIP (gcc not available)"
-        echo "  extern_resolved_via_obj_link_legacy: SKIP (gcc not available)"
+        TOTAL=$((TOTAL + 1)); skip_row extern_resolved_via_obj_link "gcc not available"
+        TOTAL=$((TOTAL + 1)); skip_row extern_resolved_via_obj_link_legacy "gcc not available"
     fi
 else
-    echo "  extern_resolved_via_obj_link: SKIP (non-x86_64 host toolchain)"
-    echo "  extern_resolved_via_obj_link_legacy: SKIP (non-x86_64 host toolchain)"
+    TOTAL=$((TOTAL + 1)); skip_row extern_resolved_via_obj_link "non-x86_64 host toolchain"
+    TOTAL=$((TOTAL + 1)); skip_row extern_resolved_via_obj_link_legacy "non-x86_64 host toolchain"
 fi
 
 # --emit=obj is where a partial alloc fix would hide: main.kr selects the
@@ -10639,10 +11118,10 @@ KREOF
         fi
         rm -f /tmp/krc_aobj_$$.kr /tmp/krc_aobj_$$.o /tmp/krc_aobj_bin_$$
     else
-        echo "  alloc_oom_emit_obj: SKIP (gcc not available)"
+        TOTAL=$((TOTAL + 1)); skip_row alloc_oom_emit_obj "gcc not available"
     fi
 else
-    echo "  alloc_oom_emit_obj: SKIP (non-x86_64 host toolchain)"
+    TOTAL=$((TOTAL + 1)); skip_row alloc_oom_emit_obj "non-x86_64 host toolchain"
 fi
 
 # Regression: a normal program with no extern fn at all must be completely
@@ -11245,7 +11724,7 @@ lc_fits=$($KRC lc "$DIR/../std/alloc.kr" 2>/dev/null | grep -oE 'fitness: [0-9]+
 lc_max=0
 for f in $lc_fits; do [ "$f" -gt "$lc_max" ] && lc_max=$f; done
 if [ -z "$lc_fits" ] || [ "$lc_max" -ge 50 ]; then
-    PASS=$((PASS + 1)); echo "  lc_ci_gate_behaviour: SKIP (std/alloc.kr has no sub-50-only pattern; max=$lc_max)"
+    skip_row lc_ci_gate_behaviour "std/alloc.kr has no sub-50-only pattern; max=$lc_max"
 else
     $KRC lc --ci "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_bare=$?
     $KRC lc --ci --min-fitness=1 "$DIR/../std/alloc.kr" >/dev/null 2>&1; lc_all=$?
@@ -12020,6 +12499,7 @@ fi
 if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_fat_$$ > /dev/null 2>&1; then
     KR_BIN="$REPO_ROOT/dist/kr"
     [ -x "$KR_BIN" ] || KR_BIN="$REPO_ROOT/dist/kr-android-$HOST_ARCH"
+    [ -x "$KR_BIN" ] || KR_BIN="$RT_RUNNER"
     if [ -x "$KR_BIN" ]; then
         timeout 5 "$KR_BIN" /tmp/krc_fat_$$ > /dev/null 2>&1
         actual=$?
@@ -12030,12 +12510,12 @@ if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/k
             echo "FAIL: custom_fat_single (expected 77, got $actual)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  custom_fat_single: SKIP (no runner)"
+        skip_row custom_fat_single "no runner (krbo_roundtrip could not build one)"
     fi
 else
     echo "FAIL: custom_fat_single (compilation failed)"; FAIL=$((FAIL + 1))
 fi
+[ -n "$RT_RUNNER" ] && rm -f "$RT_RUNNER"
 rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_fat_$$
 
 # Custom 2-slice is smaller than custom 8-slice (same single-slice code path).
@@ -12098,8 +12578,7 @@ if "$KRC" $KRC_FLAGS --emit=obj /tmp/krc_inl_obj_$$.kr -o /tmp/krc_inl_obj_$$.o 
             echo "FAIL: inline_obj_keeps_symbol (helper not in symtab)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1))
-        echo "  inline_obj_keeps_symbol: SKIP (no readelf)"
+        skip_row inline_obj_keeps_symbol "no readelf"
     fi
 else
     echo "FAIL: inline_obj_keeps_symbol (compile failed)"; FAIL=$((FAIL + 1))
@@ -12341,7 +12820,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_hello_boot: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hello_boot "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- Xtensa LX6 first-compilable-leaf disassembly test (Task 3) ---
@@ -12388,7 +12867,7 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
     fi
     rm -f "$XT_BIN"
 else
-    echo "  xtensa_ret42_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_ret42_disasm "xtensa-lx106-elf-objdump not installed"
 fi
 
 # --- Xtensa LX6 ALU ops disassembly test (Task 4) ---
@@ -12474,7 +12953,7 @@ if not found_e:
     fi
     rm -f "$XT_ALU_BIN"
 else
-    echo "  xtensa_alu_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_alu_disasm "xtensa-lx106-elf-objdump not installed"
 fi
 
 # --- Xtensa LX6 loads/stores/IR_COPY disassembly test (Task 5) ---
@@ -12530,7 +13009,7 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; then
     fi
     rm -f "$XT_MEM_BIN"
 else
-    echo "  xtensa_mem_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_mem_disasm "xtensa-lx106-elf-objdump not installed"
 fi
 
 # --- Xtensa LX6 signed ALU ops disassembly test (Task 5 bonus) ---
@@ -12597,7 +13076,7 @@ if not found_f:
     fi
     rm -f "$XT_SGN_BIN"
 else
-    echo "  xtensa_signed_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_signed_disasm "xtensa-lx106-elf-objdump not installed"
 fi
 
 # --- Xtensa LX6 compares + branches + relaxation disasm test (Task 6) ---
@@ -12666,7 +13145,7 @@ if not found:
     fi
     rm -f "$XT_BR_BIN"
 else
-    echo "  xtensa_branch_disasm: SKIP (xtensa-lx106-elf-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_branch_disasm "xtensa-lx106-elf-objdump not installed"
 fi
 
 # --- Xtensa LX6 calls (CALL0 + IR_ARG marshalling + fixups) disasm test (Task 7) ---
@@ -12774,7 +13253,7 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1 && command -v readelf >/d
     fi
     rm -f "$XT_CALL_BIN" "$XT_CALL_CODE"
 else
-    echo "  xtensa_call_disasm: SKIP (xtensa-lx106-elf-objdump/readelf not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_call_disasm "xtensa-lx106-elf-objdump/readelf not installed"
 fi
 
 # --- Xtensa LX6 freestanding UART hello (boots under qemu — MILESTONE 1) ---
@@ -12829,7 +13308,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_HELLO_ELF"
 else
-    echo "  xtensa_hello_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_hello_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 complex program boots and computes correctly (regression) ---
@@ -12876,7 +13355,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_STRESS_ELF"
 else
-    echo "  xtensa_stress_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_stress_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 string literals (IR_STR_CONST via PIC) boot test ---
@@ -12914,7 +13393,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_STR_ELF"
 else
-    echo "  xtensa_str_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_str_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 static globals (IR_STATIC_ADDR/LOAD/STORE) boot test ---
@@ -12954,7 +13433,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_GLB_ELF"
 else
-    echo "  xtensa_globals_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_globals_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 function pointers (Task 7): IR_FN_ADDR(86) + CALL_IND(87) ---
@@ -12993,7 +13472,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_FP_ELF"
 else
-    echo "  xtensa_fnptr_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_fnptr_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 CALL_IND caller-saved-clobber regression (call ceilings) ---
@@ -13039,7 +13518,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_CI_ELF"
 else
-    echo "  xtensa_callind_clobber_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_callind_clobber_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 real BSS (p_memsz > p_filesz) + .bss-zeroing preamble (Task 3) ---
@@ -13115,7 +13594,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_BSS_ELF"
 else
-    echo "  xtensa_bss_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_bss_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 stack arrays + memory intrinsics (merged Task 4+5) boot test ---
@@ -13164,7 +13643,7 @@ A
     fi
     rm -f "$XT_MS_ELF"
 else
-    echo "  xtensa_memstack_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_memstack_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 string/format intrinsics (Task 6) boot test ---
@@ -13206,7 +13685,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_SI_ELF"
 else
-    echo "  xtensa_strfmt_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_strfmt_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 inline assembly (Task 8): IR_ASM_BLOCK(96) ---
@@ -13258,7 +13737,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_ASM_ELF"
 else
-    echo "  xtensa_asm_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_asm_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 CAPSTONE: every freestanding op in one boot image ---
@@ -13301,7 +13780,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_CAP_ELF"
 else
-    echo "  xtensa_capstone_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_capstone_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 large-frame boot test (ADDMI large-frame support) ---
@@ -13343,7 +13822,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_BF_ELF"
 else
-    echo "  xtensa_bigframe_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_bigframe_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa LX6 many-argument boot test (per-function overflow reserve) ---
@@ -13389,7 +13868,7 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     rm -f "$XT_MA_ELF"
 else
-    echo "  xtensa_many_args_boot: SKIP (qemu-system-xtensa not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row xtensa_many_args_boot "qemu-system-xtensa not installed"
 fi
 
 # --- Xtensa frame-cap loud guard (large frames stay loud past ADDMI range) ---
@@ -13498,7 +13977,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t1_strconst: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t1_strconst "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- RISC-V RV32 static-global load/store/addr via pcrel (feature-gap Task 2) ---
@@ -13552,7 +14031,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t2_static: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t2_static "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- RISC-V RV32 string/compare inline loops (feature-gap Task 3) ---
@@ -13658,7 +14137,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t3_strloops: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t3_strloops "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- RISC-V RV32 memory-block inline loops (feature-gap Task 4) ---
@@ -13759,7 +14238,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t4_memblk: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t4_memblk "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- RISC-V RV32 number formatting + frame scratchpad (feature-gap Task 5) ---
@@ -13862,7 +14341,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t5_fmtuint: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t5_fmtuint "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # ============================================================================
@@ -13916,7 +14395,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t6_stackarray: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t6_stackarray "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- RISC-V RV32 function pointers via IR_FN_ADDR (feature-gap Task 7) ---
@@ -13972,7 +14451,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t7_fnptr: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t7_fnptr "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # Compiles examples/riscv-featuregap/t8_ror.kr, which rotates a runtime value.
@@ -14029,7 +14508,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t8_ror: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t8_ror "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # Compiles examples/riscv-featuregap/t9_asm.kr, which exercises inline asm
@@ -14084,7 +14563,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1 \
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_t9_asm: SKIP (qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_t9_asm "qemu-system-riscv32 or riscv64-linux-gnu-objdump not installed"
 fi
 
 # Compiles examples/riscv-hosted/exit_code.kr, which is the Task 1
@@ -14117,7 +14596,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_hosted_exit_code: SKIP (qemu-riscv32-static not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_exit_code "qemu-riscv32-static not installed"
 fi
 
 # riscv32 allocation-failure contract. The only asserting coverage the rv32
@@ -14164,7 +14643,7 @@ RVEOF
     fi
     rm -f "$RV_A_SRC" "$RV_A_BIN"
 else
-    echo "  riscv_alloc_oom_returns_zero: SKIP (qemu-riscv32-static not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_alloc_oom_returns_zero "qemu-riscv32-static not installed"
 fi
 
 # Compiles examples/riscv-hosted/hello.kr, which is the Task 2 hosted-syscall
@@ -14194,7 +14673,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_hosted_hello: SKIP (qemu-riscv32-static not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_hello "qemu-riscv32-static not installed"
 fi
 
 # --- riscv32 hosted struct-arg by-value + by-reference method self ---
@@ -14250,7 +14729,7 @@ RVSP
     fi
     rm -f "$RV_SP_KR" "$RV_SP_BIN"
 else
-    echo "  riscv_hosted_struct_param: SKIP (qemu-riscv32-static not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_struct_param "qemu-riscv32-static not installed"
 fi
 
 # Same hello.kr as riscv_hosted_hello above, but WITH --freestanding: a
@@ -14297,7 +14776,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_hosted_argv: SKIP (qemu-riscv32-static not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_argv "qemu-riscv32-static not installed"
 fi
 
 # Compiles examples/riscv-hosted/heap.kr, the Task 4 hosted-heap test:
@@ -14328,7 +14807,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    echo "  riscv_hosted_heap: SKIP (qemu-riscv32-static not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_heap "qemu-riscv32-static not installed"
 fi
 
 # Compiles examples/riscv-hosted/obj_single.kr with --emit=obj (equiv `-c`),
@@ -14367,7 +14846,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
     fi
     rm -f "$RV_OBJ" "$RV_LINKED"
 else
-    echo "  riscv_hosted_obj_single: SKIP (qemu-riscv32-static or riscv64-linux-gnu-ld not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_obj_single "qemu-riscv32-static or riscv64-linux-gnu-ld not installed"
 fi
 
 # Compiles examples/riscv-hosted/link_a.kr and link_b.kr as SEPARATE
@@ -14412,7 +14891,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
     fi
     rm -f "$RV_LA" "$RV_LB" "$RV_LINKED"
 else
-    echo "  riscv_hosted_link: SKIP (qemu-riscv32-static or riscv64-linux-gnu-ld not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_link "qemu-riscv32-static or riscv64-linux-gnu-ld not installed"
 fi
 
 # --- RISC-V RV32IMC --emit=asm disassembler golden-parity test (Task 7) ---
@@ -14465,7 +14944,7 @@ if command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
     fi
     rm -f "$RV_ASM" "$RV_OBJ" "$RV_OBJMN" "$RV_OURMN"
 else
-    echo "  riscv_hosted_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_asm "riscv64-linux-gnu-objdump not installed"
 fi
 
 # --- RISC-V RV32IMC system/fence/CSR disasm golden-parity test ---
@@ -14515,7 +14994,7 @@ if command -v riscv64-linux-gnu-objdump >/dev/null 2>&1; then
     fi
     rm -f "$RV_SF_ASM" "$RV_SF_OBJ" "$RV_SF_OBJMN" "$RV_SF_OURMN"
 else
-    echo "  riscv_hosted_sysfence_asm: SKIP (riscv64-linux-gnu-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_sysfence_asm "riscv64-linux-gnu-objdump not installed"
 fi
 
 echo ""
@@ -14540,7 +15019,7 @@ if command -v qemu-system-riscv32 >/dev/null 2>&1; then
         rm -f "$RV_E_SRC" "$RV_E_BIN"
     done
 else
-    echo "  riscv32_exit: SKIP (qemu-system-riscv32 not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row riscv32_exit "qemu-system-riscv32 not installed"
 fi
 
 # Pin the emitted constants (spec success-criterion 7). The behavioural
@@ -15199,7 +15678,7 @@ done
 TN_FAT_MAGIC="4b52424f46415400"
 # 5a. No --arch at all: the default-fat-binary path. $KRC under `make test`
 #     is a wrapper that unconditionally injects --arch=x86_64 ahead of every
-#     test's own args (see Makefile:96), which would mask exactly the
+#     test's own args (see the Makefile's test recipe), which would mask exactly the
 #     "arch_set == 0" entrance this case exists to catch. Use the raw
 #     compiler binary instead, same fallback `build/krc2` then `build/krc3`
 #     already used for this reason by the governance test above.
@@ -15297,7 +15776,7 @@ rm -f "$TN_SRC" /tmp/krc_tnone_bin_$$
 #     "else, assume POSIX" shape this sub-project exists to remove.
 echo ""
 echo "--- --debug / --legacy / emit modes / arch x OS pairs ---"
-# Raw compiler binary: under `make test` $KRC is a wrapper (Makefile:96) that
+# Raw compiler binary: under `make test` $KRC is a wrapper (the Makefile's test recipe) that
 # injects --arch=x86_64 ahead of every test's own arguments, which would mask
 # every --arch case in this block. Same build/krc2 then build/krc3 fallback
 # the blocks below use.
@@ -15583,7 +16062,7 @@ if [ -n "$QEMU_A64" ]; then
     fi
     rm -f "$T6_D/oob_ir_a64"
 else
-    echo "  t6_debug_arm64_ir_still_traps: SKIP (no qemu-aarch64-static)"
+    TOTAL=$((TOTAL + 1)); skip_row t6_debug_arm64_ir_still_traps "no qemu-aarch64-static"
 fi
 
 # x86_64 legacy and x86_64 obj: these rows EXECUTE their artifact natively
@@ -15628,11 +16107,11 @@ if [ "$RUN_ARCH" = "x86_64" ]; then
         fi
         rm -f "$T6_D/oob_obj_x64.o" "$T6_D/oob_obj_x64"
     else
-        echo "  t6_debug_obj_x86_64_still_traps: SKIP (no gcc)"
+        TOTAL=$((TOTAL + 1)); skip_row t6_debug_obj_x86_64_still_traps "no gcc"
     fi
 else
-    echo "  t6_debug_legacy_x86_64_still_traps: SKIP (RUN_ARCH=$RUN_ARCH, not x86_64)"
-    echo "  t6_debug_obj_x86_64_still_traps: SKIP (RUN_ARCH=$RUN_ARCH, not x86_64)"
+    TOTAL=$((TOTAL + 1)); skip_row t6_debug_legacy_x86_64_still_traps "RUN_ARCH=$RUN_ARCH, not x86_64"
+    TOTAL=$((TOTAL + 1)); skip_row t6_debug_obj_x86_64_still_traps "RUN_ARCH=$RUN_ARCH, not x86_64"
 fi
 rm -f "$T6_D/oob.kr"
 
@@ -19322,7 +19801,7 @@ echo "--- syscall choke points under --target=none ---"
 CP_SRC="/tmp/krc_choke_$$.kr"
 printf 'fn main() { exit(0) }\n' > "$CP_SRC"
 # Use the RAW compiler binary, not $KRC: under `make test` $KRC is a wrapper
-# (Makefile:96) that unconditionally injects --arch=x86_64 ahead of every
+# (the Makefile's test recipe) that unconditionally injects --arch=x86_64 ahead of every
 # test's own arguments. --arch is last-wins today so the wrapper does not
 # actually mask these cases, but relying on that is exactly the accident
 # Task 1 hit; the raw binary keeps the invocation honest. Same build/krc2
@@ -20431,7 +20910,7 @@ if [ "$ARCH" = "x86_64" ]; then
         echo "FAIL: tn_module_path_linux_is_zero (got '$TN_MPOUT')"; FAIL=$((FAIL + 1))
     fi
 else
-    echo "  tn_module_path_linux_is_zero: SKIP (non-x86_64 host)"
+    TOTAL=$((TOTAL + 1)); skip_row tn_module_path_linux_is_zero "non-x86_64 host"
 fi
 printf 'static uint32 sink = 0\nstatic uint32 buf = 0\nfn main() {\n    sink = get_module_path(buf, 64)\n    loop { }\n}\n' > "$TN_D/mp.kr"
 tn_mp_same_as_linux() { # name, win-mode(artifact|nyi), flags...
@@ -20943,7 +21422,7 @@ ESP_STUB_EOF
     fi
     rm -f "$ESP_STUB_BIN" "$ESP_STUB_CODE" "$ESP_STUB_DIS"
 else
-    echo "  esp32_startup_stub: SKIP (xtensa-lx106-elf-objdump not installed)"
+    TOTAL=$((TOTAL + 1)); skip_row esp32_startup_stub "xtensa-lx106-elf-objdump not installed"
 fi
 
 # --- esp32 hello image: full container + errata-safe UART0 putc (Task 5) ---
@@ -21045,7 +21524,7 @@ if [ "$ESP_H_OK" = 1 ]; then
     # has no xor(), so it is done bitwise by hand.
     ESP_H_WANT=$(od -An -tu1 -j $((ESP_H_LEN - 33)) -N 1 "$ESP_H_BIN" | tr -d ' ')
     ESP_H_GOT=$(od -An -tu1 -v "$ESP_H_PAY" | awk '
-        function xor8(a, b,   i, m, r) {
+        function xor8(a, b,   i, m, r) {   # SKIP-TRIPWIRE-OWN-LINE
             r = 0; m = 1
             for (i = 0; i < 8; i++) {
                 if (int(a / m) % 2 != int(b / m) % 2) r += m
@@ -21084,7 +21563,7 @@ if [ "$ESP_H_OK" = 1 ]; then
         fi
         ESP_H_HASH_NOTE=", SHA-256 recomputed over all $((ESP_H_LEN - 32)) body bytes"
     else
-        ESP_H_HASH_NOTE=" (SHA-256 recompute SKIPPED — no sha256sum)"
+        ESP_H_HASH_NOTE=""; ESP_H_SKIP="$ESP_H_SKIP no sha256sum (SHA-256 recompute);"
     fi
 fi
 # Errata CPU-3.3 direction check — needs the disassembler; skip cleanly if the
@@ -21154,9 +21633,11 @@ if [ "$ESP_H_OK" = 1 ] && command -v xtensa-lx106-elf-objdump >/dev/null 2>&1; t
     esac
     ESP_H_DIS_NOTE=" + AHB/APB direction"
 else
-    ESP_H_DIS_NOTE=" (disasm direction check SKIPPED — no xtensa-lx106-elf-objdump)"
+    ESP_H_DIS_NOTE=""; [ "$ESP_H_OK" = 1 ] && ESP_H_SKIP="$ESP_H_SKIP no xtensa-lx106-elf-objdump (direction check);"
 fi
-if [ "$ESP_H_OK" = 1 ]; then
+if [ "$ESP_H_OK" = 1 ] && [ -n "$ESP_H_SKIP" ]; then
+    skip_row esp32_hello_image "container asserts passed, but a leg did not run:$ESP_H_SKIP"
+elif [ "$ESP_H_OK" = 1 ]; then
     PASS=$((PASS + 1))
     echo "  esp32_hello_image: PASS (e9/02/02/20, 2 segments, entry in IRAM, checksum recomputed, 16-aligned+hash$ESP_H_HASH_NOTE$ESP_H_DIS_NOTE)"
 else
@@ -21655,7 +22136,7 @@ if $KRC $KRC_FLAGS "$LP_DIR/main2.kr" -o "$LP_DIR/collide" >/dev/null 2>&1; then
 fi
 if [ "$LP_EC2" = 48 ]; then
     PASS=$((PASS + 1))
-    echo "  import_longpath_prefix_collision: PASS (255-char prefix twin not skipped)"
+    echo "  import_longpath_prefix_collision: PASS (255-char prefix twin not skipped)"   # tripwire: not a skip -- the twin is not skipped: that is the claim
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: import_longpath_prefix_collision (expected exit 48, got $LP_EC2)"
@@ -21944,8 +22425,7 @@ fi
 for LKM_DRV in mlrift_pci_warm mlrift_pci_cold; do
     TOTAL=$((TOTAL + 1))
     if [ ! -f "$DIR/../examples/$LKM_DRV.kr" ]; then
-        echo "  lkm_driver_$LKM_DRV: SKIP (example not present)"
-        TOTAL=$((TOTAL - 1))
+        skip_row lkm_driver_$LKM_DRV "example not present"
         continue
     fi
     if $KRC --arch=x86_64 --emit=lkm "$DIR/../examples/$LKM_DRV.kr" -o "$LKM_DIR/$LKM_DRV.ko" >/dev/null 2>&1 \
@@ -22016,7 +22496,7 @@ fi
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_doc_agrees: SKIP (doc or manifest missing)"
+    skip_row ir_reference_doc_agrees "doc or manifest missing"
 else
     doc_orphan=$(python3 - "$CITE_DOC" "$CITE_MANIFEST" <<'PYEOF'
 import re, sys
@@ -22053,8 +22533,7 @@ TOTAL=$((TOTAL + 1))
 SRCINFO_PKGBUILD="$DIR/../packaging/aur/PKGBUILD"
 SRCINFO_FILE="$DIR/../packaging/aur/.SRCINFO"
 if [ ! -f "$SRCINFO_PKGBUILD" ] || [ ! -f "$SRCINFO_FILE" ]; then
-    PASS=$((PASS + 1))
-    echo "  aur_srcinfo_in_sync: SKIP (no packaging/aur/ in this checkout)"
+    skip_row aur_srcinfo_in_sync "no packaging/aur/ in this checkout"
 else
     SRCINFO_GEN=$(bash -c '
         set -e
@@ -22610,7 +23089,7 @@ if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
             echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
         fi
     else
-        PASS=$((PASS + 1)); echo "  call_args_25_arm64: PASS (cross-compiles; no qemu to run it)"
+        skip_row call_args_25_arm64 "cross-compiles, but no qemu-aarch64 to run it"
     fi
 else
     echo "FAIL: call_args_25_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
@@ -22730,7 +23209,7 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"   # tripwire: not a skip -- compile-only by design (arch-pinned)
 else
     echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
 fi
@@ -23027,7 +23506,7 @@ rm -f "$CP_BIN"
 # the correct expectation.
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"
+    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"   # tripwire: not a skip -- compile-only by design (arch-pinned)
 else
     echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (six args must still compile on the arch that refuses seven)"; FAIL=$((FAIL + 1))
 fi
@@ -23672,7 +24151,7 @@ AXPY
         echo "FAIL: arx_checksum_independent ($ax_ck)"; FAIL=$((FAIL + 1))
     fi
 else
-    PASS=$((PASS + 1)); echo "  arx_checksum_independent: SKIP (no python3)"
+    skip_row arx_checksum_independent "no python3"
 fi
 
 # Refusals. Each message carries a substring unique to it, so a defect that
@@ -23799,8 +24278,7 @@ rm -f "$ARX_SRC" "$ARX_BIN"
 # assert from a host that cannot run it -- and a silent skip would read as
 # coverage, so it says so.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
-    echo "  asm_call_jmp_reg: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1)); skip_row asm_call_jmp_reg "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 CR_SRC=$(mktemp /tmp/krc_callreg_XXXX.kr)
@@ -23843,8 +24321,7 @@ fi
 # above: the assertion is a byte encoding, meaningless from a host that cannot
 # assemble it, and a silent skip would read as coverage.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
-    echo "  asm_int_imm8: SKIP (x86_64 encodings; host is $RUN_ARCH)"
+    TOTAL=$((TOTAL + 1)); skip_row asm_int_imm8 "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 II_SRC=$(mktemp /tmp/krc_intimm_XXXX.kr)
@@ -24162,8 +24639,7 @@ if $KRC --emit=image --arch=arm64 --target=none --load-addr=0x40010000 \
         echo "FAIL: fatimg_slice_shorter_than_header (exit $fi_st: '$fi_err')"; FAIL=$((FAIL + 1))
     fi
 else
-    echo "  fatimg_slice_shorter_than_header: SKIP (the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture)"
-    PASS=$((PASS + 1))
+    skip_row fatimg_slice_shorter_than_header "the trivial arm64 image is no longer under 64 bytes, so this refusal has no fixture"
 fi
 rm -f "$FI_IMG"
 
@@ -25386,7 +25862,7 @@ MRC_REJ_LEG=$($KRC --arch="$RUN_ARCH" --legacy "$MRC_REJ_SRC" -o /tmp/krc_mrcrej
 if printf '%s' "$MRC_REJ_OUT" | grep -q "may not return a value on all paths" \
    && printf '%s' "$MRC_REJ_LEG" | grep -q "may not return a value on all paths"; then
     PASS=$((PASS + 1))
-    echo "  mainrc_typed_fallthrough_is_rejected: PASS (both backends name the missing return)"
+    echo "  mainrc_typed_fallthrough_is_rejected: PASS (both backends name the missing return)"   # tripwire: not a skip -- the missing return is the error tested
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: mainrc_typed_fallthrough_is_rejected"
@@ -25503,11 +25979,11 @@ bcb_runner() {
         if command -v qemu-x86_64-static > /dev/null 2>&1; then echo "qemu-x86_64-static"; return 0; fi
         if command -v qemu-x86_64 > /dev/null 2>&1; then echo "qemu-x86_64"; return 0; fi
     fi
-    echo "SKIP"
+    echo "SKIP"   # tripwire: not a skip -- bcb_runner's sentinel value, read by its callers
 }
 
 if [ -z "$BCB_KRC" ]; then
-    echo "  arm64_legacy_bounds: SKIP (no build/krc2 or build/krc3)"
+    TOTAL=$((TOTAL + 1)); skip_row arm64_legacy_bounds "no build/krc2 or build/krc3"
 else
 BCB_D=$(mktemp -d)
 
@@ -25550,7 +26026,7 @@ bcb_config() {
     bcb_arch="$2"
     bcb_run=$(bcb_runner "$bcb_arch")
     if [ "$bcb_run" = "SKIP" ]; then
-        echo "  arm64_legacy_bounds_$1: SKIP (cannot execute $bcb_arch binaries on RUN_ARCH=$RUN_ARCH -- no qemu)"
+        TOTAL=$((TOTAL + 1)); skip_row arm64_legacy_bounds_$1 "cannot execute $bcb_arch binaries on RUN_ARCH=$RUN_ARCH -- no qemu"
         return 0
     fi
     BCB_EXECUTABLE=$((BCB_EXECUTABLE + 1))
@@ -25617,8 +26093,7 @@ if [ "$BCB_N" != "$BCB_EXECUTABLE" ]; then
     echo "FAIL: arm64_legacy_bounds_abort_status_agrees ($BCB_EXECUTABLE configs are runnable here but only $BCB_N produced a status -- a config failed to build, so this row has nothing to compare)"
     FAIL=$((FAIL + 1))
 elif [ "$BCB_EXECUTABLE" -lt 2 ]; then
-    PASS=$((PASS + 1))
-    echo "  arm64_legacy_bounds_abort_status_agrees: SKIP (only $BCB_EXECUTABLE config(s) executable here)"
+    skip_row arm64_legacy_bounds_abort_status_agrees "only $BCB_EXECUTABLE config(s) executable here"
 elif [ "$BCB_DIVERGE" = "0" ] && [ "$BCB_FIRST" = "1" ]; then
     PASS=$((PASS + 1))
     echo "  arm64_legacy_bounds_abort_status_agrees: PASS ($BCB_N/4 configs, all exit 1)"
@@ -25635,8 +26110,7 @@ fi
 BCB_A64_RUN=$(bcb_runner arm64)
 TOTAL=$((TOTAL + 1))
 if [ "$BCB_A64_RUN" = "SKIP" ]; then
-    PASS=$((PASS + 1))
-    echo "  arm64_legacy_bounds_absent_without_debug: SKIP (cannot execute arm64 here)"
+    skip_row arm64_legacy_bounds_absent_without_debug "cannot execute arm64 here"
 elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
     chmod +x "$BCB_D/nodbg"
     $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
@@ -26819,8 +27293,8 @@ log_why_all() { local r o=""; for r in library lkm obj-extern bare-metal riscv x
 # log_verdict <reason> <file> <errfile>: prints " <problem>" or nothing. The backstop
 # (skip-reason-ambiguous) fires when the declared reason passes but so does another.
 log_verdict() {
-    if ! log_why_ok "$1" "$2" "$3"; then echo " skip-reason-mismatch:${2#*/../}($1)[$(log_err "$3")]"
-    elif [ "$(log_why_all "$2" "$3")" != " $1" ]; then echo " skip-reason-ambiguous:${2#*/../}($1;passes:$(log_why_all "$2" "$3"))"; fi
+    if ! log_why_ok "$1" "$2" "$3"; then echo " skip-reason-mismatch:${2#*/../}($1)[$(log_err "$3")]"   # tripwire: not a skip -- part of a FAIL message built by the logging rows
+    elif [ "$(log_why_all "$2" "$3")" != " $1" ]; then echo " skip-reason-ambiguous:${2#*/../}($1;passes:$(log_why_all "$2" "$3"))"; fi   # tripwire: not a skip -- part of a FAIL message built by the logging rows
 }
 # Self-check of the matrix on made-up logs: a comment echoing "inline-asm" on an extern error
 # line is NOT an asm error (mismatch for bare-metal, clean for lkm), and a log with two real error
@@ -27451,11 +27925,15 @@ rm -rf "$DUP_D"
 # slice of byte -- and that `addr`/`byte` still work as variable, parameter
 # and field NAMES (including `*(addr as uint32)`). Until the parser's alias
 # pass, `byte` was an unknown name: 8 bytes in a struct, array or cast, and
-# refused as a local. Run natively, on arm64 under qemu, and as a Windows PE
-# under Wine.
+# refused as a local. Run natively, on the other arch under qemu (arm64 on an
+# x86_64 host, x86_64 on an arm64 host), and as a Windows PE under Wine.
 ALI_D=$(mktemp -d /tmp/kralias_XXXXXX)
 ALI_FX="$DIR/fixtures/alias_byte_addr.kr"
-ALI_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+if [ "$RUN_ARCH" = "arm64" ]; then
+    ALI_OTHER=x86_64; ALI_QEMU="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+else
+    ALI_OTHER=arm64; ALI_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
 ALI_WINE="$(wine_path)"
 ali_check() {   # <row> <rc> <stdout file>
     if [ "$2" = "0" ] && [ "$(tr -d '\r' < "$3")" = "OK" ]; then PASS=$((PASS + 1)); echo "  $1: PASS"
@@ -27466,13 +27944,11 @@ if "$DIR/../build/krc2" --arch="$RUN_ARCH" "$ALI_FX" -o "$ALI_D/a" > "$ALI_D/b.l
     "$ALI_D/a" > "$ALI_D/out" 2>/dev/null; ali_check "alias_byte_addr_native_$RUN_ARCH" $? "$ALI_D/out"
 else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_native_$RUN_ARCH (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
 TOTAL=$((TOTAL + 1))
-if [ "$RUN_ARCH" = "arm64" ]; then
-    PASS=$((PASS + 1)); echo "  alias_byte_addr_arm64_qemu: SKIP (the native row is arm64)"
-elif [ -z "$ALI_QEMU" ]; then
-    PASS=$((PASS + 1)); echo "  alias_byte_addr_arm64_qemu: SKIP (no qemu-aarch64)"
-elif "$DIR/../build/krc2" --arch=arm64 "$ALI_FX" -o "$ALI_D/aa" > "$ALI_D/b.log" 2>&1; then
-    timeout 60 "$ALI_QEMU" "$ALI_D/aa" > "$ALI_D/out" 2>/dev/null; ali_check alias_byte_addr_arm64_qemu $? "$ALI_D/out"
-else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_arm64_qemu (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
+if [ -z "$ALI_QEMU" ]; then
+    skip_row alias_byte_addr_${ALI_OTHER}_qemu "no qemu for $ALI_OTHER"
+elif "$DIR/../build/krc2" --arch=$ALI_OTHER "$ALI_FX" -o "$ALI_D/aa" > "$ALI_D/b.log" 2>&1; then
+    timeout 60 "$ALI_QEMU" "$ALI_D/aa" > "$ALI_D/out" 2>/dev/null; ali_check alias_byte_addr_${ALI_OTHER}_qemu $? "$ALI_D/out"
+else FAIL=$((FAIL + 1)); echo "FAIL: alias_byte_addr_${ALI_OTHER}_qemu (build: $(grep -m1 error "$ALI_D/b.log"))"; fi
 TOTAL=$((TOTAL + 1))
 if [ -z "$ALI_WINE" ]; then
     wine_na alias_byte_addr_windows_wine
@@ -27514,7 +27990,7 @@ WFE_SHAPE="$DIR/helpers/win_file_err_shape.py"
 WFE_SKIP=''
 wfe_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 wfe_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
-wfe_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+wfe_skip() { skip_row "$1" "$2"; }
 # wfe_build <out> <arch> <backend: ir|legacy> <target: linux|windows> <fixture>
 wfe_build() {
     local lg="" tg=""
@@ -27595,7 +28071,7 @@ wfe_shape() {
 }
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then wfe_skip win_file_err_shape_selftest "no python3"
-elif WFE_O=$(python3 -I "$WFE_SHAPE" --selftest 2>&1); then wfe_ok win_file_err_shape_selftest "offset-located identical functions, duplicate label, wrong offset, missing BOOL test, clamp register"
+elif WFE_O=$(python3 -I "$WFE_SHAPE" --selftest 2>&1); then wfe_ok win_file_err_shape_selftest "offset-located identical functions, duplicate label, wrong offset, missing BOOL test, clamp register"   # tripwire: not a skip -- "missing BOOL test" names a selftest case of the shape checker
 else wfe_bad win_file_err_shape_selftest "$WFE_O"; fi
 for WFE_B in ir legacy; do
     WFE_S=""; [ "$WFE_B" = "legacy" ] && WFE_S="_legacy"
@@ -27786,18 +28262,17 @@ ali_runs alias_type_after_index_expression 12 'fn main() -> uint64 { uint64[2] a
 # has no braces -- it reads `addr x` -- so without the f-string guard the
 # declaration rules took `addr` for a type (refused as `unexpected 'uint64'`),
 # depending on how many interpolations came before it. Output pinned to the
-# pre-alias compiler's, natively and on arm64 under qemu.
+# pre-alias compiler's, natively and on the other arch under qemu.
 ali_fstr() {   # <row> <stdout, a shell glob: `*` for an unpinnable prefix> <print statement>
     printf 'fn main() -> uint64 {\n    uint64 addr = 7\n    uint64 byte = 5\n    uint64 x = 3\n    uint64 a = 1\n    uint64 b = 2\n    %s\n    return 0\n}\n' "$3" > "$ALI_D/fs.kr"
     local arch out rc
-    for arch in "$RUN_ARCH" arm64; do
+    for arch in "$RUN_ARCH" "$ALI_OTHER"; do
         TOTAL=$((TOTAL + 1))
-        if [ "$arch" = "arm64" ] && [ "$RUN_ARCH" = "arm64" ]; then PASS=$((PASS + 1)); echo "  ${1}_arm64: SKIP (the native row is arm64)"; continue; fi
-        if [ "$arch" = "arm64" ] && [ -z "$ALI_QEMU" ]; then PASS=$((PASS + 1)); echo "  ${1}_arm64: SKIP (no qemu-aarch64)"; continue; fi
+        if [ "$arch" = "$ALI_OTHER" ] && [ -z "$ALI_QEMU" ]; then skip_row ${1}_$arch "no qemu for $arch"; continue; fi
         if ! "$DIR/../build/krc2" --arch=$arch "$ALI_D/fs.kr" -o "$ALI_D/fs" > "$ALI_D/fs.log" 2>&1; then
             FAIL=$((FAIL + 1)); echo "FAIL: ${1}_$arch (refused: $(grep -m1 error "$ALI_D/fs.log"))"; continue
         fi
-        if [ "$arch" = "arm64" ] && [ "$RUN_ARCH" != "arm64" ]; then out=$(timeout 60 "$ALI_QEMU" "$ALI_D/fs" 2>&1); rc=$?
+        if [ "$arch" = "$ALI_OTHER" ]; then out=$(timeout 60 "$ALI_QEMU" "$ALI_D/fs" 2>&1); rc=$?
         else out=$("$ALI_D/fs" 2>&1); rc=$?; fi
         if [ "$rc" = "0" ] && [[ "$out" == $2 ]]; then PASS=$((PASS + 1)); echo "  ${1}_$arch: PASS ($out)"
         else FAIL=$((FAIL + 1)); echo "FAIL: ${1}_$arch (rc=$rc printed '$out', want '$2')"; fi
@@ -27882,7 +28357,7 @@ C7_WINE="$(wine_path)"
 C7_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
-c7_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+c7_skip() { skip_row "$1" "$2"; }
 # Wine itself flakes, measured 2026-10-12 (Proton Experimental), in two ways
 # that are not the program's doing, so both are retried (3 tries):
 #  - the LAUNCH: `wine prog.exe` occasionally prints "ShellExecuteEx failed"
@@ -28719,7 +29194,7 @@ T10_WINE="$(wine_path)"
 T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
-t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+t10_skip() { skip_row "$1" "$2"; }
 # #143 (Windows PE unwind tables) rows report ONLY through these three, so
 # tests/helpers/require_rows.sh sees every one of them (plan rev 4, section 0).
 # Each counts the row itself (TOTAL); call exactly one of them once per row.
@@ -28728,7 +29203,7 @@ t10_skip() { PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
 # accepts a skip of a manifest row.
 pe_row_ok() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 pe_row_bad() { TOTAL=$((TOTAL + 1)); FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2)"; }
-pe_row_skip() { TOTAL=$((TOTAL + 1)); PASS=$((PASS + 1)); echo "  $1: SKIP ($2)"; }
+pe_row_skip() { TOTAL=$((TOTAL + 1)); skip_row "$1" "$2"; }
 # peu_missing <tool>...: the tools absent from PATH, space-separated (empty
 # when all are there). A row that runs tests/helpers/pe_unwind_check.py needs
 # llvm-readobj (C1) and llvm-objdump (C2-C6); without them it SKIPs naming
@@ -31024,7 +31499,7 @@ else
         kill "$S1B_HP" 2>/dev/null; wait "$S1B_HP" 2>/dev/null
         S1B_GOT=$(tr -d '\r' < "$T10_D/win.out")
         if [ "$T10_RC" = "0" ] && [ "$S1B_GOT" = $'missing 2\nheld 16' ]; then
-            t10_ok sys_last_errno_windows_wine "missing 2, held (share mode 0) 16"
+            t10_ok sys_last_errno_windows_wine "missing 2, held (share mode 0) 16"   # tripwire: not a skip -- "missing 2" is errno 2 for the missing file, the result the row wants
         else
             t10_bad sys_last_errno_windows_wine "rc=$T10_RC got '$(printf '%s' "$S1B_GOT" | tr '\n' '|')' want 'missing 2|held 16'; holder said '$(tr -d '\r' < "$T10_D/hold.out" | tr '\n' '|')'; wine output tail: $(t10_errtail)"
         fi
@@ -31395,14 +31870,11 @@ elif [ "$TOTAL" -lt "$README_UNIQ" ]; then
     # were deleted. Those are indistinguishable from here, so say so rather
     # than guessing -- and do not pass silently, which would make this row look
     # like coverage it is not providing on this machine.
-    PASS=$((PASS + 1))
-    echo "  readme_test_count_matches_suite: SKIP (ran $TOTAL, README says $README_UNIQ --"
-    echo "    expected when optional tooling is absent; if this is a FULL run, rows were"
-    echo "    deleted and README.md needs updating to $TOTAL)"
+    skip_row readme_test_count_matches_suite "ran $TOTAL, README says $README_UNIQ -- expected when optional tooling is absent; if this is a FULL run, rows were deleted and README.md needs updating to $TOTAL"
 else
     PASS=$((PASS + 1))
     echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
 fi
 
-echo "=== Results: $PASS/$TOTAL passed, $FAIL failed ==="
+echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="   # tripwire: not a skip -- the results line counts skips
 exit $FAIL
