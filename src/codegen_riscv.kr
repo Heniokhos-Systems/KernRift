@@ -70,7 +70,7 @@ fn emit_program_header_rv32(uint64 text_size) {
 fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // Save the generated code+data blob
     uint64 blob_len = out_len
-    uint64 blob = alloc(blob_len + 16)
+    uint64 blob = cg_alloc(blob_len + 16)
     uint64 ci = 0
     while ci < blob_len {
         uint64 sp = out_buf + ci
@@ -106,7 +106,7 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // idx 1: function names from fn_table, each null-terminated
     // We'll also compute symtab entries count.
     // Allocate temp buffer for strtab content
-    uint64 strtab_buf = alloc(8192)
+    uint64 strtab_buf = cg_alloc(8192)
     uint64 strtab_len = 1  // start at 1 (index 0 = null byte)
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -120,7 +120,7 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
 
     // Build strtab: copy each function name from source
     // Also track name offsets for symtab
-    uint64 name_offsets = alloc(fn_count * 8)
+    uint64 name_offsets = cg_alloc(fn_count * 8)
     uint64 fi = 0
     while fi < fn_count {
         uint64 fentry = fn_table + fi * 8
@@ -154,7 +154,7 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // Append extern function names to strtab and record their offsets
     uint64 extern_name_offsets = 0
     if extern_fn_count > 0 {
-        extern_name_offsets = alloc(extern_fn_count * 8)
+        extern_name_offsets = cg_alloc(extern_fn_count * 8)
         uint64 ei = 0
         while ei < extern_fn_count {
             uint64 xe = extern_fn_table + ei * 8

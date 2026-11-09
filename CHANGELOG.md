@@ -4,6 +4,99 @@ All notable changes to `kernriftc` are documented in this file.
 
 ## Unreleased
 
+**Fixed: a comment in one source file that cites a line of another is checked
+too.** `scripts/gen-ir-reference-citations.py` fingerprinted the citations in
+docs/IR_REFERENCE.md and the `<NAME>.md:<line>` ones in the prose, but not the
+roughly 145 `<file>.kr:<line>` citations in comments under `src/`, and about a
+dozen of those named the wrong line (a function's caller instead of the
+function, an error path's neighbour instead of the error path, a blank line).
+They are corrected and now pinned in `tests/ir_reference_citations.txt` with
+the same checks (range, blank line, "the comment at" a line of code, a
+backquoted function the line is not in). An example diagnostic in backquotes
+and a line named "at <commit>" are not citations.
+
+**Fixed: the `--legacy` Windows `file_open` opens a file for writing with
+`FILE_SHARE_READ`, as the IR backend does.** It asked for
+`FILE_SHARE_READ|FILE_SHARE_WRITE` on every open, so a second writer could
+open a file this handle held. That made the Windows runner's
+`.\kr-run-<n>.lock` no lock in a `--legacy` build: two runners could take the
+same slot. The read path keeps `FILE_SHARE_READ|FILE_SHARE_WRITE`. Both arches
+(x86_64, arm64); a new row checks under Wine that a second `--legacy` writer is
+refused while the file is held.
+
+**Fixed: a character literal holds exactly one character or one escape.** The
+value used to be the first byte after the quote whatever followed: `'AB'` and
+`'ABCDEFGHI'` compiled to 65, `''` to 39 (the closing quote) and a multi-byte
+UTF-8 character to its first byte, all silently. Each is now a located error,
+"a character literal holds exactly one character or one escape".
+
+**Added: a row that builds the compiler itself for every target and mode.**
+All 32 combinations of x86_64/arm64, linux/macos/windows/android and IR /
+`--legacy` / `--emit=obj` / `--emit=asm` are built from the compiler's own
+sources, so a change one backend cannot compile is caught when it is made.
+The only tolerated failure is main's raw-syscall refusal for Windows
+`--legacy` / `--emit=obj` (after the merge with main), with exactly its
+message.
+
+**Fixed: running out of stack is a clean error.** A source nested deeper
+than the stack allows, a small `ulimit -s`, or a `ulimit -v` that stops the
+stack from growing killed `krc` with SIGSEGV (status 139) and no message. On
+Linux and Android a SIGSEGV handler on its own stack now prints
+`krc: out of stack: ...` and exits 1; any other fault still ends in SIGSEGV.
+
+**Fixed: `make test` no longer leaves files in the checkout.** The smoke
+programs file_rw and file_size write a side file under a relative name, and
+the suite ran them from the repository root, so `krc_smoke_rw.tmp` and
+`krc_smoke_size.tmp` stayed there after every run. They now run in a scratch
+directory (as `tests/smoke/run.sh` already did); a row checks the root.
+
+**Fixed: an interrupted test run no longer leaves qemu images behind.** On
+INT/TERM/HUP the suite removed only its `/tmp/krc_*` scratch paths, so the
+qemu rows' `/tmp/uprov_<pid>.img`/`.log` and similar stayed. It now removes
+every `/tmp/<name>_<pid>` name the suite uses, read from the suite itself.
+
+**Fixed: the citation checker reads what a citation says, and covers .md
+files.** A citation can point at a line that exists and has not moved and
+still be wrong: IR_REFERENCE's "the comment at `src/ir.kr:N`" named a line of
+code beside the comment it meant. `scripts/gen-ir-reference-citations.py` now
+refuses "the comment at" a line that is not a comment, and a citation that is
+neither inside nor mentions the function named in backquotes just before it.
+It also fingerprints every `<NAME>.md:<line>` in the prose (top-level and
+docs/ Markdown, src/, tests/run_tests.sh), so a citation into STDLIB.md or
+LANGUAGE.md that goes stale fails `make test`. The citations it found wrong
+were corrected first.
+
+**Fixed: an integer literal that does not fit 64 bits is an error.** The
+literal parser accumulated without a carry check, so `0b` followed by 65
+ones, `0x1_0000_0000_0000_0000` or `18446744073709551616` compiled to a
+wrapped, plausible, wrong value. Every base now stops the compile with a
+located "integer literal does not fit in 64 bits". The largest value that
+fits, written in any base, still compiles.
+
+**Fixed: two `kr` runs at once no longer collide.** The runner wrote every
+extracted program to one fixed path (`/tmp/.kr-exec`, `.\kr-run.exe`,
+`/data/local/tmp/kr-exec`), so a second run failed with "kr: failed to
+create temp file" (the first run's program was executing it) or replaced the
+bytes the first was about to run. Linux and Android now execute from an
+anonymous memfd, or else from a file created exclusively under `$TMPDIR` and
+unlinked before the exec; macOS runs a per-run file under `$TMPDIR` as a
+child and removes it; Windows uses the first of 64 names no running program
+holds; the Termux wrapper hands the runner a per-run `mktemp` file and
+removes it. See LANGUAGE.md §20.
+
+**Fixed: the runner's child route, Windows route and allocations.** With
+`SIGCHLD` ignored by whoever started `kr`, the child route (macOS, and Linux
+without `execveat`) exited 0 whatever the program returned: the kernel reaped
+the program and the failed wait read as success. `kr` now sets `SIGCHLD` to
+its default while it waits, and a fork or wait that fails is an error (exit 1)
+-- including a failed fork on macOS, which returns its errno where the pid
+should be. On Windows a second run could rewrite `.\kr-run-<n>.exe` between
+the first run writing it and its program starting; each slot is now claimed
+by a lock file held until the run ends, and a short write is an error. Every
+allocation in the runner is checked ("kr: out of memory"). The Termux
+wrapper's per-run file now goes under `$TMPDIR`, else `/tmp`, never the
+current directory.
+
 **Fixed: a skipped test row is no longer counted as a pass, or not counted
 at all.** `tests/run_tests.sh` had about 120 skip sites outside `skip_row`:
 48 added to PASS while printing SKIP (every Wine row without Wine through
@@ -1126,7 +1219,7 @@ Both fixes are also pulled in by the v0.1.1 MLRift port.
   Three fixes:
 
   1. **`ir_emit_copy_to_snapshot` was leaking its `pairs` buffer**
-     (`ir.kr:898`). The function is called for every if/else, while,
+     (`ir.kr:1190`). The function is called for every if/else, while,
      and match merge — across the self-host's ~700 functions, that
      was thousands of unfreed allocations. Added the missing
      `dealloc(pairs)`.

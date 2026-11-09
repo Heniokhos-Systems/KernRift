@@ -44,7 +44,7 @@ static uint64 diag_warn_count = 0
 @export
 fn analysis_init() {
     if ann_table == 0 {
-        ann_table = alloc(4096 * 16)
+        ann_table = cg_alloc(4096 * 16)
         ann_count = 0
     }
 }
@@ -52,7 +52,7 @@ fn analysis_init() {
 fn ann_register(uint64 fn_tok, uint64 ann_type, uint64 ann_data) {
     // Lazily allocate: the parser calls this before analysis_init() runs.
     if ann_table == 0 {
-        ann_table = alloc(4096 * 16)
+        ann_table = cg_alloc(4096 * 16)
         ann_count = 0
     }
     if ann_count >= 4096 { return }
@@ -284,7 +284,7 @@ static uint64 lock_edge_count = 0
 // during parse_module() and run_analysis calls this afterwards.
 fn lock_graph_init() {
     if lock_edges == 0 {
-        lock_edges = alloc(1024 * 16)
+        lock_edges = cg_alloc(1024 * 16)
         lock_edge_count = 0
     }
 }
@@ -292,7 +292,7 @@ fn lock_graph_init() {
 fn lock_add_edge(uint64 from_tok, uint64 to_tok) {
     // Lazily allocate for the same reason as ann_register.
     if lock_edges == 0 {
-        lock_edges = alloc(1024 * 16)
+        lock_edges = cg_alloc(1024 * 16)
         lock_edge_count = 0
     }
     if lock_edge_count >= 1024 { return }
@@ -374,8 +374,8 @@ fn lock_dfs(uint64 id) -> uint64 {
 @export
 fn check_lock_cycles() -> uint64 {
     if lock_edge_count == 0 { return 0 }
-    if lock_nodes == 0 { lock_nodes = alloc(256 * 8) }
-    if lock_color == 0 { lock_color = alloc(256) }
+    if lock_nodes == 0 { lock_nodes = cg_alloc(256 * 8) }
+    if lock_color == 0 { lock_color = cg_alloc(256) }
     lock_node_n = 0
     // Intern every endpoint first so ids are stable across the walk.
     uint64 e = 0
@@ -640,7 +640,7 @@ fn run_analysis(uint64 root) -> uint64 {
 
 fn sema_init(uint64 source, uint64 tok_buf) {
     fn_sig_cap = 4096
-    fn_sig_table = alloc(fn_sig_cap * 16)
+    fn_sig_table = cg_alloc(fn_sig_cap * 16)
     fn_sig_count = 0
     sema_errors = 0
     sema_source = source
@@ -682,7 +682,7 @@ fn sema_tok_line(uint64 tok_idx) -> uint64 {
 //   8..15  msg_ptr  (uint64) — pointer to free-form string literal, or 0
 fn diag_init() {
     if diag_table == 0 {
-        diag_table = alloc(1024 * 16)
+        diag_table = cg_alloc(1024 * 16)
     }
     diag_count = 0
     diag_error_count = 0
@@ -951,8 +951,8 @@ static uint64 sema_var_table_v = 0
 static uint64 sema_var_count_v = 0
 
 fn sema_scope_init() {
-    if sema_scope_stack == 0 { sema_scope_stack = alloc(64 * 8) }
-    if sema_var_table_v == 0 { sema_var_table_v = alloc(4096 * 8) }
+    if sema_scope_stack == 0 { sema_scope_stack = cg_alloc(64 * 8) }
+    if sema_var_table_v == 0 { sema_var_table_v = cg_alloc(4096 * 8) }
     sema_scope_depth = 0
     sema_var_count_v = 0
 }
@@ -1172,7 +1172,7 @@ fn fn_sig_register(uint64 name_tok, uint64 param_count, uint64 has_return) {
     // Double the table instead; the old copy is freed after the move.
     if fn_sig_count >= fn_sig_cap {
         uint64 newcap = fn_sig_cap * 2
-        uint64 newtab = alloc(newcap * 16)
+        uint64 newtab = cg_alloc(newcap * 16)
         memcpy(newtab, fn_sig_table, fn_sig_count * 16)
         dealloc(fn_sig_table)
         fn_sig_table = newtab

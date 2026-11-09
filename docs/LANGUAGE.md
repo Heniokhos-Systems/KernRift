@@ -150,8 +150,16 @@ char bad = 97              // compile error — int literal not assignable
   literal (`0b1012`). There are **no octal (`0o`) literals** and no `\u{...}`
   escape: `0o17` is `0` followed by the identifier `o17`, and `'\u{41}'` is
   silently `'u'` (117), not `'A'`.
+- An integer literal must **fit in 64 bits**: anything above
+  18446744073709551615 (`0xFFFFFFFFFFFFFFFF`, 64 binary ones) -- a 65th
+  binary digit, a 17th significant hex digit, a decimal value of 2^64 or more
+  -- is a compile error at the literal ("integer literal does not fit in 64
+  bits"), never a wrapped value. Leading zeros add no value and are fine.
 - Float: `1.5`, `-3.14`, `2e10`, `1.5f` (f32 suffix)
 - Bool: `true`, `false` (strict `bool` type)
+- Char: `'A'`, `'\n'`, `'\x41'` — exactly one character or one escape. `'AB'`,
+  `''` and a multi-byte UTF-8 character are errors ("a character literal holds
+  exactly one character or one escape"); use a string for more than one byte.
 - String: `"hello"` with `\n`, `\t`, `\\`, `\"`, `\0` escapes
 - Character: `'A'`, `'\n'`, `'\t'`, `'\r'`, `'\0'`, `'\\'`, `'\''` — evaluates
   to the byte value of the character (e.g. `'A'` is 65, `'\n'` is 10).
@@ -2449,20 +2457,16 @@ absence. Signing is out of scope for this mode; a signed application would need
 a key, an `sbsign`-equivalent, and a `.reloc`-free image the signer accepts —
 none of which exist here.
 
-**Boot services are out of scope, and a codegen limit blocks them.** These
-applications never touch the `EFI_SYSTEM_TABLE`: they take the firmware's
-entry, drive a UART directly and return. `efi_main(ImageHandle, SystemTable)`
-is not implemented, and calling a boot service would go through `call_ptr`,
-which **silently drops every argument past the sixth** — `src/ir.kr:3151`
-declares `uint64[6] cp_arg_vregs` and `:3155` stops the lowering loop at
-`cp_count < 6`, with no diagnostic and exit 0. Measured on this tree: a
-seven-parameter callee reached through
-`call_ptr(p, 1, 2, 4, 8, 16, 32, 7)` returns **63** on x86_64 (the seventh
-argument was never passed) and **127** on arm64 (never passed either — the
-callee read an uninitialised `x6`, which held `64` from an earlier probe). The
-legacy backend does the same thing: 63. That cap has to be fixed before boot
-services are possible, it is **codegen work rather than container work**, and
-it is not claimed to be the only thing in the way.
+**Boot services.** These applications take the firmware's entry, drive a
+UART directly and return; none of them calls a boot service. Two things this
+paragraph used to name as blockers are gone. The x86_64 entry function now
+receives `ImageHandle` in rcx and `SystemTable` in rdx under the Win64 ABI
+(`src/main.kr:4219`; arm64's AAPCS64 already matches UEFI). And `call_ptr`
+no longer drops every argument past the sixth: its argument array is
+`uint64[64]` (`src/ir.kr:3391`), and `call_ptr(p, 1, 2, 4, 8, 16, 32, 64)`
+into a seven-parameter callee returns **127** on x86_64, on arm64 and on the
+legacy backend — every argument arrives (measured on this tree). Calling a
+boot service from KernRift code is still not shown working here.
 
 **Also deliberately absent:** `--emit=uefi` for riscv32 or xtensa (neither has
 a PE `Machine` value here, and both already own a raw boot path through
@@ -2811,11 +2815,37 @@ kr --help
 
 The `kr` runner auto-detects the host architecture (x86_64 / arm64 / Linux
 / Windows / macOS / Android), extracts the matching slice from `.krbo`,
-BCJ-unfilters the decompressed code, and execves it. On Android (Linux
-≥ 3.17) it uses `memfd_create` + `execveat(AT_EMPTY_PATH)` to bypass
-SELinux file-exec restrictions without writing to cwd; older kernels
-fall back to a `/data/local/tmp/kr-exec` / cwd temp file plus a
-`exit(120)` shell-wrapper trampoline.
+BCJ-unfilters the decompressed code, and executes it -- through a name no
+other run shares, so any number of `kr` runs can happen at once:
+
+- Linux and Android: from an anonymous `memfd_create` descriptor with
+  `execveat(AT_EMPTY_PATH)`, so no file is written. Failing that, from a
+  file created exclusively under `$TMPDIR` (else `/tmp`, or
+  `/data/local/tmp` on Android) as `.kr-exec.<pid>.<n>`, which is unlinked
+  before the exec. Where no descriptor exec works (a kernel without
+  `execveat`, or qemu-user), the macOS route below.
+- macOS: the same exclusive file under `$TMPDIR`, run as a child; `kr`
+  waits, removes the file, and exits with the program's status (or dies of
+  its signal). `SIGCHLD` is set to its default in `kr` while it waits (the
+  program gets the disposition it inherited back), so an ignored `SIGCHLD`
+  cannot turn the program's status into 0; a fork or wait that fails is an
+  error (exit 1), never a status.
+- Windows: `.\kr-run-<n>.exe` for the first of 64 slots whose lock,
+  `.\kr-run-<n>.lock`, `kr` can open for writing. `kr` holds the lock until
+  it exits -- after the program does -- so no other run can rewrite the
+  `.exe` before the program has started. Neither file is removed
+  afterwards: the runner has no way to delete a file there, and
+  `exec_process` ends the runner with the child's exit code; the next runs
+  reuse the slots.
+- Termux, where SELinux refuses the runner's own exec: the `kr` shell
+  wrapper (`packaging/kr.sh`) makes a per-run file with `mktemp` and names
+  it in `KR_EXEC_FALLBACK`; the runner writes the slice there and exits
+  120, and the wrapper runs the file and removes it.
+
+`KR_RUNNER_EXEC=file` or `=fork` forces the file or the child route on
+Linux, and `KR_RUNNER_TRACE=1` makes `kr` name each route on stderr as it
+tries it (the last one named is the one that ran); the suite uses both to
+test the routes.
 
 ---
 

@@ -231,7 +231,7 @@ fn lc_is_len_name(uint64 name_tok) -> uint64 {
 
 @export
 fn collect_telemetry(uint64 root) -> uint64 {
-    uint64 tel = alloc(128)
+    uint64 tel = cg_alloc(128)
     // Zero fill
     uint64 i = 0
     while i < 128 {
@@ -444,7 +444,7 @@ fn check_tail_call_candidate(uint64 block_node) -> uint64 {
 
 @export
 fn detect_patterns(uint64 root, uint64 tel) -> uint64 {
-    lc_patterns = alloc(4096)
+    lc_patterns = cg_alloc(4096)
     lc_pattern_count = 0
 
     uint64 fn_c = tel_get(tel, 0)
@@ -960,7 +960,7 @@ fn prop_set_fires(uint64 idx, uint64 fires) {
 // state — future versions will read from a per-project state file.
 @export
 fn init_proposals() {
-    prop_table = alloc(64 * 56)
+    prop_table = cg_alloc(64 * 56)
     prop_count = 0
 
     // Proposal: slice_for_buffer_params — stable (already in the language)
@@ -1158,7 +1158,7 @@ fn load_proposal_overrides() {
     if fd > 0xFFFFFFFFFFFFF000 { return }
     uint64 fsize = file_size(fd)
     if fsize == 0 { file_close(fd); return }
-    uint64 buf = alloc(fsize + 1)
+    uint64 buf = cg_alloc(fsize + 1)
     // read_exact rather than file_read: the loop is the fix here, so a short
     // return no longer truncates. The count is not inspected -- living mode
     // re-reads on change, so a bad read self-corrects rather than shipping.
@@ -1234,7 +1234,7 @@ fn save_proposal_override(uint64 name, uint64 new_state) {
     prop_set_state_by_name(name, new_state)
 
     // Rewrite the whole file from prop_table (simple, robust)
-    uint64 out = alloc(4096)
+    uint64 out = cg_alloc(4096)
     uint64 off = 0
     uint64 i = 0
     while i < prop_count {
@@ -1892,7 +1892,7 @@ const u64 LC_BAK_SUFFIX_LEN = 6
 
 fn lc_backup_path(uint64 input_path) -> uint64 {
     uint64 plen = str_len(input_path)
-    uint64 out = alloc(plen + LC_BAK_SUFFIX_LEN + 1)
+    uint64 out = cg_alloc(plen + LC_BAK_SUFFIX_LEN + 1)
     memcpy(out, input_path, plen)
     uint64 suffix = ".lcbak"
     memcpy(out + plen, suffix, LC_BAK_SUFFIX_LEN)
@@ -1925,7 +1925,7 @@ fn run_lc_undo(uint64 input_path) {
         exit(1)
     }
     uint64 bsize = file_size(bfd)
-    uint64 bbuf = alloc(bsize + 1)
+    uint64 bbuf = cg_alloc(bsize + 1)
     uint64 _lg2 = read_exact(bfd, bbuf, bsize)
     file_close(bfd)
 
@@ -1953,7 +1953,7 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
         exit(1)
     }
     uint64 fsize = file_size(fd)
-    uint64 src_buf = alloc(fsize + 1)
+    uint64 src_buf = cg_alloc(fsize + 1)
     uint64 _lg3 = read_exact(fd, src_buf, fsize)
     file_close(fd)
     uint64 tp = src_buf + fsize
@@ -1962,7 +1962,7 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
 
     // Worst-case output: every unsafe{} block becomes a slightly longer
     // form (never more than 2x), so 4x is a safe upper bound.
-    uint64 out_buf_m = alloc(fsize * 4 + 1024)
+    uint64 out_buf_m = cg_alloc(fsize * 4 + 1024)
     uint64 matches = 0
     uint8[8] mbuf
     uint64 m_addr = mbuf

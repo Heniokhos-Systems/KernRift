@@ -297,7 +297,7 @@ any occurrence of a forbidden call.
 ### Implementation — IMPLEMENTED
 
 This pass needs no annotations, which is exactly why it is the one that works.
-`check_critical_regions` (`src/analysis.kr:372`) walks each function's
+`check_critical_regions` (`src/analysis.kr:486`) walks each function's
 top-level statement list carrying a `depth` counter. A call to a function
 *named* `acquire` increments it, one named `release` decrements it. Inside a
 `depth > 0` region a call named `alloc` prints:

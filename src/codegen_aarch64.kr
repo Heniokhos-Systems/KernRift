@@ -383,7 +383,7 @@ fn emit_a64_cmp(uint64 rn, uint64 rm) {
 // may be any length (the legacy path's emit_a64_store_x0 is not fixed-size).
 //
 // `scratch` must be dead here: x9 and x10 are both outside the arm64 wide
-// colour file (ir_aarch64.kr:178-183). x11 holds the saved size on the IR
+// colour file (ir_aarch64.kr:390-398). x11 holds the saved size on the IR
 // path — do not pass it.
 //
 // Returns the offset of the branch word, for _tail to patch.
@@ -2326,7 +2326,7 @@ fn gen_expr_a64(uint64 node) {
             uint64 beq_count = 0
             uint64 skip_patch = 0
             if is_wild == 0 {
-                beq_patches = alloc(64)
+                beq_patches = cg_alloc(64)
                 uint64 pat = wval
                 while pat != 0 {
                     uint32 pat_k_raw = ast_kind(pat)
@@ -2607,8 +2607,13 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_load_x0(pk0_fileopen)
                 // x1 = GENERIC_READ|GENERIC_WRITE = 0xC0000000
                 emit_a64_mov_imm(1, 0xC0000000)
-                // x2 = FILE_SHARE_READ|FILE_SHARE_WRITE = 3
+                // x2 = share: 3 - 2*flags. Read (0): FILE_SHARE_READ|WRITE = 3.
+                // Write (1): FILE_SHARE_READ = 1, as the IR backend does, so a
+                // second writer cannot open the file while this handle is held.
+                emit_a64_load_x0(pk1_fileopen)
+                emit_a64_lsl_imm(0, 0, 1)
                 emit_a64_mov_imm(2, 3)
+                emit_a64_sub(2, 2, 0)
                 // x3 = NULL (security)
                 emit_a64_mov_imm(3, 0)
                 // x4 = disposition: 3-flags (read=3=OPEN_EXISTING, write=2=CREATE_ALWAYS)
@@ -4996,7 +5001,7 @@ fn gen_expr_a64(uint64 node) {
         // The overflow set is replayed from the SAME rule the two register
         // passes above use: a float that found no v register (8 of them), an
         // int that found no x register (8). Order is ARGUMENT order.
-        uint64 ovf_idx_a = alloc(arg_count * 8 + 8)
+        uint64 ovf_idx_a = cg_alloc(arg_count * 8 + 8)
         uint64 ovf_n_a = 0
         uint64 ovf_has_struct_a = 0
         uint64 ovf_f_a = 0
@@ -5695,7 +5700,7 @@ fn gen_stmt_a64(uint64 node) {
             uint64 beq_count = 0
             uint64 skip_patch = 0
             if is_wild == 0 {
-                beq_patches = alloc(64)
+                beq_patches = cg_alloc(64)
                 uint64 pat = wval
                 while pat != 0 {
                     uint32 pat_k_raw = ast_kind(pat)

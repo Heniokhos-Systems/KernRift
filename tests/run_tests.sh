@@ -44,13 +44,15 @@ TOTAL=0
 
 # Every skipped row goes through skip_row: it counts in SKIP (never in PASS)
 # and prints one uniform line. The row must already be in TOTAL -- a site
-# whose row is not counted yet increments TOTAL itself first.
+# whose row is not counted yet increments TOTAL itself first. The summary
+# checks PASS + FAIL + SKIP == TOTAL, so a skip that is not accounted for
+# fails the suite.
 #
 # REQUIRE_FULL_RUN=1 is the mode for merge and release gating: every skip is
-# a FAIL, whatever its reason -- a missing tool (wine, python3, a qemu), or
-# the README gate on a partial toolchain. A run in this mode passes only if
-# every row ran and passed. The default (0) keeps a skip a SKIP, for
-# development on a partial box.
+# a FAIL, whatever its reason -- a missing tool, a SKIP_ALLOW precondition,
+# a sub-check that did not run, or the README gate on a partial toolchain. A
+# run in this mode passes only if every row ran and passed. The default (0)
+# keeps a skip a SKIP, for development on a partial box.
 REQUIRE_FULL_RUN="${REQUIRE_FULL_RUN:-0}"
 skip_row() {
     if [ "$REQUIRE_FULL_RUN" = 1 ]; then
@@ -63,8 +65,72 @@ skip_row() {
 "
     echo "  $1: SKIP ($2)"
 }
-# Every skipped row's name, one per line.
+# Every skipped row's name, one per line: on a full run the README gate at the
+# end requires each of them to be in SKIP_ALLOW (a skip with a non-tool reason,
+# named there). A tool row skipped on a full run (QEMU_A64 blanked mid-file,
+# say) is therefore red, not a quiet SKIP.
 SKIP_NAMES=""
+
+# The summary at the end sets SUMMARY_DONE=1 just before the suite's own exit.
+# Any other way out of this file -- a stray `exit 0` in a row, a `set -e`
+# casualty -- would otherwise report whatever status it had with most rows
+# never run; the trap turns it into exit 1.
+# Rows that add their own EXIT cleanup chain it in front of SUITE_EXIT_TRAP
+# and restore SUITE_EXIT_TRAP afterwards, never `trap - EXIT`.
+SUMMARY_DONE=0
+SUITE_EXIT_TRAP='[ "$SUMMARY_DONE" = 1 ] || { echo "FAIL: suite_exit (the suite exited before its summary)"; exit 1; }'
+trap "$SUITE_EXIT_TRAP" EXIT
+
+# Whitespace in the checkout path or in TMPDIR is refused up front: rows pass
+# paths unquoted in hundreds of places ($KRC/$MLRC, $DIR, mktemp results), so
+# such a run would fail rows at random rather than say why.
+case "$DIR" in *[[:space:]]*) echo "FATAL: the checkout path '$DIR' contains whitespace, which this suite does not support; move the checkout" >&2; SUMMARY_DONE=1; exit 2 ;; esac
+case "${TMPDIR:-/tmp}" in *[[:space:]]*) echo "FATAL: TMPDIR '$TMPDIR' contains whitespace, which this suite does not support; unset it or choose another" >&2; SUMMARY_DONE=1; exit 2 ;; esac
+
+# A private TMPDIR for the run, removed at the end: every row that uses
+# mktemp lands in it, so an interrupted run leaves nothing of those behind.
+SUITE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_suite.XXXXXX") && [ -n "$SUITE_TMP" ] && [ -d "$SUITE_TMP" ] \
+    || { echo "FATAL: mktemp -d failed under ${TMPDIR:-/tmp}" >&2; SUMMARY_DONE=1; exit 2; }
+export TMPDIR="$SUITE_TMP"
+SUITE_EXIT_TRAP="rm -rf '$SUITE_TMP'; $SUITE_EXIT_TRAP"
+trap "$SUITE_EXIT_TRAP" EXIT
+
+# Interrupted (make test's traps send TERM to the suite's process group; INT
+# and HUP the same way when run by hand): remove the private TMPDIR and the
+# files rows name after this shell's pid -- /tmp/krc_*_<pid>[...] and
+# <repo>/*_<pid>[...] -- and stop. Nothing is counted; the run is not a pass.
+suite_abort() {
+    rm -rf "$SUITE_TMP" /tmp/krc_*_$$ /tmp/krc_*_$$.* /tmp/krc_*_$$_* /tmp/krc$$_* \
+           "$DIR"/../*_$$ "$DIR"/../*_$$.* "$DIR"/../*_$$_* 2>/dev/null
+    # ...and every other /tmp/<name>_$$ path, by the names this file uses (the
+    # qemu rows' uprov_$$.img/.log, krgz_out_$$.gz, ...), read from the file
+    # itself so a new row's scratch name cannot be missed.
+    local sa_p
+    for sa_p in $(grep -oE '/tmp/[A-Za-z0-9_]+_[$][$]' "$DIR/run_tests.sh" 2>/dev/null | sort -u); do
+        sa_p="${sa_p%??}"
+        rm -rf "$sa_p$$" "$sa_p$$".* "$sa_p$$"_* 2>/dev/null
+    done
+    SUMMARY_DONE=1
+    echo "FAIL: suite_interrupted (signal $1; the run stopped before its summary)"
+    exit "$1"
+}
+trap 'suite_abort 143' TERM
+trap 'suite_abort 129' HUP
+trap 'suite_abort 130' INT
+
+# Per-test wall-clock bound for the run_* helpers' compiled programs, so a
+# miscompile that loops cannot hang the suite: it fails as TIMEOUT. The limit
+# is generous: a row whose program is meant to fault waits for the system's
+# core-dump handler (apport here: about 7 s for one SIGSEGV on an idle box,
+# far more under load). Override with RUN_TEST_TIMEOUT. rb_timed_out RC T0
+# says whether an exit status RC from `timeout` started at $SECONDS == T0 was
+# the limit firing (124 after TERM, 137 after the follow-up KILL) rather than
+# the program's own exit code.
+RUN_TEST_TIMEOUT="${RUN_TEST_TIMEOUT:-120}"
+rb_timed_out() {
+    { [ "$1" = 124 ] || [ "$1" = 137 ]; } && [ $((SECONDS - $2)) -ge "$RUN_TEST_TIMEOUT" ]
+}
+
 # Wine selection (one rule for every Wine row). KR_WINE unset: use `wine` from PATH, and
 # a missing wine is a SKIP through skip_row (wine_na), so a REQUIRE_FULL_RUN=1 run fails
 # and names wine. KR_WINE set but empty or not an executable
@@ -92,8 +158,12 @@ run_test() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_test_$$
         local got=0
-        /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected $expected, got $got)"
@@ -104,7 +174,7 @@ run_test() {
         $KRC $KRC_FLAGS "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ 2>&1 | head -3
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 }
 
 # Like run_test, but bounds wall-clock time. A timeout is reported distinctly
@@ -136,7 +206,7 @@ run_test_timed() {
         echo "FAIL: $name (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 }
 
 run_test_output() {
@@ -152,9 +222,13 @@ run_test_output() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_test_$$
         local got_output
-        got_output=$(/tmp/krc_test_$$ 2>/dev/null)
+        local t0=$SECONDS
+        got_output=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_test_$$ 2>/dev/null)
         local got_exit=$?
-        if [ "$got_output" = "$expected_output" ] && [ "$got_exit" = "$expected_exit" ]; then
+        if rb_timed_out "$got_exit" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"
+            FAIL=$((FAIL + 1))
+        elif [ "$got_output" = "$expected_output" ] && [ "$got_exit" = "$expected_exit" ]; then
             PASS=$((PASS + 1))
         else
             if [ "$got_output" != "$expected_output" ]; then
@@ -168,7 +242,7 @@ run_test_output() {
         echo "FAIL: $name (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 }
 
 # A source that must NOT compile, and the diagnostic that must say why.
@@ -191,7 +265,7 @@ run_test_rejects() {
     local rc
     out="$($KRC $KRC_FLAGS "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_test_$$ 2>&1)"
     rc=$?
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
     if [ $rc -eq 0 ]; then
         echo "FAIL: $name (compiled; expected a rejection)"
         FAIL=$((FAIL + 1))
@@ -958,8 +1032,11 @@ run_bchk_test() {
         rm -f "$REPO_ROOT/test_tmp_$$.kr"
         chmod +x /tmp/krc_bchk_$$
         local got=0
-        /tmp/krc_bchk_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_bchk_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected $expected, got $got)"; FAIL=$((FAIL + 1))
@@ -1044,8 +1121,11 @@ run_store_use_test() {
         echo "FAIL: $name (false unused-variable warning)"; FAIL=$((FAIL + 1))
     else
         local got=0
-        /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then
+        local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_su_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then
+            echo "FAIL: $name (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then
             PASS=$((PASS + 1))
         else
             echo "FAIL: $name (expected exit $expected, got $got)"; FAIL=$((FAIL + 1))
@@ -1153,7 +1233,7 @@ run_test "asm_block" 'fn main() { asm { "nop"; "nop"; "nop" }; exit(7) }' 7
 if [ "$ARCH" != "aarch64" ]; then
     run_test "asm_hex" 'fn main() { asm("0x90"); exit(5) }' 5
 else
-    TOTAL=$((TOTAL+1)); skip_row asm_hex "x86-only"
+    TOTAL=$((TOTAL + 1)); skip_row asm_hex "x86-only"
 fi
 
 # Signedness must survive a CALL RESULT used directly as an operand.
@@ -1273,7 +1353,7 @@ if [ "$ARCH" != "aarch64" ]; then
     }
     fn main() { raw_exit() }' 42
 else
-    TOTAL=$((TOTAL+1)); skip_row naked_fn "x86-only"
+    TOTAL=$((TOTAL + 1)); skip_row naked_fn "x86-only"
 fi
 
 # @noreturn annotation (should compile fine)
@@ -1398,7 +1478,7 @@ VBIND_OK=1
 # the top of this file.
 #
 # Host arch runs natively; the other arch runs under qemu when available.
-# Resolve qemu LOCALLY: $QEMU_A64 is not set until ~line 2950, far below here,
+# Resolve qemu LOCALLY: $QEMU_A64 is not set until line 4448, far below here,
 # so referencing it would be empty and skip configs in silence.
 VBIND_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then VBIND_OTHER="x86_64"; fi
@@ -2996,8 +3076,12 @@ TOTAL=$((TOTAL + 1))
 # '**N-test**' strings (the status table and the support matrix) sat stale at
 # 1356 for three releases underneath a green pin -- a check that could not see
 # the thing it was pinning. Both forms must now agree with the suite.
+# CONTRIBUTING.md states the count too ("N tests on this tree"); it said 1355
+# for months after README was corrected because nothing read it. It counts
+# as one more spelling that must agree.
 README_COUNTS=$( { grep -oE '\*\*[0-9]+ tests\*\*' "$DIR/../README.md"
-                   grep -oE '[0-9]+-test' "$DIR/../README.md" ; } | grep -oE '[0-9]+')
+                   grep -oE '[0-9]+-test' "$DIR/../README.md"
+                   grep -oE '[0-9]+ tests on this tree' "$DIR/../CONTRIBUTING.md" ; } | grep -oE '[0-9]+')
 # An empty capture must FAIL, never compare "" against "" and pass.
 README_N=$(printf '%s\n' "$README_COUNTS" | grep -c '^[0-9][0-9]*$')
 README_UNIQ=$(printf '%s\n' "$README_COUNTS" | sort -u | tr '\n' ' ' | sed 's/ *$//')
@@ -3661,7 +3745,7 @@ if [ "$ARCH" != "aarch64" ]; then
         echo "FAIL: msr_compile (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
     TOTAL=$((TOTAL + 1))
     printf 'fn main() { exit(42) }\n@naked fn msr_test() { asm("wrmsr") }\n' > /tmp/krc_test_$$.kr
@@ -3678,10 +3762,10 @@ if [ "$ARCH" != "aarch64" ]; then
         echo "FAIL: msr_wrmsr_compile (compilation failed)"
         FAIL=$((FAIL + 1))
     fi
-    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+    rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 else
-    TOTAL=$((TOTAL+1)); skip_row msr_compile "x86-only"
-    TOTAL=$((TOTAL+1)); skip_row msr_wrmsr_compile "x86-only"
+    TOTAL=$((TOTAL + 1)); skip_row msr_compile "x86-only"
+    TOTAL=$((TOTAL + 1)); skip_row msr_wrmsr_compile "x86-only"
 fi
 
 # --- Dead Code Elimination test ---
@@ -3878,7 +3962,14 @@ fi
 TOTAL=$((TOTAL + 1))
 if [ "$(uname -m)" != "x86_64" ] && [ "$(uname -m)" != "amd64" ]; then
     skip_row emit_obj_readelf "non-x86_64 host"
-elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
+elif ! command -v readelf > /dev/null 2>&1; then
+    skip_row emit_obj_readelf "readelf not installed"
+elif [ ! -f /tmp/krc_obj_$$.o ]; then
+    # The .o comes from the -c compile above; its absence is a compiler
+    # failure, not a missing tool.
+    FAIL=$((FAIL + 1))
+    echo "  emit_obj_readelf: FAIL (no .o from the -c compile)"
+else
     sections=$(readelf -S /tmp/krc_obj_$$.o 2>/dev/null)
     has_text=$(echo "$sections" | grep -c '\.text')
     has_symtab=$(echo "$sections" | grep -c '\.symtab')
@@ -3892,8 +3983,6 @@ elif command -v readelf > /dev/null 2>&1 && [ -f /tmp/krc_obj_$$.o ]; then
         FAIL=$((FAIL + 1))
         echo "  emit_obj_readelf: FAIL (text=$has_text symtab=$has_symtab main=$has_main add=$has_add)"
     fi
-else
-    skip_row emit_obj_readelf "readelf not found or .o missing"
 fi
 rm -f /tmp/krc_obj_$$.kr /tmp/krc_obj_$$.o /tmp/krc_obj_c_$$.o
 
@@ -4591,8 +4680,10 @@ run_test_legacy() {
     printf '%s\n' "$input" > "$REPO_ROOT/test_tmp_$$.kr"
     if $KRC --arch=$LEGACY_ARCH --legacy "$REPO_ROOT/test_tmp_$$.kr" -o /tmp/krc_leg_$$ > /dev/null 2>&1; then
         rm -f "$REPO_ROOT/test_tmp_$$.kr"; chmod +x /tmp/krc_leg_$$
-        local got=0; /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
-        if [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
+        local got=0; local t0=$SECONDS
+        timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_leg_$$ > /dev/null 2>&1 && got=0 || got=$?
+        if rb_timed_out "$got" "$t0"; then echo "FAIL: $name (legacy: TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$got" = "$expected" ]; then PASS=$((PASS + 1));
         else echo "FAIL: $name (legacy: expected $expected, got $got)"; FAIL=$((FAIL + 1)); fi
     else
         echo "FAIL: $name (legacy compilation failed)"; FAIL=$((FAIL + 1))
@@ -5522,7 +5613,7 @@ fn main() {
     # The arm64 IR backend emitted a 64-bit STLR/LDAR for EVERY volatile access
     # regardless of the declared width, so a u8 write clobbered 7 neighbouring
     # bytes and a u8 read pulled them in. These rows must live inside this
-    # QEMU/x86_64 block: run_test_a64 is defined at :2953 and this block ends
+    # QEMU/x86_64 block: run_test_a64 is defined at :5443 and this block ends
     # at the `fi` below, so calling it later would emit "command not found",
     # never increment TOTAL, and silently pass.
     run_test_a64 "a64_device_narrow_store_no_clobber" 'device Fake at 0x66666000 {
@@ -5966,7 +6057,7 @@ else
     echo "FAIL: migration_apply (command failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f /tmp/krc_mig2_$$.kr /tmp/krc_mig2_bin_$$
+rm -f /tmp/krc_mig2_$$.kr /tmp/krc_mig2_$$.kr.lcbak /tmp/krc_mig2_bin_$$
 
 # krc lc on a file with unsafe ops should report legacy_ptr_ops
 TOTAL=$((TOTAL + 1))
@@ -6485,19 +6576,19 @@ else
     echo "  src/lexer.kr's match_keyword and src/analysis.kr's is_builtin exactly."
 fi
 
-# The other three analysis.kr write() length fixes (ctx-check :165,
-# eff-check :205, lock-cycle :327) cannot be exercised the same way: their
-# callers require populated annotation/lock-graph tables, and
-# src/main.kr's own comment at the `run_analysis` call site says why those
-# tables are permanently empty -- "annotations are not parsed yet, so
-# ann_register and lock_add_edge have no callers" (grep confirms zero call
-# sites for either, anywhere in src/*.kr). So there is no `.kr` program
-# that can reach those three write() calls today; asserting "red before,
-# green after, executed" for them would be fabricated. Pin the byte
-# lengths statically instead -- read the three literals straight out of
-# analysis.kr and assert each write() call's length argument equals the
-# string's real encoded length, so a future length regression is still
-# caught the moment it's introduced, before the day these become reachable.
+# HISTORY. f23c6fa fixed four hand-counted write() lengths in
+# src/analysis.kr. Three of them -- ctx-check, eff-check and lock-cycle
+# (analysis.kr :165, :205 and :327 as of f23c6fa) -- sat in passes nothing
+# could reach: the annotation and lock-graph tables they read had no
+# producer. So that commit pinned their byte lengths statically instead of
+# fabricating an execution test.
+#
+# Both halves of that have changed since. The passes are reachable, and
+# the analysis_ctx_fires, analysis_eff_fires and lock-check rows run them.
+# The three messages are now diag_emit_str calls (src/analysis.kr:149,
+# :210 and :410), which take a pointer and no length, so a wrong length
+# can no longer be written. The row below keeps it that way.
+#
 TOTAL=$((TOTAL + 1))
 # WAS: a byte-length pin on the write(2, msg, N) calls inside the three passes
 # that could never run. It existed because a length in unreachable code cannot
@@ -7738,7 +7829,7 @@ fi
 # The claim that matters for ramfb is not "it compiled" but "QEMU scanned those
 # pixels out". check.py boots the image headless and compares QEMU's own
 # screendump against 13 expected pixel values. Needs qemu-system-x86_64 and
-# python3; noted rather than failed when absent, like the ESP rows above.
+# python3; without either the row is a SKIP (never a pass).
 TOTAL=$((TOTAL + 1))
 if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
     skip_row ramfb_example_draws "pixel check: no qemu-system-x86_64/python3"
@@ -8796,7 +8887,7 @@ else
     echo "FAIL: migration_types (command failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f /tmp/krc_migtypes_$$.kr
+rm -f /tmp/krc_migtypes_$$.kr /tmp/krc_migtypes_$$.kr.lcbak
 
 # --- No skip is counted as a pass, or goes uncounted (tripwire over this file)
 # A row that cannot run goes through skip_row, which counts it in SKIP and,
@@ -11636,33 +11727,18 @@ CITE_MANIFEST="$DIR/ir_reference_citations.txt"
 if [ ! -f "$CITE_MANIFEST" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations (manifest missing)"
 else
-    cite_bad=$(python3 - "$CITE_MANIFEST" "$DIR/.." <<'PYEOF'
-import hashlib, sys, os
-manifest, root = sys.argv[1], sys.argv[2]
-cache, bad = {}, []
-for raw in open(manifest):
-    raw = raw.strip()
-    if not raw or raw.startswith("#"):
-        continue
-    cite, want = raw.split()
-    path, num = cite.rsplit(":", 1)
-    if path not in cache:
-        p = os.path.join(root, path)
-        cache[path] = open(p).read().split("\n") if os.path.exists(p) else []
-    lines, i = cache[path], int(num)
-    got = hashlib.sha1(lines[i-1].strip().encode()).hexdigest()[:12] if i-1 < len(lines) else "MISSING"
-    if got != want:
-        bad.append(cite)
-print(" ".join(bad[:6]) + (f" (+{len(bad)-6} more)" if len(bad) > 6 else ""))
-PYEOF
-)
-    if [ -z "$cite_bad" ]; then
+    # The generator in --check mode: every line the document cites -- the
+    # start of a citation, the end of a range, a bare follow-on number --
+    # must be in the manifest with the same fingerprint, no range may run
+    # backwards, and no line may be past the end of its file.
+    cite_bad=$(python3 "$DIR/../scripts/gen-ir-reference-citations.py" --check 2>&1)
+    if [ $? -eq 0 ]; then
         cite_n=$(grep -vc '^#' "$CITE_MANIFEST")
-        PASS=$((PASS + 1)); echo "  ir_reference_citations: PASS ($cite_n citations still resolve)"
+        PASS=$((PASS + 1)); echo "  ir_reference_citations: PASS ($cite_n cited lines still resolve; no backwards range, none out of range)"
     else
         FAIL=$((FAIL + 1))
-        echo "FAIL: ir_reference_citations (moved: $cite_bad)"
-        echo "  fix the citations in docs/IR_REFERENCE.md, then:"
+        echo "FAIL: ir_reference_citations ($(printf '%s' "$cite_bad" | head -6 | tr '\n' ';')$( [ "$(printf '%s\n' "$cite_bad" | wc -l)" -gt 6 ] && echo " ..."))"
+        echo "  fix the citations it names (docs/IR_REFERENCE.md, or a .md citation in the prose), then:"
         echo "    python3 scripts/gen-ir-reference-citations.py"
         echo "  BUT READ THIS FIRST: the manifest may hold the CORRECT line and"
         echo "  the DOC the stale one, in which case regenerating destroys the"
@@ -11670,6 +11746,85 @@ PYEOF
         echo "  something worth citing before running the generator."
     fi
 fi
+
+# ...and the checker refuses what no code can make right, and what the
+# citation's own words contradict. Run against a copy of the tree's prose (the
+# unmodified copy, as a control, must pass), each doctoring checked for its own
+# message:
+#   - a range whose end is before its start, and a line past the end of a file;
+#   - "the comment at" a line that is code (the class of a citation that read
+#     as valid while naming the wrong line: it pointed at the atomic-RMW check
+#     instead of the IR_SHL_IMM comment beside it);
+#   - a citation after a backquoted function name that is neither in that
+#     function nor mentions it;
+#   - a citation INTO a .md file whose line changed (recorded, then edited),
+#     and one past the end of the .md file;
+#   - a comment in one source file citing another (src->src) whose line
+#     changed, and one past the end of the cited file -- and the two shapes
+#     that are not citations (an example diagnostic in backquotes, and a line
+#     named "at <commit>") are left alone.
+# No .md citation is written literally here: this file's prose is scanned too.
+TOTAL=$((TOTAL + 1))
+CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
+mkdir -p "$CSH_D/scripts" "$CSH_D/tests"
+cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
+cp -R "$DIR/../src" "$CSH_D/src"
+cp -R "$DIR/../docs" "$CSH_D/docs"
+for csh_f in "$DIR"/../*.md; do [ -f "$csh_f" ] && cp "$csh_f" "$CSH_D/"; done
+cp "$DIR/run_tests.sh" "$CITE_MANIFEST" "$CSH_D/tests/"
+CSH_WHY=""
+csh_check() {   # <tag> <want rc> <grep -F pattern...>: --check on the copy as it is now
+    local tag="$1" want="$2" pat; shift 2
+    python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/$tag.out" 2>&1
+    local rc=$?
+    [ "$rc" = "$want" ] || CSH_WHY="$CSH_WHY [$tag: --check exited $rc, want $want: $(head -2 "$CSH_D/$tag.out" | tr '\n' ' ')]"
+    for pat in "$@"; do
+        grep -qF -- "$pat" "$CSH_D/$tag.out" || CSH_WHY="$CSH_WHY [$tag: '$pat' was not reported]"
+    done
+}
+csh_doc="$CSH_D/docs/IR_REFERENCE.md"
+cp "$csh_doc" "$CSH_D/doc.orig"
+csh_check control 0
+printf '\nbackwards (`src/ir.kr:20`\342\200\223`10`) and past the end (`src/ir.kr:99999999`)\n' >> "$csh_doc"
+csh_check shapes 1 "src/ir.kr:20-10 runs backwards" "src/ir.kr:99999999 is past the end of the file"
+csh_code=$(grep -n '^fn ir_opt_cse_is_pure' "$DIR/../src/ir.kr" | cut -d: -f1)
+csh_other=$(grep -n '^fn ir_opt_dce(' "$DIR/../src/ir.kr" | cut -d: -f1)
+cp "$CSH_D/doc.orig" "$csh_doc"
+printf '\nThe comment at `src/ir.kr:%s` says so.\n' "$csh_code" >> "$csh_doc"
+csh_check comment 1 "src/ir.kr:$csh_code is cited as a comment but is code"
+cp "$CSH_D/doc.orig" "$csh_doc"
+printf '\n`ir_opt_cse_is_pure` (`src/ir.kr:%s`) is the whitelist.\n' "$csh_other" >> "$csh_doc"
+csh_check function 1 "src/ir.kr:$csh_other is cited for ir_opt_cse_is_pure but is not in it and does not mention it"
+# The .md half: cite line 1 of the document, record it, then change that line.
+cp "$CSH_D/doc.orig" "$csh_doc"
+csh_md="IR_REFERENCE.md"
+printf '\nSee `docs/%s:%s`, and `docs/%s:%s`.\n' "$csh_md" 1 "$csh_md" 3 >> "$csh_doc"
+python3 "$CSH_D/scripts/gen-ir-reference-citations.py" > /dev/null 2>&1 \
+    || CSH_WHY="$CSH_WHY [could not record the .md citations]"
+grep -qF "docs/$csh_md:1 " "$CSH_D/tests/$(basename "$CITE_MANIFEST")" \
+    || CSH_WHY="$CSH_WHY [the manifest has no docs/$csh_md:1 entry]"
+csh_check mdcontrol 0
+sed -i '1s/$/ (edited)/' "$csh_doc"
+printf 'And `%s:%s`.\n' "$csh_md" 99999999 >> "$csh_doc"
+csh_check md 1 "docs/$csh_md:1 moved" "docs/$csh_md:99999999 is past the end of the file"
+# The src->src half: main.kr cites line 1 of ir.kr; record it, then change that line.
+cp "$CSH_D/doc.orig" "$csh_doc"
+cp "$CSH_D/src/main.kr" "$CSH_D/main.orig"
+printf '\n// See ir.kr:%s. Not citations: `m.kr:%s:1: error` and ir.kr:%s at 0123abc.\n' 1 99999999 99999999 >> "$CSH_D/src/main.kr"
+python3 "$CSH_D/scripts/gen-ir-reference-citations.py" > /dev/null 2>&1 \
+    || CSH_WHY="$CSH_WHY [could not record the src->src citation]"
+grep -qF "src/ir.kr:1 " "$CSH_D/tests/$(basename "$CITE_MANIFEST")" \
+    || CSH_WHY="$CSH_WHY [the manifest has no src/ir.kr:1 entry]"
+csh_check srccontrol 0
+sed -i '1s/$/ \/\/ (edited)/' "$CSH_D/src/ir.kr"
+printf '// And ir.kr:%s.\n' 99999999 >> "$CSH_D/src/main.kr"
+csh_check src 1 "src/ir.kr:1 moved" "src/ir.kr:99999999 is past the end of the file"
+if [ -z "$CSH_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_refuses_bad_shapes: PASS (backwards range, out-of-range line, comment-that-is-code, citation outside its named function, moved and out-of-range .md and src->src citations all fail --check; an example diagnostic and a line named at a commit are not citations; the real prose passes)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_refuses_bad_shapes$CSH_WHY"
+fi
+rm -rf "$CSH_D"
 
 # examples/tutorial-btree ships the page manager from docs/tutorial-btree.md
 # §2 -- the mmap-backed persistence the whole tutorial rests on. The stdlib has
@@ -11800,7 +11955,7 @@ else
     echo "FAIL: debug_divzero (compilation failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
 # Overflow test
 TOTAL=$((TOTAL + 1))
@@ -11820,7 +11975,7 @@ else
     echo "FAIL: debug_overflow (compilation failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
 # Null pointer test
 TOTAL=$((TOTAL + 1))
@@ -11840,7 +11995,7 @@ else
     echo "FAIL: debug_null_ptr (compilation failed)"
     FAIL=$((FAIL + 1))
 fi
-rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$
+rm -f "$REPO_ROOT/test_tmp_$$.kr" /tmp/krc_test_$$ /tmp/krc_test_$$.kr
 
 echo ""
 echo "--- Debug info (-g) ---"
@@ -12584,6 +12739,393 @@ else
     echo "FAIL: inline_obj_keeps_symbol (compile failed)"; FAIL=$((FAIL + 1))
 fi
 rm -f /tmp/krc_inl_obj_$$.kr /tmp/krc_inl_obj_$$.o
+
+# --- inliner: an argument's side effects survive parameter substitution ------
+#
+# inline_try_call replaces a Call with the callee's return expression, cloning
+# each argument's AST into the position(s) where its parameter appears.
+# Eligibility (inline_params_single_use) only required each parameter to be used
+# AT MOST once -- and ZERO satisfies that -- so an argument whose parameter
+# never appeared in the body was never cloned anywhere and its side effects
+# were deleted along with the Call node:
+#
+#     fn f(u64 x, u64 y, u64 z) -> u64 { return x }
+#     println(f(p(), q(), r()))        // printed "10 10": q() and r() never ran
+#
+# The defect hid behind the callee's SIZE rather than its source (enlarge the
+# body past the inline threshold and the identical program is correct) and it
+# hid in the RETURN VALUE too, which stayed 10. Only the missing printed lines
+# showed it -- which is why every row below asserts the transcript or a call-
+# order accumulator, never the exit status alone.
+#
+# Two siblings share the one mechanism, because substitution RELOCATES an
+# argument to wherever its parameter is: parameters read out of parameter order
+# swap their arguments' evaluation order (body `return y - x` ran q() before
+# p()), and a parameter on the rhs of &&/|| makes its argument conditional
+# (body `return a || b` never ran b's argument).
+#
+# The fix is one guard in inline_try_call: a call is inlined only if EVERY
+# argument is effect-free, so relocation is unobservable. All three shapes die
+# to that one guard. inline_pure_args_still_inlined below is the vacuity guard
+# -- without it, degrading the fix into "never inline" would leave every
+# correctness row green while silently killing the pass.
+echo ""
+echo "--- inliner: argument side effects survive substitution ---"
+
+IARG_ROOT="$DIR/.."
+
+# (1) All three shapes, across both backends, both optimisation settings and
+#     both arches. Each source accumulates a decimal digit per argument call in
+#     `seq` (execution order) AND checks the returned value, then exits 7. The
+#     order alone would pass if the result were wrong; the value alone passes
+#     on the buggy compiler, which returned 10 correctly while dropping two
+#     calls. Same shape as the evaluation-order rows above.
+TOTAL=$((TOTAL + 1))
+IARG_OK=1
+IARG_OTHER="arm64"
+if [ "$RUN_ARCH" = "arm64" ]; then IARG_OTHER="x86_64"; fi
+IARG_QEMU=""
+if [ "$IARG_OTHER" = "arm64" ]; then
+    IARG_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+fi
+
+# 1a. A parameter used ZERO times must not delete its argument.
+cat > "$IARG_ROOT/iarg_unused_$$.kr" <<'IARG_UNUSED'
+static u64 seq = 0
+fn ia() -> u64 { seq = seq * 10 + 1  return 10 }
+fn ib() -> u64 { seq = seq * 10 + 2  return 20 }
+fn ic() -> u64 { seq = seq * 10 + 3  return 30 }
+fn f3(u64 x, u64 y, u64 z) -> u64 { return x }
+fn main() {
+    u64 v = f3(ia(), ib(), ic())
+    if seq != 123 { exit(1) }
+    if v != 10 { exit(2) }
+    exit(7)
+}
+IARG_UNUSED
+
+# 1b. Parameters read out of parameter order must not reorder the arguments.
+cat > "$IARG_ROOT/iarg_order_$$.kr" <<'IARG_ORDER'
+static u64 seq = 0
+fn ia() -> u64 { seq = seq * 10 + 1  return 10 }
+fn ib() -> u64 { seq = seq * 10 + 2  return 20 }
+fn f2(u64 x, u64 y) -> u64 { return y - x }
+fn main() {
+    u64 v = f2(ia(), ib())
+    if seq != 12 { exit(1) }
+    if v != 10 { exit(2) }
+    exit(7)
+}
+IARG_ORDER
+
+# 1c. A parameter on the rhs of `||` must not make its argument conditional.
+#     The short-circuit is the callee's business; the ARGUMENT is evaluated at
+#     the call, exactly once, before the callee runs.
+cat > "$IARG_ROOT/iarg_shortcircuit_$$.kr" <<'IARG_SC'
+static u64 seq = 0
+fn ib() -> u64 { seq = seq * 10 + 2  return 20 }
+fn fo(u64 a, u64 b) -> u64 { return a || b }
+fn main() {
+    u64 v = fo(1, ib())
+    if seq != 2 { exit(1) }
+    if v != 1 { exit(2) }
+    exit(7)
+}
+IARG_SC
+
+IARG_RAN=0
+iarg_run() { # <arch> <flags> <src> <runner-or-empty>
+    local _bin="/tmp/krc_iarg_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then
+        IARG_OK=0; echo "  $(basename $3) $1 ${2:-IR}: COMPILE FAILED"
+        return
+    fi
+    if [ -n "$4" ]; then $4 "$_bin" >/dev/null 2>&1; else "$_bin" >/dev/null 2>&1; fi
+    local _rc=$?
+    IARG_RAN=$((IARG_RAN + 1))
+    # 7 = order and value both correct. 1 = an argument was dropped or
+    # reordered, 2 = wrong result.
+    [ "$_rc" = "7" ] || { IARG_OK=0; echo "  $(basename $3) $1 ${2:-IR}: got $_rc, want 7"; }
+    rm -f "$_bin"
+}
+for _src in "$IARG_ROOT/iarg_unused_$$.kr" "$IARG_ROOT/iarg_order_$$.kr" \
+            "$IARG_ROOT/iarg_shortcircuit_$$.kr"; do
+    iarg_run "$RUN_ARCH" ""          "$_src" ""
+    iarg_run "$RUN_ARCH" "--legacy"  "$_src" ""
+    iarg_run "$RUN_ARCH" "--O0"      "$_src" ""
+    if [ -n "$IARG_QEMU" ]; then
+        iarg_run "$IARG_OTHER" ""         "$_src" "$IARG_QEMU"
+        iarg_run "$IARG_OTHER" "--legacy" "$_src" "$IARG_QEMU"
+    fi
+done
+# Guard against the loop silently doing nothing. 3 sources x 3 host configs
+# always; x2 more per source when the other arch is runnable.
+IARG_WANT=9
+if [ -n "$IARG_QEMU" ]; then IARG_WANT=15; fi
+[ "$IARG_RAN" = "$IARG_WANT" ] || { IARG_OK=0; echo "  only $IARG_RAN/$IARG_WANT config-runs executed"; }
+if [ "$IARG_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_arg_effects_preserved: PASS ($IARG_RAN config-runs)"
+else
+    echo "FAIL: inline_arg_effects_preserved"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_unused_$$.kr" "$IARG_ROOT/iarg_order_$$.kr" \
+      "$IARG_ROOT/iarg_shortcircuit_$$.kr"
+
+# (2) The same three shapes as PRINTED TRANSCRIPTS, in the exact form the
+#     defect was reported in. The accumulator rows above can only see effects a
+#     program can observe in its own memory; these see what a user sees, and
+#     they are the rows whose "got" string names the two lines that went
+#     missing.
+run_test_output "inline_argeff_unused_transcript" '
+import "std/io.kr"
+fn p() -> u64 { println(10) return 10 }
+fn q() -> u64 { println(11) return 20 }
+fn r() -> u64 { println(12) return 30 }
+fn f(u64 x, u64 y, u64 z) -> u64 { return x }
+fn main() { println(f(p(), q(), r())) exit(0) }' '10
+11
+12
+10'
+run_test_output "inline_argeff_order_transcript" '
+import "std/io.kr"
+fn p() -> u64 { println(10) return 10 }
+fn q() -> u64 { println(11) return 20 }
+fn g(u64 x, u64 y) -> u64 { return y - x }
+fn main() { println(g(p(), q())) exit(0) }' '10
+11
+10'
+run_test_output "inline_argeff_shortcircuit_transcript" '
+import "std/io.kr"
+fn q() -> u64 { println(11) return 20 }
+fn h(u64 a, u64 b) -> u64 { return a || b }
+fn main() { println(h(1, q())) exit(0) }' '11
+1'
+
+# (3) THE GUARD FIRES, observed in the artifact rather than inferred. `side()`
+#     writes a static -- a REAL effect, and not itself an inline candidate --
+#     and `pick`'s body never mentions the parameter it is passed to. Before
+#     the fix main contained NO call at all: pick was inlined and side() was
+#     deleted with the argument list. After it, main calls pick, which calls
+#     side(). Two calls, and the VALUE is asserted too, since the right IR
+#     shape with the wrong arithmetic would otherwise pass.
+TOTAL=$((TOTAL + 1))
+IEFF_OK=1
+cat > "$IARG_ROOT/iarg_emit_$$.kr" <<'IARG_EMIT'
+static u64 hit = 0
+fn side() -> uint64 { hit = 1  return 4 }
+fn pick(uint64 a, uint64 b, uint64 c) -> uint64 { return a + c }
+fn main() {
+    u64 v = pick(7, side(), 9)
+    if hit != 1 { exit(1) }
+    if v != 16 { exit(2) }
+    exit(7)
+}
+IARG_EMIT
+IEFF_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$IARG_ROOT/iarg_emit_$$.kr" 2>/dev/null)
+# Sanity first: a dump with no `function main:` in it is not evidence.
+echo "$IEFF_IR" | grep -q "function main:" || { IEFF_OK=0; echo "  no 'function main:' in IR dump -- dump is not what we think"; }
+IEFF_N=$(echo "$IEFF_IR" | sed -n '/function main:/,$p' | grep -c "call @")
+[ "$IEFF_N" -ge 1 ] || { IEFF_OK=0; echo "  main holds $IEFF_N calls: the effecting argument was inlined away"; }
+for _fl in "" "--legacy" "--O0"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$IARG_ROOT/iarg_emit_$$.kr" -o "/tmp/krc_ieff_$$" >/dev/null 2>&1; then
+        "/tmp/krc_ieff_$$" >/dev/null 2>&1; _rc=$?
+        [ "$_rc" = "7" ] || { IEFF_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        IEFF_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_ieff_$$"
+done
+if [ "$IEFF_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_effecting_arg_emits_real_call: PASS ($IEFF_N call(s) kept in main)"
+else
+    echo "FAIL: inline_effecting_arg_emits_real_call"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_emit_$$.kr"
+
+# (4) VACUITY GUARD. The guard is per-CALL-SITE, not per-callee: a candidate
+#     must still be inlined wherever its arguments are idents, literals or
+#     arithmetic over them, which is every site in this tree's own corpus.
+#     Without this row, replacing the fix with "never inline anything" would
+#     leave every row above green and silently delete the pass.
+TOTAL=$((TOTAL + 1))
+IVAC_OK=1
+cat > "$IARG_ROOT/iarg_vacuity_$$.kr" <<'IARG_VAC'
+fn pick(uint64 a, uint64 b, uint64 c) -> uint64 { return a + b }
+fn main() {
+    u64 t = 3
+    u64 v = pick(t, t + 1, 9)
+    if v != 7 { exit(1) }
+    exit(7)
+}
+IARG_VAC
+IVAC_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$IARG_ROOT/iarg_vacuity_$$.kr" 2>/dev/null)
+echo "$IVAC_IR" | grep -q "function main:" || { IVAC_OK=0; echo "  no 'function main:' in IR dump -- dump is not what we think"; }
+IVAC_N=$(echo "$IVAC_IR" | sed -n '/function main:/,$p' | grep -c "call @")
+[ "$IVAC_N" = "0" ] || { IVAC_OK=0; echo "  main holds $IVAC_N call(s): pure-argument call sites stopped being inlined"; }
+for _fl in "" "--legacy" "--O0"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$IARG_ROOT/iarg_vacuity_$$.kr" -o "/tmp/krc_ivac_$$" >/dev/null 2>&1; then
+        "/tmp/krc_ivac_$$" >/dev/null 2>&1; _rc=$?
+        [ "$_rc" = "7" ] || { IVAC_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        IVAC_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_ivac_$$"
+done
+if [ "$IVAC_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_pure_args_still_inlined: PASS (no call left in main)"
+else
+    echo "FAIL: inline_pure_args_still_inlined"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_vacuity_$$.kr"
+
+# (5) BOTTOM-UP WALK: a candidate argument must not block its caller. The
+#     argument-effect guard above reads an un-inlined candidate CALL as impure,
+#     so with the old top-down walk (`inline_try_call` before the children
+#     loop) the ordinary helper-over-helper idiom `outer(inner(x))` declined
+#     `outer` and left a real call behind -- a pessimisation introduced by the
+#     guard, not by the defect it fixes. Walking children first inlines
+#     `inner`, which makes the argument effect-free, and then `outer` inlines
+#     too. Both calls must be gone, and the VALUE is asserted as well because
+#     the right IR shape with the wrong arithmetic would otherwise pass.
+TOTAL=$((TOTAL + 1))
+INEST_OK=1
+cat > "$IARG_ROOT/iarg_nested_$$.kr" <<'IARG_NEST'
+fn inner(uint64 x) -> uint64 { return x + 1 }
+fn outer(uint64 a, uint64 b) -> uint64 { return a * b }
+fn main() {
+    u64 t = 3
+    u64 v = outer(inner(t), 2)
+    if v != 8 { exit(1) }
+    exit(7)
+}
+IARG_NEST
+INEST_IR=$($KRC --emit=ir --arch="$RUN_ARCH" "$IARG_ROOT/iarg_nested_$$.kr" 2>/dev/null)
+echo "$INEST_IR" | grep -q "function main:" || { INEST_OK=0; echo "  no 'function main:' in IR dump -- dump is not what we think"; }
+INEST_N=$(echo "$INEST_IR" | sed -n '/function main:/,$p' | grep -c "call @")
+[ "$INEST_N" = "0" ] || { INEST_OK=0; echo "  main holds $INEST_N call(s): a candidate argument is still blocking its caller (top-down walk?)"; }
+for _fl in "" "--legacy" "--O0"; do
+    if $KRC --arch="$RUN_ARCH" $_fl "$IARG_ROOT/iarg_nested_$$.kr" -o "/tmp/krc_inest_$$" >/dev/null 2>&1; then
+        "/tmp/krc_inest_$$" >/dev/null 2>&1; _rc=$?
+        [ "$_rc" = "7" ] || { INEST_OK=0; echo "  ${_fl:-IR}: got $_rc, want 7"; }
+    else
+        INEST_OK=0; echo "  ${_fl:-IR}: COMPILE FAILED"
+    fi
+    rm -f "/tmp/krc_inest_$$"
+done
+if [ "$INEST_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_nested_candidate_inlines_through: PASS (no call left in main)"
+else
+    echo "FAIL: inline_nested_candidate_inlines_through"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_nested_$$.kr"
+
+# (6) INLINING MUST NOT DECIDE WHETHER A PROGRAM WORKS.
+#
+# THIS ROW DOES NOT ASSERT THAT A CRASH IS CORRECT. It asserts that the
+# inliner is not the variable, and it exists because the argument-effect guard
+# UNMASKED a pre-existing `--legacy` defect that the inliner had been hiding.
+#
+# The defect (registered separately, not fixed here): under `--legacy`, a
+# struct-by-value call used as a NESTED ARGUMENT -- `h(get(bx), 2)` -- crashes
+# on both x86_64 and arm64, while `get(bx)` on its own is fine. It has nothing
+# to do with inlining: with `h` made a non-candidate it crashed before this fix
+# too. But while `h` WAS being inlined, `get(bx)` was relocated into h's body
+# and the crash did not happen, so the same source worked or died depending on
+# whether the callee happened to be small enough to inline. That is the thing
+# this row pins: the two spellings must now agree.
+#
+# So the check is a COMPARISON, not an expected exit code. It passes today with
+# both spellings failing, and it will keep passing on the day the `--legacy`
+# struct-by-value defect is fixed and both spellings succeed. It fails only if
+# inlining starts changing the answer again. The IR backend is asserted
+# CORRECT (7) in both spellings, so the row cannot pass by everything being
+# broken everywhere.
+TOTAL=$((TOTAL + 1))
+ISBV_OK=1
+ISBV_SKIP=""
+cat > "$IARG_ROOT/iarg_sbv_cand_$$.kr" <<'IARG_SBV_C'
+struct SBox { u64 v }
+fn sget(SBox b) -> u64 { return b.v }
+fn sh(u64 a, u64 b) -> u64 { return a + b }
+fn main() {
+    SBox bx
+    bx.v = 5
+    u64 v = sh(sget(bx), 2)
+    if v != 7 { exit(1) }
+    exit(7)
+}
+IARG_SBV_C
+# Same program, `sh` deliberately NOT an inline candidate (two statements, so
+# inline_body_expr rejects it). Everything else is identical.
+cat > "$IARG_ROOT/iarg_sbv_nocand_$$.kr" <<'IARG_SBV_N'
+struct SBox { u64 v }
+static u64 sink = 0
+fn sget(SBox b) -> u64 { return b.v }
+fn sh(u64 a, u64 b) -> u64 { sink = 1  return a + b }
+fn main() {
+    SBox bx
+    bx.v = 5
+    u64 v = sh(sget(bx), 2)
+    if v != 7 { exit(1) }
+    exit(7)
+}
+IARG_SBV_N
+isbv_rc() { # <arch> <flags> <src> -> echoes the exit status, or 200 on a compile failure
+    local _bin="/tmp/krc_isbv_$$"
+    if ! $KRC --arch="$1" $2 "$3" -o "$_bin" >/dev/null 2>&1; then echo 200; return; fi
+    if [ "$1" = "$RUN_ARCH" ]; then "$_bin" >/dev/null 2>&1
+    elif [ -n "$IARG_QEMU" ]; then $IARG_QEMU "$_bin" >/dev/null 2>&1
+    else rm -f "$_bin"; echo skip; return; fi   # tripwire: not a skip -- the helper's sentinel value; the row turns it into skip_row
+    local _rc=$?
+    rm -f "$_bin"
+    echo "$_rc"
+}
+# The IR backend must be CORRECT for both spellings -- this is the half that
+# keeps the comparison below from being satisfied by universal breakage.
+ISBV_NOTE=""
+for _sp in cand nocand; do
+    _rc=$(isbv_rc "$RUN_ARCH" "" "$IARG_ROOT/iarg_sbv_${_sp}_$$.kr")
+    [ "$_rc" = "7" ] || { ISBV_OK=0; echo "  IR $_sp: got $_rc, want 7"; }
+done
+# And `--legacy` must give the SAME answer either way, on every runnable arch.
+for _a in "$RUN_ARCH" "$IARG_OTHER"; do
+    _c=$(isbv_rc "$_a" "--legacy" "$IARG_ROOT/iarg_sbv_cand_$$.kr")
+    _n=$(isbv_rc "$_a" "--legacy" "$IARG_ROOT/iarg_sbv_nocand_$$.kr")
+    if [ "$_c" = "skip" ]; then ISBV_SKIP="$ISBV_SKIP $_a --legacy (no qemu for it)"; continue; fi
+    # 200 is isbv_rc's compile-failure sentinel, and it must FAIL rather than
+    # compare equal. The IR half above cannot see this: if --legacy ever
+    # started REFUSING both spellings, "they agree" would be satisfied by
+    # total legacy breakage and this row would pass with a note.
+    for _s in "$_c" "$_n"; do
+        [ "$_s" = "200" ] && { ISBV_OK=0; echo "  $_a --legacy: compile FAILED (sentinel 200) -- not an outcome this row accepts"; }
+    done
+    if [ "$_c" != "$_n" ]; then
+        ISBV_OK=0
+        echo "  $_a --legacy: inlined spelling gave $_c, non-inlined gave $_n -- inlining is deciding whether this program works"
+    fi
+    ISBV_NOTE="$ISBV_NOTE $_a=$_c"
+    # A note, never a failure: 139 is the known `--legacy` struct-by-value
+    # nested-argument defect. When it is fixed both become 7 and this row
+    # still passes; only the note changes.
+done
+if [ "$ISBV_OK" = "1" ] && [ -n "$ISBV_SKIP" ]; then
+    skip_row inline_does_not_decide_struct_byval_outcome "a leg did not run:$ISBV_SKIP"
+elif [ "$ISBV_OK" = "1" ]; then
+    PASS=$((PASS + 1))
+    echo "  inline_does_not_decide_struct_byval_outcome: PASS (IR correct both spellings; --legacy agrees:$ISBV_NOTE -- 139 = the known legacy struct-by-value nested-arg defect, not asserted as correct)"
+else
+    echo "FAIL: inline_does_not_decide_struct_byval_outcome"
+    FAIL=$((FAIL + 1))
+fi
+rm -f "$IARG_ROOT/iarg_sbv_cand_$$.kr" "$IARG_ROOT/iarg_sbv_nocand_$$.kr"
 
 # --- std/alloc.kr smoke ---
 echo ""
@@ -13599,7 +14141,7 @@ fi
 
 # --- Xtensa LX6 stack arrays + memory intrinsics (merged Task 4+5) boot test ---
 # mem_stack.kr exercises IR_STACK_ADDR (32) together with IR_MEMSET (76) /
-# IR_MEMCPY (72) / IR_MEMCMP (88) — ir.kr:3419 emits IR_STACK_ADDR only ever
+# IR_MEMCPY (72) / IR_MEMCMP (88) — ir.kr:4478 emits IR_STACK_ADDR only ever
 # paired with an unconditional IR_MEMSET zero-init for every local array, so
 # the two can't be tested apart. Part 1: `u32[4] a` prints a[0] BEFORE any
 # write (proves the implicit zero-init), fills a[i]=i+1, prints the sum.
@@ -13692,7 +14234,7 @@ fi
 # inline_asm.kr prints 'X', then an operand-less multi-line `asm { "memw" "nop" }`
 # block, then 'Y'. Boot equality (XY) proves the block did not perturb the
 # surrounding putc calls. The block is deliberately operand-less — the upstream
-# constraint binding hardcodes x86 reg codes (ir.kr:4225), out of scope here.
+# constraint binding hardcodes x86 reg codes (ir.kr:5456), out of scope here.
 # Structural gate (when the xtensa objdump is present): assert a `nop` is emitted.
 # A `memw` grep would NOT discriminate — putc emits its own MEMW MMIO barriers on
 # every device access — but NOTHING else in the backend emits `nop`, so a present
@@ -14513,8 +15055,8 @@ fi
 
 # Compiles examples/riscv-featuregap/t9_asm.kr, which exercises inline asm
 # (IR_ASM_BLOCK 96): a raw hex word `asm("0x00150513")` = `addi a0,a0,1` bound
-# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:4214/
-# 4237), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
+# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:5451/
+# 5444), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
 # raw word is a COMPRESSIBLE encoding (rd==rs1, simm6 imm) so its objdump
 # survival as a full 4-byte `addi a0,a0,1` proves the handler marked the range
 # non-compressible; and the boot proves in/out constraint binding actually
@@ -15051,7 +15593,7 @@ printf 'fn main() { exit(42) }\n' > "$XT_E_SRC"
 # esp32 must REFUSE, with the new wording, and must exit non-zero: a
 # print-and-continue regression would still match the grep below while
 # happily emitting SIMCALL into an ESP32 image (xtensa_framecap_guard,
-# tests/run_tests.sh:5936, checks its rc the same way).
+# tests/run_tests.sh:14383, checks its rc the same way).
 XT_REFUSE_ERR=$($KRC --arch=xtensa --freestanding --target=esp32 "$XT_E_SRC" -o /dev/null 2>&1)
 XT_REFUSE_RC=$?
 if [ $XT_REFUSE_RC -ne 0 ] && echo "$XT_REFUSE_ERR" | grep -q "no OS to return an exit status to"; then
@@ -15105,7 +15647,7 @@ rm -f "$XT_WR_SRC"
 
 # --- std/net.kr sockaddr byte order ---
 # net_addr_ipv4 documents its `ip` argument as host order (std/net.kr header
-# comment, STDLIB.md:444) but stored it raw, so the documented 0x7F000001
+# comment, STDLIB.md:484) but stored it raw, so the documented 0x7F000001
 # resolved to 1.0.0.127 -- while sin_port two bytes earlier WAS converted via
 # net_htons, leaving one struct carrying one field in each byte order.
 #
@@ -19834,8 +20376,8 @@ done
 # validation under --target=none (asserted by t6_legacy_tnone_* above).
 # --emit=obj is: it reaches the SAME src/codegen.kr and
 # src/codegen_aarch64.kr dispatch on both arches -- x86_64 through the
-# `emit_mode != 3` guard at src/main.kr:2611 and arm64 through the one at
-# :2621 -- so retargeting these assertions onto it keeps every legacy
+# `emit_mode != 3` guard at src/main.kr:4250 and arm64 through the one at
+# :4005 -- so retargeting these assertions onto it keeps every legacy
 # bare-metal guard live and tested rather than turning them into unreachable
 # code with no coverage. That is also why --emit=obj is ALLOWED on bare metal
 # and --legacy is not: dropping both would have deleted this block.
@@ -19873,7 +20415,7 @@ done
 # file_read; nr 8 is file_size twice), so a regression to the coarse "syscall"
 # label -- or a cross-wired name, which is worse -- must fail here.
 # println_str and time_ns are deliberately absent. The legacy backend shares
-# ONE lowering for print_str/println_str (src/codegen.kr:6405) and names it
+# ONE lowering for print_str/println_str (src/codegen.kr:8648) and names it
 # "print_str" for both, and its time_ns() body reaches the emitter through the
 # surrounding exit() first -- so asserting either name here would be asserting
 # something untrue. Both builtins ARE covered, on both arches, by the
@@ -21112,12 +21654,12 @@ fi
 # claimed every site. Three live wrong lengths sat behind that blind spot the
 # whole time, all in the --emit=asm listing writer, which writes to an opened
 # file rather than to stdout/stderr:
-#   main.kr:903   "; KernRift assembly listing\n" declared 27, real 28 -- the
+#   main.kr:1153  "; KernRift assembly listing\n" declared 27, real 28 -- the
 #                 listing header lost its newline and ran straight into
 #                 "; Architecture: x86_64". Observed on the wire.
-#   main.kr:1461  "           mfence"            declared 18, real 17 -- a NUL
+#   main.kr:1715  "           mfence"            declared 18, real 17 -- a NUL
 #                 byte after every disassembled mfence.
-#   main.kr:1535  "...          lock ..."        declared 20, real 21 -- the
+#   main.kr:1797  "...          lock ..."        declared 20, real 21 -- the
 #                 lock-prefix line lost its last ".".
 # A guard whose scope is narrower than its comment is worse than no guard: it
 # reads as coverage. Two lessons are wired in below rather than written down.
@@ -22288,6 +22830,12 @@ rm -rf "$IMP_DIR"
 # none of which execute here, so this protects the host path and nothing more.
 echo ""
 echo "--- tests/smoke/*.kr ---"
+# Each program runs in a scratch directory of its own, as tests/smoke/run.sh
+# does: file_rw and file_size write a side file under a relative name, which
+# used to land in the checkout (krc_smoke_rw.tmp, krc_smoke_size.tmp) and stay.
+# (Older runs' copies are removed first, so the check below sees this run's.)
+(cd "$DIR/.." && rm -f krc_smoke_rw.tmp krc_smoke_size.tmp)
+SMOKE_WD=$(mktemp -d "${TMPDIR:-/tmp}/krc_smokewd.XXXXXX")
 for SMOKE_SRC in "$DIR"/smoke/*.kr; do
     [ -f "$SMOKE_SRC" ] || continue
     SMOKE_NAME=$(basename "$SMOKE_SRC" .kr)
@@ -22305,7 +22853,8 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
         continue
     fi
     chmod +x "$SMOKE_BIN" 2>/dev/null
-    "$SMOKE_BIN" >/dev/null 2>&1
+    rm -rf "$SMOKE_WD"/* 2>/dev/null
+    (cd "$SMOKE_WD" && "$SMOKE_BIN" >/dev/null 2>&1)
     SMOKE_EC=$?
     if [ "$SMOKE_EC" -eq "$SMOKE_EXP" ]; then
         PASS=$((PASS + 1))
@@ -22316,6 +22865,16 @@ for SMOKE_SRC in "$DIR"/smoke/*.kr; do
     fi
     rm -f "$SMOKE_BIN"
 done
+rm -rf "$SMOKE_WD"
+# ...and nothing of theirs is left in the checkout.
+TOTAL=$((TOTAL + 1))
+SMOKE_LEFT=$(cd "$DIR/.." && ls -d krc_smoke_* 2>/dev/null | tr '\n' ' ')
+if [ -z "$SMOKE_LEFT" ]; then
+    PASS=$((PASS + 1)); echo "  smoke_programs_leave_nothing_in_the_checkout: PASS (no krc_smoke_* side file in the repo root)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: smoke_programs_leave_nothing_in_the_checkout (left in the repo root: $SMOKE_LEFT)"
+    (cd "$DIR/.." && rm -f krc_smoke_*.tmp)
+fi
 
 # --- struct table growth (old caps: 64 structs, 16 fields) ---
 # Both were size-scaling caps missed when the other buffers were converted.
@@ -22488,15 +23047,19 @@ fi
 # Measured 2026-08-17: 72 citations had drifted, uniformly -8 across ir.kr and
 # +8/+72/+94 in three regions of codegen.kr, while every manifest entry still
 # resolved and this suite stayed green. The doc claimed `tok_text_eq()` was at
-# codegen.kr:1160, which is `str_len = str_len + 1`.
+# codegen.kr:1467, which is `str_len = str_len + 1`.
 #
-# One-directional on purpose: a manifest entry the doc no longer cites is
-# harmless (there is one, src/ir.kr:13494), but a doc citation with no manifest
-# entry means the two have diverged and nothing is checking that citation.
+# This row stays as the simplest, independent form of that check (the first
+# number of each citation only). ir_reference_citations above now runs the
+# generator in --check mode, which covers range ends and follow-on numbers as
+# well, and also refuses a manifest entry the doc no longer cites, a range that
+# runs backwards, a line past the end of its file, "the comment at" a line of
+# code, a citation outside the function named just before it, and a stale
+# citation INTO a .md file anywhere in the prose.
 TOTAL=$((TOTAL + 1))
 CITE_DOC="$DIR/../docs/IR_REFERENCE.md"
 if [ ! -f "$CITE_DOC" ] || [ ! -f "$CITE_MANIFEST" ]; then
-    skip_row ir_reference_doc_agrees "doc or manifest missing"
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_doc_agrees (docs/IR_REFERENCE.md or tests/ir_reference_citations.txt is missing, so nothing was compared)"
 else
     doc_orphan=$(python3 - "$CITE_DOC" "$CITE_MANIFEST" <<'PYEOF'
 import re, sys
@@ -22984,7 +23547,7 @@ fn main() {
 # (exit 1 below); post-fix both checks pass (exit 0).
 run_test "io_read_file_empty_vs_missing" 'import "std/io.kr"
 fn main() {
-    uint64 empty_path = "/tmp/krc_test_read_file_bug5_empty.txt"
+    uint64 empty_path = "/tmp/krc_test_read_file_bug5_empty_'"$$"'.txt"
     uint64 missing_path = "/tmp/krc_test_read_file_bug5_does_not_exist_xyz.txt"
     uint64 fd = file_open(empty_path, 1)
     file_close(fd)
@@ -22998,6 +23561,7 @@ fn main() {
     }
     exit(0)
 }' 0
+rm -f /tmp/krc_test_read_file_bug5_empty_$$.txt
 
 echo ""
 echo "--- call-argument capacity ---"
@@ -23089,7 +23653,7 @@ if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
             echo "FAIL: call_args_25_arm64 (returned $CA_RUN, want 26)"; FAIL=$((FAIL + 1))
         fi
     else
-        skip_row call_args_25_arm64 "cross-compiles, but no qemu-aarch64 to run it"
+        skip_row call_args_25_arm64 "cross-compiles; no qemu-aarch64 to run it"
     fi
 else
     echo "FAIL: call_args_25_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
@@ -23209,7 +23773,21 @@ fi
 TOTAL=$((TOTAL + 1))
 rm -f "$CP_BIN"
 if $KRC --arch=x86_64 --legacy "$CP_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"   # tripwire: not a skip -- compile-only by design (arch-pinned)
+    # Built for x86_64 whatever the host is; RUN it where it can run, and say
+    # SKIP (never PASS) where it cannot -- a positive control that never
+    # executes cannot show the arguments arrive.
+    if [ "$ARCH" = "x86_64" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if rb_timed_out "$CPL_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CPL_RUN" = "98" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_7_accepted_legacy_x86: PASS (runs, returns 98)"
+        else
+            echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (returned $CPL_RUN, want 98)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        skip_row call_ptr_args_7_accepted_legacy_x86 "built for x86_64; the host is $ARCH"
+    fi
 else
     echo "FAIL: call_ptr_args_7_accepted_legacy_x86 (7 arguments must now compile on the legacy backend)"; FAIL=$((FAIL + 1))
 fi
@@ -23506,7 +24084,21 @@ rm -f "$CP_BIN"
 # the correct expectation.
 TOTAL=$((TOTAL + 1))
 if $KRC --arch=x86_64 --legacy "$CP6_SRC" -o "$CP_BIN" >/dev/null 2>&1 && [ -s "$CP_BIN" ]; then
-    PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (compiles; not run -- may be a foreign arch here)"   # tripwire: not a skip -- compile-only by design (arch-pinned)
+    # Built for x86_64 whatever the host is; RUN it where it can run, and say
+    # SKIP (never PASS) where it cannot -- a positive control that never
+    # executes cannot show the arguments arrive.
+    if [ "$ARCH" = "x86_64" ]; then
+        chmod +x "$CP_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_BIN"; CPL_RUN=$?
+        if rb_timed_out "$CPL_RUN" "$RT_T0"; then
+            echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (TIMEOUT: still running after ${RUN_TEST_TIMEOUT}s)"; FAIL=$((FAIL + 1))
+        elif [ "$CPL_RUN" = "21" ]; then
+            PASS=$((PASS + 1)); echo "  call_ptr_args_6_accepted_legacy_x86: PASS (runs, returns 21)"
+        else
+            echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (returned $CPL_RUN, want 21)"; FAIL=$((FAIL + 1))
+        fi
+    else
+        skip_row call_ptr_args_6_accepted_legacy_x86 "built for x86_64; the host is $ARCH"
+    fi
 else
     echo "FAIL: call_ptr_args_6_accepted_legacy_x86 (six args must still compile on the arch that refuses seven)"; FAIL=$((FAIL + 1))
 fi
@@ -24278,7 +24870,8 @@ rm -f "$ARX_SRC" "$ARX_BIN"
 # assert from a host that cannot run it -- and a silent skip would read as
 # coverage, so it says so.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    TOTAL=$((TOTAL + 1)); skip_row asm_call_jmp_reg "x86_64 encodings; host is $RUN_ARCH"
+    TOTAL=$((TOTAL + 1))
+    skip_row asm_call_jmp_reg "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 CR_SRC=$(mktemp /tmp/krc_callreg_XXXX.kr)
@@ -24321,7 +24914,8 @@ fi
 # above: the assertion is a byte encoding, meaningless from a host that cannot
 # assemble it, and a silent skip would read as coverage.
 if [ "$RUN_ARCH" != "x86_64" ]; then
-    TOTAL=$((TOTAL + 1)); skip_row asm_int_imm8 "x86_64 encodings; host is $RUN_ARCH"
+    TOTAL=$((TOTAL + 1))
+    skip_row asm_int_imm8 "x86_64 encodings; host is $RUN_ARCH"
 else
 TOTAL=$((TOTAL + 1))
 II_SRC=$(mktemp /tmp/krc_intimm_XXXX.kr)
@@ -25522,7 +26116,7 @@ echo "--- bare-metal boot gate ---"
 TOTAL=$((TOTAL + 1))
 # The RAW compiler binary, not the --arch=x86_64 wrapper: the gate passes
 # --arch= itself and must not depend on wrapper injection. krc2-then-krc3
-# mirrors the governance test at :3319 — the fallback is not decorative, the
+# mirrors the governance test at :8820 — the fallback is not decorative, the
 # arm64 CI job self-compiles to krc3 and a job that produced only krc3 would
 # otherwise report "no compiler" on a tree that has one.
 if [ -f "$DIR/../build/krc2" ]; then
@@ -26033,7 +26627,7 @@ bcb_config() {
     for bcb_case in oob_var oob_const oob_edge oob_store inbounds; do
         TOTAL=$((TOTAL + 1))
         rm -f "$BCB_D/out"
-        if ! $BCB_KRC --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
+        if ! "$BCB_KRC" --arch="$bcb_arch" $3 --debug "$BCB_D/$bcb_case.kr" -o "$BCB_D/out" > /dev/null 2>&1; then
             echo "FAIL: arm64_legacy_bounds_$1_$bcb_case (build failed -- --debug refused or miscompiled)"
             FAIL=$((FAIL + 1))
             continue
@@ -26111,9 +26705,9 @@ BCB_A64_RUN=$(bcb_runner arm64)
 TOTAL=$((TOTAL + 1))
 if [ "$BCB_A64_RUN" = "SKIP" ]; then
     skip_row arm64_legacy_bounds_absent_without_debug "cannot execute arm64 here"
-elif $BCB_KRC --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
+elif "$BCB_KRC" --arch=arm64 --legacy "$BCB_D/oob_store.kr" -o "$BCB_D/nodbg" > /dev/null 2>&1; then
     chmod +x "$BCB_D/nodbg"
-    $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $BCB_A64_RUN "$BCB_D/nodbg" > /dev/null 2>&1
     bcb_nodbg_st=$?
     if [ "$bcb_nodbg_st" = "0" ]; then
         PASS=$((PASS + 1))
@@ -29095,7 +29689,9 @@ else
     if [ -z "$C7_WHY" ]; then
         c7_wine_child kr.exe echo.krbo "a b"; C7_RC=$?
         [ "$C7_RC" = "2" ] || C7_WHY="$C7_WHY rc-$C7_RC"
-        [ "$(cat "$C7_D/run/argv.out")" = "$(printf 'argc=2\n<.\\kr-run.exe>\n<a b>\nraw=<.\\kr-run.exe "a b">')" ] \
+        # The runner names the program .\kr-run-<slot>.exe, the first slot no
+        # running program holds: 0 in this fresh directory.
+        [ "$(cat "$C7_D/run/argv.out")" = "$(printf 'argc=2\n<.\\kr-run-0.exe>\n<a b>\nraw=<.\\kr-run-0.exe "a b">')" ] \
             || C7_WHY="$C7_WHY argv:$(tr '\n' '|' < "$C7_D/run/argv.out" | cut -c1-80)"
     fi
     if [ -z "$C7_WHY" ]; then c7_ok c7_runner_krbo_arg_with_space_wine "one argument 'a b'"; else c7_bad c7_runner_krbo_arg_with_space_wine "$C7_WHY"; fi
@@ -31829,11 +32425,477 @@ fi
 unset KR_S2_V KR_S2_VV
 rm -rf "$T10_D"
 
+# --- An uninitialised static's zero fill is .bss, not compiler memory -------
+# emit_static_data used to emit every zero of a static array into the output
+# buffer, which the plain-ELF finalize then truncated away (p_memsz keeps the
+# size). So `static uint64[100000000] a` -- a 169-byte file -- made the
+# compiler grow its buffer to 1 GiB (~1 GB RSS, 2.4 s). The fill is now a
+# pending count (codegen.kr's out_vzero), so the same compile fits in a 600 MB
+# address space; before the fix it ran out of memory there. IR and --legacy
+# share the finalize; both are checked, and the result must still run.
+TOTAL=$((TOTAL + 1))
+BSF_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_bsf.XXXXXX")
+BSF_WHY=""
+printf 'static uint64[100000000] a\nfn main() -> uint64 {\n    a[99999999] = 7\n    return a[99999999] - 7\n}\n' > "$BSF_D/b.kr"
+for BSF_M in "" "--legacy"; do
+    rm -f "$BSF_D/b.bin"
+    BSF_OUT=$( (ulimit -v 600000; $KRC --arch=$RUN_ARCH $BSF_M "$BSF_D/b.kr" -o "$BSF_D/b.bin" 2>&1) ); BSF_RC=$?
+    if [ "$BSF_RC" != "0" ] || [ ! -s "$BSF_D/b.bin" ]; then
+        BSF_WHY="$BSF_WHY [${BSF_M:-IR}: compile under 600 MB failed, rc=$BSF_RC '$(printf '%s' "$BSF_OUT" | grep -m1 -iE 'error|memory')']"
+        continue
+    fi
+    BSF_SZ=$(stat -c %s "$BSF_D/b.bin")
+    [ "$BSF_SZ" -lt 65536 ] || BSF_WHY="$BSF_WHY [${BSF_M:-IR}: file is $BSF_SZ B, the fill was written]"
+    chmod +x "$BSF_D/b.bin"
+    RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$BSF_D/b.bin"; BSF_RUN=$?
+    if rb_timed_out "$BSF_RUN" "$RT_T0"; then BSF_WHY="$BSF_WHY [${BSF_M:-IR}: TIMEOUT]"
+    elif [ "$BSF_RUN" != "0" ]; then BSF_WHY="$BSF_WHY [${BSF_M:-IR}: ran, exit $BSF_RUN, want 0]"; fi
+done
+if [ -z "$BSF_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  static_bss_fill_not_materialised: PASS (an 800 MB static compiles in 600 MB, IR and --legacy; small file; runs)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: static_bss_fill_not_materialised$BSF_WHY"
+fi
+rm -rf "$BSF_D"
+
+# --- Running out of memory is a clean error, never a crash or partial -o ----
+# Every allocation the compiler makes goes through cg_alloc / cg_alloc_or_die
+# (src/codegen.kr), which stops with "krc: out of memory ..." and exit 1.
+# Before, a refused allocation returned 0 and the compiler wrote through it:
+# rc 139, and possibly a partial binary at -o. Two cases, both rc 139 before:
+#   - a large static array followed by a scalar static (whose initialiser
+#     makes the compiler write the array's zero fill into its output buffer)
+#     in a 600 MB address space: the output buffer's growth is refused;
+#   - a trivial program in a 60 MB address space: the start-up tables are.
+TOTAL=$((TOTAL + 1))
+OOM_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_oom.XXXXXX")
+OOM_WHY=""
+printf 'static uint64[100000000] a\nstatic uint64 b = 5\nfn main() -> uint64 { return b - 5 }\n' > "$OOM_D/static.kr"
+printf 'fn main() { exit(0) }\n' > "$OOM_D/tiny.kr"
+for OOM_C in "static 600000" "tiny 60000"; do
+    OOM_N=${OOM_C% *}; OOM_V=${OOM_C#* }
+    rm -f "$OOM_D/m.bin"
+    OOM_OUT=$( (ulimit -v "$OOM_V"; $KRC --arch=$RUN_ARCH "$OOM_D/$OOM_N.kr" -o "$OOM_D/m.bin" 2>&1) ); OOM_RC=$?
+    if [ "$OOM_RC" != "1" ] || ! printf '%s\n' "$OOM_OUT" | grep -q "^krc: out of memory" || [ -e "$OOM_D/m.bin" ]; then
+        OOM_WHY="$OOM_WHY [$OOM_N in ${OOM_V} KB: rc=$OOM_RC, output file $( [ -e "$OOM_D/m.bin" ] && echo present || echo absent ), '$(printf '%s' "$OOM_OUT" | tail -1 | cut -c1-100)']"
+    fi
+done
+if [ -z "$OOM_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  oom_is_a_clean_error: PASS (a static's output-buffer growth in 600 MB and a trivial program in 60 MB: exit 1, 'krc: out of memory', no output file)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: oom_is_a_clean_error$OOM_WHY"
+fi
+rm -rf "$OOM_D"
+
+# --- Two runner runs at once: per-run exec paths ------------------------------
+# The runner used to write every extracted program to ONE fixed path
+# (/tmp/.kr-exec on Linux), so a second run started while the first one's
+# program was still running failed ("kr: failed to create temp file": the
+# file was busy) or overwrote the bytes the first was about to exec. Each
+# route is run twice at once here -- the memfd default, the unlinked-file
+# descriptor exec (KR_RUNNER_EXEC=file) and the child route macOS uses
+# (KR_RUNNER_EXEC=fork) -- with a fat and a plain image; both runs must exit
+# with the program's own 42.
+# Each route must really be the one that ran: KR_RUNNER_TRACE=1 makes the
+# runner name every route it tries on stderr, and the last name must be the
+# expected one (memfd, file, child). $TMPDIR is a private directory: while the
+# program runs it must hold NOTHING on the memfd and file routes (the file
+# route's file is unlinked before the exec) and the program's file on the
+# child route; afterwards it must be empty on every route.
+# Each route also runs once with SIGCHLD ignored (inherited from the shell
+# that execs the runner):
+# the child route used to exit 0 then -- the kernel reaped the program, wait4
+# failed with ECHILD, and the zeroed status read as success.
+# Red with the fixed-path runner: the second run of every pair exits 1; red
+# with the round-12 runner: the SIGCHLD runs of the child route exit 0.
+TOTAL=$((TOTAL + 1))
+RXP_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_rxp.XXXXXX")
+RXP_WHY=""
+mkdir -p "$RXP_D/tmp"
+cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$RXP_D/runner.kr"
+printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$RXP_D/p.kr"
+if ! $KRC --arch=$RUN_ARCH "$RXP_D/runner.kr" -o "$RXP_D/kr" > /dev/null 2>&1 \
+   || ! "$DIR/../build/krc2" "$RXP_D/p.kr" -o "$RXP_D/p.krbo" > /dev/null 2>&1 \
+   || ! $KRC --arch=$RUN_ARCH "$RXP_D/p.kr" -o "$RXP_D/p.raw" > /dev/null 2>&1; then
+    RXP_WHY=" [build failed]"
+else
+    chmod +x "$RXP_D/kr"
+    for RXP_M in memfd file fork; do
+        RXP_WANT=$RXP_M
+        [ "$RXP_M" = "fork" ] && RXP_WANT=child
+        for RXP_I in p.krbo p.raw; do
+            rm -f "$RXP_D/a.st"
+            ( KR_RUNNER_TRACE=1 KR_RUNNER_EXEC=$RXP_M TMPDIR="$RXP_D/tmp" timeout -k 5 30 "$RXP_D/kr" "$RXP_D/$RXP_I" > /dev/null 2> "$RXP_D/a.err"; echo $? > "$RXP_D/a.st" ) &
+            RXP_BG=$!
+            sleep 0.5
+            RXP_DURING=$(ls -A "$RXP_D/tmp" | grep -c '^\.kr-exec\.')
+            RXP_OTHER=$(ls -A "$RXP_D/tmp" | grep -vc '^\.kr-exec\.')
+            KR_RUNNER_TRACE=1 KR_RUNNER_EXEC=$RXP_M TMPDIR="$RXP_D/tmp" timeout -k 5 30 "$RXP_D/kr" "$RXP_D/$RXP_I" > "$RXP_D/b.out" 2>&1
+            RXP_B=$?
+            wait "$RXP_BG"
+            RXP_A=$(cat "$RXP_D/a.st" 2>/dev/null)
+            [ "$RXP_A" = "42" ] && [ "$RXP_B" = "42" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: exits $RXP_A and $RXP_B, want 42 42; $(head -c 80 "$RXP_D/b.out" | tr '\n' ' ')]"
+            for RXP_E in "$RXP_D/a.err" "$RXP_D/b.out"; do
+                RXP_LAST=$(grep '^kr: route ' "$RXP_E" | tail -1 | sed 's/^kr: route //')
+                [ "$RXP_LAST" = "$RXP_WANT" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: route '$RXP_LAST' ran, want $RXP_WANT]"
+            done
+            [ -z "$(ls -A "$RXP_D/tmp")" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: left $(ls -A "$RXP_D/tmp" | tr '\n' ' ')in TMPDIR]"
+            [ "$RXP_OTHER" = "0" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: a non-.kr-exec file in TMPDIR while the program ran]"
+            if [ "$RXP_M" = "fork" ]; then
+                [ "$RXP_DURING" != "0" ] || RXP_WHY="$RXP_WHY [fork $RXP_I: no .kr-exec.* in TMPDIR while the program ran]"
+            else
+                [ "$RXP_DURING" = "0" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I: $RXP_DURING .kr-exec.* in TMPDIR while the program ran, want 0]"
+            fi
+            rm -rf "$RXP_D/tmp"/.kr-exec.* 2>/dev/null
+            # The same run with SIGCHLD ignored by whoever started the runner.
+            # (Set after `timeout`, which itself resets SIGCHLD for its child.)
+            KR_RUNNER_EXEC=$RXP_M TMPDIR="$RXP_D/tmp" timeout -k 5 30 bash -c 'trap "" CHLD; exec "$@"' rxp "$RXP_D/kr" "$RXP_D/$RXP_I" > /dev/null 2>&1
+            RXP_S=$?
+            [ "$RXP_S" = "42" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I with SIGCHLD ignored: exit $RXP_S, want 42]"
+            [ -z "$(ls -A "$RXP_D/tmp")" ] || RXP_WHY="$RXP_WHY [$RXP_M $RXP_I with SIGCHLD ignored: left $(ls -A "$RXP_D/tmp" | tr '\n' ' ')in TMPDIR]"
+            rm -rf "$RXP_D/tmp"/.kr-exec.* 2>/dev/null
+        done
+    done
+fi
+if [ -z "$RXP_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  runner_exec_paths_are_per_run: PASS (memfd, file and child routes each seen to run, fat and plain images, two runs at once each and once with SIGCHLD ignored; TMPDIR empty during and after, but for the child route's own file)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: runner_exec_paths_are_per_run$RXP_WHY"
+fi
+rm -rf "$RXP_D"
+
+# --- The Windows runner claims its slot until the program has started --------
+# On Windows the runner writes .\kr-run-<n>.exe and runs it; the file cannot be
+# removed. It used to pick the first name it could open for writing and close
+# it before CreateProcess, so a second runner could rewrite the bytes between
+# the first one's write and its program starting. Slot <n> is now claimed by
+# holding .\kr-run-<n>.lock open for writing to the end of the run. Checked
+# under Wine with the x86_64 PE runner: (1) with slot 0's lock held by another
+# process the runner must take slot 1 (kr-run-1.exe, never kr-run-0.exe) and
+# exit with the program's 42 -- red on the lock-less runner, which writes
+# kr-run-0.exe; (2) two runs at once both exit 42, from two slots. Wine is
+# $KR_WINE when it is set (set but not an executable file is a FAIL, never a
+# skip), else `wine` from PATH; none is a counted skip.
+rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
+    TOTAL=$((TOTAL + 1))
+    RWS_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
+    if [ -n "${KR_WINE+set}" ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
+        FAIL=$((FAIL + 1)); echo "FAIL: $1 (KR_WINE='$KR_WINE' is not an executable regular file)"
+    elif [ -z "$RWS_WINE" ]; then
+        skip_row $1 "no wine; set KR_WINE=<path to wine>"
+    else
+        RWS_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_rws.XXXXXX")
+        RWS_WHY=""
+        cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$RWS_D/runner.kr"
+        printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$RWS_D/slow.kr"
+        printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$RWS_D/hold.kr"
+        if ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/runner.kr" -o "$RWS_D/kr.exe" > /dev/null 2>&1 \
+           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/slow.kr" -o "$RWS_D/slow.exe" > /dev/null 2>&1 \
+           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1; then
+            RWS_WHY=" [build failed]"
+        else
+            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
+            RWS_BG=$!
+            # Wait for the holder to have the lock (it creates the file).
+            RWS_T=0
+            while [ ! -e "$RWS_D/kr-run-0.lock" ] && [ $RWS_T -lt 100 ]; do sleep 0.1; RWS_T=$((RWS_T + 1)); done
+            sleep 0.5
+            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
+            wait "$RWS_BG"
+            [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
+            [ "$(cat "$RWS_D/h.st" 2>/dev/null)" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder could not take slot 0's lock]"
+            [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
+            [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
+            rm -f "$RWS_D"/kr-run-*
+            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
+            RWS_BG=$!
+            sleep 1
+            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
+            wait "$RWS_BG"
+            RWS_A=$(cat "$RWS_D/a.st" 2>/dev/null)
+            [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits $RWS_A and $RWS_B, want 42 42]"
+            [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
+        fi
+        if [ -z "$RWS_WHY" ]; then
+            PASS=$((PASS + 1)); echo "  $1: PASS (under Wine: a held slot is passed over, two runs at once use two slots, all exit 42)"
+        else
+            FAIL=$((FAIL + 1)); echo "FAIL: $1$RWS_WHY"
+        fi
+        rm -rf "$RWS_D"
+    fi
+}
+rws_row runner_windows_slots_are_claimed ""
+
+# --- A --legacy Windows file_open for writing holds the file ------------------
+# The runner's slot lock is file_open(path, 1) held open. The --legacy
+# backends opened every file with FILE_SHARE_READ|FILE_SHARE_WRITE, so a second
+# writer could open a held file and, in a --legacy build, the lock claimed
+# nothing; the write path now asks for FILE_SHARE_READ, as the IR backend always
+# has. Checked directly rather than through a --legacy runner: on main the
+# runner cannot be built --legacy for Windows at all (its raw syscalls are
+# refused there, since that backend does not prune OS guards). Under Wine, with
+# both programs built --legacy: while one holds .\kr-share.lock open for
+# writing, a second file_open(.\kr-share.lock, 1) must FAIL (exit 3); once the
+# holder has exited it must succeed (exit 0). Red before the fix (the second
+# open succeeded while the file was held).
+TOTAL=$((TOTAL + 1))
+LSH_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
+if [ -n "${KR_WINE+set}" ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
+    FAIL=$((FAIL + 1)); echo "FAIL: legacy_file_open_write_holds_the_file_wine (KR_WINE='$KR_WINE' is not an executable regular file)"
+elif [ -z "$LSH_WINE" ]; then
+    skip_row legacy_file_open_write_holds_the_file_wine "no wine; set KR_WINE=<path to wine>"
+else
+    LSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_lsh.XXXXXX")
+    LSH_WHY=""
+    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$LSH_D/hold.kr"
+    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(3) }\n    exit(0)\n}\n' > "$LSH_D/probe.kr"
+    if ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/hold.kr" -o "$LSH_D/hold.exe" > /dev/null 2>&1 \
+       || ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/probe.kr" -o "$LSH_D/probe.exe" > /dev/null 2>&1; then
+        LSH_WHY=" [build failed]"
+    else
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" hold.exe > /dev/null 2>&1; echo $? > "$LSH_D/h.st" ) &
+        LSH_BG=$!
+        LSH_T=0
+        while [ ! -e "$LSH_D/kr-share.lock" ] && [ $LSH_T -lt 100 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
+        sleep 0.5
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_HELD=$?
+        wait "$LSH_BG"
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_FREE=$?
+        [ "$(cat "$LSH_D/h.st" 2>/dev/null)" = "0" ] || LSH_WHY="$LSH_WHY [the holder could not open the file: exit $(cat "$LSH_D/h.st" 2>/dev/null)]"
+        [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
+        [ "$LSH_FREE" = "0" ] || LSH_WHY="$LSH_WHY [after the holder exited: exit $LSH_FREE, want 0]"
+    fi
+    if [ -z "$LSH_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  legacy_file_open_write_holds_the_file_wine: PASS (under Wine: a second --legacy writer is refused while the file is held, and opens it once it is free)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: legacy_file_open_write_holds_the_file_wine$LSH_WHY"
+    fi
+    rm -rf "$LSH_D"
+fi
+
+# --- A character literal holds exactly one character or one escape -----------
+# parse_int_token returned the first byte after the quote whatever followed, so
+# 'AB' and 'ABCDEFGHI' compiled to 65, '' to the closing quote's 39, and a
+# multi-byte UTF-8 character to its first byte -- silently. Each must stop the
+# compile with a located error; one character and every escape form still
+# compile to their value -- on the IR backend and under --legacy.
+TOTAL=$((TOTAL + 1))
+CLT_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_clt.XXXXXX")
+CLT_WHY=""
+for CLT_C in "'AB':no" "'ABCDEFGHI':no" "'':no" "'\303\251':no" "'\\\\x41B':no" "'\\\\nn':no" \
+             "'A':65" "'\\\\n':10" "'\\\\x41':65" "'\\\\'':39" "'\\\\\\\\':92" "'\\\\0':0"; do
+    CLT_L=${CLT_C%:*}; CLT_W=${CLT_C##*:}
+    printf "const u64 CH = $CLT_L\nfn main() {\n    exit(CH)\n}\n" > "$CLT_D/c.kr"
+    for CLT_F in "" "--legacy"; do
+        rm -f "$CLT_D/c.bin"
+        $KRC $KRC_FLAGS $CLT_F "$CLT_D/c.kr" -o "$CLT_D/c.bin" > "$CLT_D/c.out" 2>&1; CLT_RC=$?
+        if [ "$CLT_W" = "no" ]; then
+            { [ "$CLT_RC" != "0" ] && grep -q "c.kr:1:16: error: a character literal holds exactly one character or one escape" "$CLT_D/c.out"; } \
+                || CLT_WHY="$CLT_WHY [$CLT_L $CLT_F: rc $CLT_RC, want the located one-character error]"
+        elif [ "$CLT_RC" != "0" ]; then
+            CLT_WHY="$CLT_WHY [$CLT_L $CLT_F: refused, must compile]"
+        else
+            chmod +x "$CLT_D/c.bin"; timeout -k 5 30 "$CLT_D/c.bin"; CLT_X=$?
+            [ "$CLT_X" = "$CLT_W" ] || CLT_WHY="$CLT_WHY [$CLT_L $CLT_F: value $CLT_X, want $CLT_W]"
+        fi
+    done
+done
+if [ -z "$CLT_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  char_literal_is_one_character: PASS ('AB', 'ABCDEFGHI', '', a 2-byte UTF-8 char, '\\x41B', '\\nn' refused with a location; 'A', '\\n', '\\x41', '\\'', '\\\\', '\\0' compile to their values; IR and --legacy)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: char_literal_is_one_character$CLT_WHY"
+fi
+rm -rf "$CLT_D"
+
+# --- An integer literal that does not fit 64 bits is refused, in every base --
+# parse_int_token accumulated without a carry check, so 0b followed by 65
+# ones, 0x1_0000_0000_0000_0000 and 18446744073709551616 compiled to
+# plausible wrong numbers (wrapped mod 2^64) with no diagnostic. Each must now
+# stop the compile with a located error; the largest values that do fit (64
+# ones, 0xFFFFFFFFFFFFFFFF, 18446744073709551615) and leading zeros, which add
+# no value, must still compile -- on the IR backend and under --legacy.
+TOTAL=$((TOTAL + 1))
+ILT_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_ilt.XXXXXX")
+ILT_WHY=""
+ILT_ONES64=1111111111111111111111111111111111111111111111111111111111111111
+for ILT_C in "0b1$ILT_ONES64:no" "0b$ILT_ONES64:yes" "0b0$ILT_ONES64:yes" \
+             "0x1FFFFFFFFFFFFFFFF:no" "0x10000000000000000:no" "0x1_0000_0000_0000_0000:no" \
+             "0xFFFFFFFFFFFFFFFF:yes" "0x0000000000000000001:yes" \
+             "18446744073709551616:no" "99999999999999999999:no" \
+             "18446744073709551615:yes" "0018446744073709551615:yes" "1_000:yes"; do
+    ILT_L=${ILT_C%:*}; ILT_OK=${ILT_C##*:}
+    printf 'fn main() {\n    uint64 x = %s\n    exit(x & 63)\n}\n' "$ILT_L" > "$ILT_D/l.kr"
+    for ILT_F in "" "--legacy"; do
+        $KRC $ILT_F "$ILT_D/l.kr" -o "$ILT_D/l.bin" > "$ILT_D/l.out" 2>&1; ILT_RC=$?
+        if [ "$ILT_OK" = "yes" ]; then
+            [ "$ILT_RC" = "0" ] || ILT_WHY="$ILT_WHY [$ILT_L $ILT_F: refused, must compile]"
+        else
+            { [ "$ILT_RC" != "0" ] && grep -q "l.kr:2:16: error: integer literal does not fit in 64 bits" "$ILT_D/l.out"; } \
+                || ILT_WHY="$ILT_WHY [$ILT_L $ILT_F: rc $ILT_RC, want the located 'does not fit in 64 bits' error]"
+        fi
+    done
+done
+if [ -z "$ILT_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  int_literal_overflow_is_refused: PASS (65-bit 0b, 0x and decimal refused with a location; 2^64-1 in every base, leading zeros and separators accepted; IR and --legacy)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: int_literal_overflow_is_refused$ILT_WHY"
+fi
+rm -rf "$ILT_D"
+
+# suite_abort removes every /tmp/<name>_$$ scratch path the suite writes, not
+# only the krc_* ones: an interrupted run used to leave the qemu rows' images
+# and serial logs (uprov_<pid>.img/.log and the like) behind. suite_abort reads
+# the names from this file, so a new row's scratch name is covered without a
+# second list to keep in step. Checked in a child shell (its own $$): it
+# creates three such paths, calls the real suite_abort, and they must be gone.
+TOTAL=$((TOTAL + 1))
+sab_fn=$(sed -n '/^suite_abort() {/,/^}/p' "$DIR/run_tests.sh")
+sab_out=$(DIR="$DIR" SUITE_TMP=/nonexistent/krc_sab bash -c "$sab_fn"'
+echo "pid $$"
+mkdir -p "/tmp/uprov_$$.d"
+: > "/tmp/uprov_$$.img"; : > "/tmp/uprov_$$.log"; : > "/tmp/krgz_out_$$.gz"
+suite_abort 130' 2>&1)
+sab_rc=$?
+sab_pid=$(printf '%s\n' "$sab_out" | sed -n 's/^pid //p')
+sab_left=""
+if [ -n "$sab_pid" ]; then
+    for sab_f in "/tmp/uprov_$sab_pid.img" "/tmp/uprov_$sab_pid.log" "/tmp/krgz_out_$sab_pid.gz" "/tmp/uprov_$sab_pid.d"; do
+        [ -e "$sab_f" ] && sab_left="$sab_left $sab_f"
+    done
+    rm -rf "/tmp/uprov_$sab_pid.img" "/tmp/uprov_$sab_pid.log" "/tmp/krgz_out_$sab_pid.gz" "/tmp/uprov_$sab_pid.d"
+fi
+if [ -n "$sab_pid" ] && [ "$sab_rc" = "130" ] && [ -z "$sab_left" ]; then
+    PASS=$((PASS + 1)); echo "  suite_abort_removes_every_tmp_name: PASS (uprov_<pid>.img/.log, krgz_out_<pid>.gz and a uprov_<pid>.d dir removed; exit 130)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_abort_removes_every_tmp_name (rc=$sab_rc, left:${sab_left:- none}; output: $(printf '%s' "$sab_out" | tr '\n' '|' | head -c 160))"
+fi
+
+# --- Running out of stack is a clean error ------------------------------------
+# A source nested deeper than the stack allows used to kill the compiler with
+# SIGSEGV (status 139, no message); so did an address-space cap that stopped
+# the stack from growing. On Linux a SIGSEGV handler on its own stack now
+# reports it and exits 1 (src/main.kr, stk_guard_init). Two checks:
+#   - 20000 nested parentheses under a 1 MiB stack: exit 1, the one-line
+#     message, no output file (status 139 before);
+#   - control: a SIGSEGV that is not the stack (sent by kill to a compiler
+#     blocked opening a FIFO) still ends the process with SIGSEGV (139), so a
+#     real crash is not turned into a tidy exit 1.
+TOTAL=$((TOTAL + 1))
+STK_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_stk.XXXXXX")
+STK_WHY=""
+STK_CC="$DIR/../build/krc2"
+{ printf 'fn main() {\n    uint64 x = '
+  head -c 20000 /dev/zero | tr '\0' '('; printf '1'; head -c 20000 /dev/zero | tr '\0' ')'
+  printf '\n    exit(x)\n}\n'; } > "$STK_D/deep.kr"
+STK_OUT=$( (ulimit -v 2000000; ulimit -s 1024; timeout -k 5 60 "$STK_CC" --arch=$RUN_ARCH "$STK_D/deep.kr" -o "$STK_D/deep" 2>&1) ); STK_RC=$?
+if [ "$STK_RC" != "1" ] || ! printf '%s\n' "$STK_OUT" | grep -q "^krc: out of stack: " || [ -e "$STK_D/deep" ]; then
+    STK_WHY="$STK_WHY [deep nesting, 1 MiB stack: rc=$STK_RC, output $( [ -e "$STK_D/deep" ] && echo present || echo absent ), '$(printf '%s' "$STK_OUT" | tail -1 | cut -c1-100)']"
+fi
+mkfifo "$STK_D/f.kr"
+(ulimit -v 2000000; exec "$STK_CC" --arch=$RUN_ARCH "$STK_D/f.kr" -o "$STK_D/f" > /dev/null 2>&1) &
+STK_PID=$!
+sleep 1
+kill -SEGV "$STK_PID" 2>/dev/null
+wait "$STK_PID"; STK_RC2=$?
+[ "$STK_RC2" = "139" ] || STK_WHY="$STK_WHY [kill -SEGV: rc=$STK_RC2, want 139]"
+if [ -z "$STK_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  stack_exhaustion_is_a_clean_error: PASS (deep nesting in 1 MiB: exit 1 'krc: out of stack', no output; a kill -SEGV still ends in 139)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: stack_exhaustion_is_a_clean_error$STK_WHY"
+fi
+rm -rf "$STK_D"
+
+# --- The compiler builds itself for every target and mode ---------------------
+# 32 builds of the compiler's own sources: x86_64 and arm64, each of linux,
+# macos, windows and android, each IR, --legacy, --emit=obj and --emit=asm.
+# A source change one backend cannot compile shows up here, not when someone
+# needs that build (MLRift's defect-ports once lost --legacy and --emit=obj for
+# every target this way; src/main.kr's stack guard briefly broke macOS
+# --legacy and Windows --emit=asm). The one tolerated failure is main's own
+# rule: a raw syscall reachable in a Windows slice is refused, and --legacy /
+# --emit=obj do not prune OS tests, so the compiler's own syscall_raw sites
+# refuse Windows --legacy and --emit=obj -- with exactly that message.
+TOTAL=$((TOTAL + 1))
+SB_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_selfbuild.XXXXXX")
+# The compiler UNDER TEST, never the tree's build/krc2: a run that grades a
+# copied or renamed compiler must build with that one. KRC_RAW names it when
+# set (the caller's choice, which may itself be a wrapper that takes --arch);
+# else $KRC itself when it is a compiler binary (an ELF); else, when $KRC is
+# `make test`'s wrapper (`exec "${0%/*}/krc2" --arch=...`), the krc2 that
+# wrapper execs. Anything else is a FAIL, not a fallback.
+SB_CC="${KRC_RAW:-}"
+sb_elf() { [ -f "$1" ] && [ "$(head -c 4 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = "7f454c46" ]; }
+if [ -z "$SB_CC" ]; then
+    if sb_elf "$KRC"; then SB_CC="$KRC"
+    elif [ -f "$KRC" ] && grep -q '^exec "${0%/\*}/krc2" ' "$KRC" && [ -x "$(dirname "$KRC")/krc2" ]; then SB_CC="$(dirname "$KRC")/krc2"
+    fi
+fi
+SB_SRCS=$(awk '/^SRCS[ \t]*=/ { f = 1; sub(/^SRCS[ \t]*=/, "") } f { c = ($0 ~ /\\$/); sub(/\\$/, ""); print; if (!c) exit }' "$DIR/../Makefile")
+( cd "$DIR/.." && cat $SB_SRCS ) | grep -v '^import "' > "$SB_D/c.kr"
+SB_BAD=""; SB_OK=0; SB_REF=0
+[ -n "$SB_CC" ] && [ -x "$SB_CC" ] || SB_BAD=" [no bare compiler under test: KRC_RAW='${KRC_RAW:-}', KRC='$KRC']"
+[ -n "$SB_BAD" ] || for SB_A in x86_64 arm64; do
+    for SB_T in linux macos windows android; do
+        for SB_M in ir legacy obj asm; do
+            case "$SB_M" in ir) SB_F="" ;; legacy) SB_F="--legacy" ;; obj) SB_F="--emit=obj" ;; asm) SB_F="--emit=asm" ;; esac
+            rm -f "$SB_D/o"
+            if (ulimit -v 3000000; timeout -k 5 120 "$SB_CC" --arch=$SB_A --target=$SB_T $SB_F "$SB_D/c.kr" -o "$SB_D/o") > "$SB_D/l" 2>&1 && [ -s "$SB_D/o" ]; then
+                SB_OK=$((SB_OK + 1))
+            elif [ "$SB_T" = "windows" ] && { [ "$SB_M" = "legacy" ] || [ "$SB_M" = "obj" ]; } \
+                 && grep -q "error: syscall_raw is reachable in the win-" "$SB_D/l"; then
+                SB_REF=$((SB_REF + 1))
+            else
+                SB_BAD="$SB_BAD [$SB_A $SB_T $SB_M: $(grep -m1 'error' "$SB_D/l" | cut -c1-90)]"
+            fi
+        done
+    done
+done
+if [ -z "$SB_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  compiler_builds_itself_every_target_and_mode: PASS ($SB_OK/32 built, $SB_REF Windows --legacy/--emit=obj refused by the syscall_raw rule)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: compiler_builds_itself_every_target_and_mode ($SB_OK built, $SB_REF refused by the syscall_raw rule:$SB_BAD)"
+fi
+rm -rf "$SB_D"
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the
 # TOTAL++). Placing this comparison next to Part A would have compared README
 # against a partial count and been permanently, uselessly red.
+#
+# ROWS RUN, NOT ROWS DEFINED. Rows behind an optional tool are not counted at
+# all when it is missing, so a count below README's is ambiguous on a partial
+# toolchain. It is NOT ambiguous on a full one: when every tool this file
+# probes for is present (a qemu-X-static is satisfied by qemu-X), the host is
+# x86_64 and the opt-in ANDROID_EMULATOR is off, every row runs and counts,
+# so TOTAL must equal README exactly and a deleted row is red. On any other
+# run a count below README's is a SKIP that names what is missing, never a
+# pass. More rows than README is red everywhere: a partial run can only count
+# fewer.
+# On a FULL run the set of skipped rows must also be a subset of SKIP_ALLOW:
+# rows whose skip reason is not a missing tool (a precondition this file
+# cannot satisfy by itself), each named with that reason. Any other skip on a
+# full run -- a tool row whose probe variable was blanked mid-file, a new
+# precondition -- is a FAIL, so a full run cannot shed rows into SKIP.
+SKIP_ALLOW=''
+RC_BADSKIP=""
+while IFS= read -r RC_S; do
+    [ -z "$RC_S" ] && continue
+    printf '%s\n' "$SKIP_ALLOW" | cut -d'|' -f1 | grep -qxF -- "$RC_S" || RC_BADSKIP="$RC_BADSKIP [$RC_S]"
+done <<RC_SKIPS_EOF
+$SKIP_NAMES
+RC_SKIPS_EOF
+RC_MISSING=""
+for RC_TOOL in $(grep -oE 'command -v [A-Za-z0-9_.+-]+' "$DIR/run_tests.sh" | awk '{print $3}' | sort -u); do
+    case $RC_TOOL in *-) continue ;; esac   # a prefix in prose, not a tool
+    [ "$RC_TOOL" = "adb" ] && continue      # used only under ANDROID_EMULATOR=1
+    command -v "$RC_TOOL" > /dev/null 2>&1 && continue
+    case $RC_TOOL in *-static) command -v "${RC_TOOL%-static}" > /dev/null 2>&1 && continue ;; esac
+    case $RC_TOOL in qemu-*) command -v "$RC_TOOL-static" > /dev/null 2>&1 && continue ;; esac
+    RC_MISSING="$RC_MISSING $RC_TOOL"
+done
+[ "$(uname -m)" = "x86_64" ] || RC_MISSING="$RC_MISSING host-not-x86_64"
+[ "${ANDROID_EMULATOR:-0}" = "1" ] && RC_MISSING="$RC_MISSING ANDROID_EMULATOR=1-adds-rows"
 if [ "$README_N" = "0" ] || [ -z "$README_COUNTS" ]; then
     FAIL=$((FAIL + 1))
     echo "FAIL: readme_test_count_matches_suite (found NO '**N tests**' in README.md)"
@@ -31865,16 +32927,36 @@ elif [ "$TOTAL" -gt "$README_UNIQ" ]; then
     echo "FAIL: readme_test_count_matches_suite (suite ran $TOTAL, README says '$README_UNIQ')"
     echo "  a run can only count FEWER rows than a full one, never more, so this is"
     echo "  rows added without updating README.md -- set BOTH '**N tests**' to $TOTAL"
+elif [ -z "$RC_MISSING" ] && [ -n "$RC_BADSKIP" ]; then
+    echo "FAIL: readme_test_count_matches_suite (a full run skipped rows that are not in SKIP_ALLOW:$RC_BADSKIP)"
+    FAIL=$((FAIL + 1))
+elif [ -n "$RC_MISSING" ]; then
+    # Not a full run: rows behind a missing tool neither run nor count, so
+    # fewer rows than README states is expected here and a deleted row cannot
+    # be told apart from them. That is a SKIP, never a pass (this branch used
+    # to count it as one, so deleting a row passed on every host).
+    skip_row readme_test_count_matches_suite "ran $TOTAL, README says $README_UNIQ; not a full run, missing:$RC_MISSING"
 elif [ "$TOTAL" -lt "$README_UNIQ" ]; then
-    # Fewer than claimed: either a partial toolchain (expected in CI) or rows
-    # were deleted. Those are indistinguishable from here, so say so rather
-    # than guessing -- and do not pass silently, which would make this row look
-    # like coverage it is not providing on this machine.
-    skip_row readme_test_count_matches_suite "ran $TOTAL, README says $README_UNIQ -- expected when optional tooling is absent; if this is a FULL run, rows were deleted and README.md needs updating to $TOTAL"
+    # A full run counts every row. Fewer than README states means rows were
+    # deleted, or a row stopped counting itself -- either way README.md or
+    # the suite is wrong.
+    FAIL=$((FAIL + 1))
+    echo "FAIL: readme_test_count_matches_suite (full run counted $TOTAL, README says $README_UNIQ)"
+    echo "  every tool the suite probes is present, so every row ran: rows were deleted"
+    echo "  or stopped counting -- restore them, or set every '**N tests**' to $TOTAL"
 else
     PASS=$((PASS + 1))
     echo "  readme_test_count_matches_suite: PASS (README and suite both say $TOTAL)"
 fi
 
+if [ $((PASS + FAIL + SKIP)) -ne "$TOTAL" ]; then
+    # A row that incremented TOTAL but was never counted as a pass, a
+    # failure or a skip (or the reverse) makes every number here untrue.
+    echo "FAIL: suite_accounting (PASS $PASS + FAIL $FAIL + SKIP $SKIP != TOTAL $TOTAL)"
+    FAIL=$((FAIL + 1))
+fi
 echo "=== Results: $PASS/$TOTAL passed, $FAIL failed, $SKIP skipped ==="   # tripwire: not a skip -- the results line counts skips
-exit $FAIL
+# Any failure is exit 1: `exit $FAIL` would wrap to 0 at exactly 256.
+SUMMARY_DONE=1
+if [ "$FAIL" -ne 0 ]; then exit 1; fi
+exit 0

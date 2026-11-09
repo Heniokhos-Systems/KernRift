@@ -1,7 +1,7 @@
 // Xtensa LX6 Task 5: loads / stores / IR_COPY.
 //
 // Widths 1/2/4 through the load8/16/32 and store8/16/32 pointer builtins
-// (ir.kr:1701-1774): no devices (a device field write lowers to IR_VSTORE,
+// (ir.kr:2316-2391): no devices (a device field write lowers to IR_VSTORE,
 // a different op — codegen_riscv.kr's device stores are a separate
 // handler class, not this one), no static/stack arrays (IR_STATIC_ADDR /
 // IR_STACK_ADDR aren't implemented on xtensa yet), no heap alloc()

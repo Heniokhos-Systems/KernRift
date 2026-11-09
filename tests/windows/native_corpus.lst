@@ -213,3 +213,6 @@ win_file_std_write_windows_wine
 win_file_std_write_windows_wine_legacy
 read_exact_rejects_errno_main_windows_wine
 read_exact_rejects_errno_runner_windows_wine
+# defect-sweep: its Windows-pattern rows, added at its merge
+legacy_file_open_write_holds_the_file_wine
+runner_windows_slots_are_claimed

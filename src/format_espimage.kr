@@ -73,13 +73,25 @@ fn esp_image_fail(uint64 msg) {
     exit(1)
 }
 
+// alloc(n) or stop. This file is imported on its own by the esp32 harness in
+// tests/run_tests.sh, so it cannot rely on codegen.kr's cg_alloc.
+fn esp_alloc(uint64 n) -> uint64 {
+    uint64 p = alloc(n)
+    if p == 0 { esp_image_fail("out of memory") }
+    return p
+}
+
 // Append one byte, growing the buffer geometrically (same discipline as
 // codegen.kr's emit_byte — alloc/memcpy/dealloc, doubling cap).
 fn espimg_byte(uint64 v) {
     if esp_image_len >= esp_image_cap {
         uint64 new_cap = esp_image_cap * 2
         if new_cap < 4096 { new_cap = 4096 }
+        // alloc() returns 0 when the allocation fails. This file is also
+        // imported on its own (tests/run_tests.sh's esp32 harness), so it
+        // checks here rather than calling codegen.kr's cg_alloc_or_die.
         uint64 new_buf = alloc(new_cap)
+        if new_buf == 0 { esp_image_fail("out of memory growing the image buffer") }
         memcpy(new_buf, esp_image_buf, esp_image_len)
         if esp_image_buf != 0 { dealloc(esp_image_buf) }
         esp_image_buf = new_buf
@@ -191,8 +203,8 @@ fn esp_image_finish() {
     // SHA-256 over the entire file through the checksum byte. Digest is
     // captured into a scratch buffer BEFORE appending, since appending can
     // grow (realloc) esp_image_buf.
-    uint64 ctx = alloc(SHA256_CTX_SIZE)
-    uint64 digest = alloc(32)
+    uint64 ctx = esp_alloc(SHA256_CTX_SIZE)
+    uint64 digest = esp_alloc(32)
     sha256_init(ctx)
     sha256_update(ctx, esp_image_buf, esp_image_len)
     sha256_final(ctx, digest)

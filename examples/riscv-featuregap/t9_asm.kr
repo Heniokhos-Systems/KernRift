@@ -6,7 +6,7 @@
 //      (rd==rs1==a0, simm6 imm -> would fold to c.addi), so the objdump
 //      assertion that it stays a full 4-byte `addi a0,a0,1` proves the
 //      IR_ASM_BLOCK handler marked the emitted range non-compressible.
-//   2. CONSTRAINT BINDING (rv_reg_code via ir.kr:4214/4237):
+//   2. CONSTRAINT BINDING (rv_reg_code via ir.kr:5442/5469):
 //        in(base -> a0)   lowers to IR_ARG(imm = rv_reg_code("a0")+100)
 //        out(a0 -> result) lowers to IR_COPY(imm = rv_reg_code("a0")+100)
 //      so `base` is moved into physical a0 before the block and physical a0

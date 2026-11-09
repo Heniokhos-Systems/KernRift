@@ -315,22 +315,22 @@ static uint64 ir_fused_jcc_code = 0
 fn ir_init() {
     if ir_insn_buf == 0 {
         ir_insn_cap = 65536
-        ir_insn_buf = alloc(ir_insn_cap * 32)
+        ir_insn_buf = cg_alloc(ir_insn_cap * 32)
         // 4 bytes per insn — enough for a u32 token index. Shares the
         // same cap as the main insn buf so indexing matches.
-        ir_insn_src_tok = alloc(ir_insn_cap * 4)
+        ir_insn_src_tok = cg_alloc(ir_insn_cap * 4)
         // 8 bytes per insn — a pointer to a static name literal. Same cap,
         // same indexing. ir_emit zeroes each slot as it is claimed, so a
         // stale name from a previously-compiled function can never be read
         // back (ir_init resets ir_insn_count but does not clear the arena).
-        ir_insn_origin = alloc(ir_insn_cap * 8)
+        ir_insn_origin = cg_alloc(ir_insn_cap * 8)
     }
     ir_insn_count = 0
     ir_current_src_tok = 0
 
     if ir_bb_buf == 0 {
         ir_bb_cap = 4096
-        ir_bb_buf = alloc(ir_bb_cap * 16)
+        ir_bb_buf = cg_alloc(ir_bb_cap * 16)
     }
     ir_bb_count = 0
 
@@ -338,7 +338,7 @@ fn ir_init() {
 
     if ir_vreg_fkind_buf == 0 {
         ir_vreg_fkind_cap = 65536
-        ir_vreg_fkind_buf = alloc(ir_vreg_fkind_cap)
+        ir_vreg_fkind_buf = cg_alloc(ir_vreg_fkind_cap)
     }
     // Float-kind buffer is indexed by vreg number without a length guard,
     // so stale bytes from a prior function would mislabel a vreg as float.
@@ -346,28 +346,28 @@ fn ir_init() {
 
     if ir_vreg_signed_buf == 0 {
         ir_vreg_signed_cap = 65536
-        ir_vreg_signed_buf = alloc(ir_vreg_signed_cap)
+        ir_vreg_signed_buf = cg_alloc(ir_vreg_signed_cap)
     }
     memset(ir_vreg_signed_buf, 0, ir_vreg_signed_cap)
 
     if ir_use_count_buf == 0 {
         ir_use_count_cap = 65536
-        ir_use_count_buf = alloc(ir_use_count_cap)
+        ir_use_count_buf = cg_alloc(ir_use_count_cap)
     }
     memset(ir_use_count_buf, 0, ir_use_count_cap)
     ir_fused_jcc_code = 0
 
     if ir_loop_exit_stack == 0 {
-        ir_loop_exit_stack = alloc(32 * 8)
-        ir_loop_header_stack = alloc(32 * 8)
-        ir_loop_hdr_buf_stack = alloc(32 * 8)
-        ir_loop_hdr_count_stack = alloc(32 * 8)
+        ir_loop_exit_stack = cg_alloc(32 * 8)
+        ir_loop_header_stack = cg_alloc(32 * 8)
+        ir_loop_hdr_buf_stack = cg_alloc(32 * 8)
+        ir_loop_hdr_count_stack = cg_alloc(32 * 8)
     }
     ir_loop_depth = 0
 
     if ir_loops == 0 {
         ir_loop_cap = 256
-        ir_loops = alloc(ir_loop_cap * 16)
+        ir_loops = cg_alloc(ir_loop_cap * 16)
     }
     ir_loop_count = 0
 
@@ -375,7 +375,7 @@ fn ir_init() {
         // 64 slots, matching the call-argument cap. Sized larger than an
         // overflow index can actually reach (cap - 6) on purpose: the guard
         // that reads it fails SILENTLY, so headroom is cheaper than that.
-        ir_overflow_args = alloc(64 * 8)
+        ir_overflow_args = cg_alloc(64 * 8)
     }
     ir_overflow_arg_count = 0
 }
@@ -972,7 +972,7 @@ static uint64 ir_slice_len_map = 0
 static uint64 ir_slice_len_count = 0
 
 fn ir_slice_len_set(uint64 name_tok, uint64 len_vreg) {
-    if ir_slice_len_map == 0 { ir_slice_len_map = alloc(32 * 8) }
+    if ir_slice_len_map == 0 { ir_slice_len_map = cg_alloc(32 * 8) }
     if ir_slice_len_count >= 32 { return }
     uint64 entry = ir_slice_len_map + ir_slice_len_count * 8
     uint32 nt = name_tok
@@ -1072,9 +1072,9 @@ fn ir_var_slot_idx(uint64 slot) -> uint64 {
 }
 
 fn ir_var_map_init() {
-    if ir_var_map == 0 { ir_var_map = alloc(1024 * 8) }
+    if ir_var_map == 0 { ir_var_map = cg_alloc(1024 * 8) }
     if ir_var_hash_tbl == 0 {
-        ir_var_hash_tbl = alloc(4096 * 12)
+        ir_var_hash_tbl = cg_alloc(4096 * 12)
         memset(ir_var_hash_tbl, 0, 4096 * 12)
     }
     ir_var_gen = ir_var_gen + 1
@@ -1191,7 +1191,7 @@ fn ir_emit_copy_to_snapshot(uint64 snap_buf, uint64 snap_count, uint64 bb) {
     // Collect the (target = snapshot vreg, source = current vreg) pairs for
     // every variable the body actually changed. NOTE the source recorded here
     // is the live vreg itself, NOT a staging temp — see the conflict test below.
-    uint64 pairs = alloc(snap_count * 16)
+    uint64 pairs = cg_alloc(snap_count * 16)
     uint64 pcnt = 0
     uint64 ci = 0
     while ci < snap_count {
@@ -4823,7 +4823,7 @@ fn ir_lower_stmt(uint64 node) {
         ir_bb_set_succ(ir_current_bb, bb_else, bb_then)
         // Snapshot variable map before then-body
         uint64 if_snap_count = ir_var_map_count
-        uint64 if_snap = alloc(if_snap_count * 8)
+        uint64 if_snap = cg_alloc(if_snap_count * 8)
         uint64 ifi = 0
         while ifi < if_snap_count {
             uint64 ifs = ir_var_map + ifi * 8
@@ -4925,7 +4925,7 @@ fn ir_lower_stmt(uint64 node) {
         ir_bb_set_succ(ir_current_bb, bb_header, 0xFFFFFFFF)
         // Snapshot variable map before header
         uint64 snap_count = ir_var_map_count
-        uint64 snap_buf = alloc(snap_count * 8)
+        uint64 snap_buf = cg_alloc(snap_count * 8)
         uint64 si = 0
         while si < snap_count {
             uint64 sp = ir_var_map + si * 8
@@ -4942,7 +4942,7 @@ fn ir_lower_stmt(uint64 node) {
         ir_bb_set_succ(ir_current_bb, bb_exit, bb_body)
         // Snapshot variable map after header (to know which vregs header uses)
         uint64 hdr_count = ir_var_map_count
-        uint64 hdr_buf = alloc(hdr_count * 8)
+        uint64 hdr_buf = cg_alloc(hdr_count * 8)
         si = 0
         while si < hdr_count {
             uint64 sp = ir_var_map + si * 8
@@ -5029,7 +5029,7 @@ fn ir_lower_stmt(uint64 node) {
         uint64 scrut_v = ir_lower_expr(scrutinee)
         // Snapshot variable map before match
         uint64 match_snap_count = ir_var_map_count
-        uint64 match_snap = alloc(match_snap_count * 8)
+        uint64 match_snap = cg_alloc(match_snap_count * 8)
         uint64 mi = 0
         while mi < match_snap_count {
             uint64 ms = ir_var_map + mi * 8
@@ -5870,7 +5870,7 @@ static uint64 ir_defer_cap = 0
 fn ir_defer_reset() {
     if ir_defer_stack == 0 {
         ir_defer_cap = 32
-        ir_defer_stack = alloc(ir_defer_cap * 4)
+        ir_defer_stack = cg_alloc(ir_defer_cap * 4)
     }
     ir_defer_count = 0
 }
@@ -6015,8 +6015,8 @@ fn ir_liveness_init() {
     // every krc.kr function at the time of writing.
     if ir_live_cap == 0 {
         ir_live_cap = 4096 * 1024 * 8
-        ir_live_in = alloc(ir_live_cap)
-        ir_live_out = alloc(ir_live_cap)
+        ir_live_in = cg_alloc(ir_live_cap)
+        ir_live_out = cg_alloc(ir_live_cap)
     }
     if total > ir_live_cap {
         write(2, "error: liveness bitset overflow\n", 32)
@@ -6132,7 +6132,7 @@ fn ir_compute_liveness() {
             // so per-BB alloc/dealloc overhead is significant.
             if set_bytes > ir_live_tmp_cap {
                 if ir_live_tmp != 0 { dealloc(ir_live_tmp) }
-                ir_live_tmp = alloc(set_bytes)
+                ir_live_tmp = cg_alloc(set_bytes)
                 ir_live_tmp_cap = set_bytes
             }
             uint64 tmp = ir_live_tmp
@@ -6409,7 +6409,7 @@ static uint64 ir_phys_regs_cap = 0
 
 fn ir_phys_regs_ensure() {
     if ir_phys_regs_cap >= 32 { return }
-    ir_phys_regs = alloc(32 * 8)
+    ir_phys_regs = cg_alloc(32 * 8)
     ir_phys_regs_cap = 32
 }
 
@@ -6701,7 +6701,7 @@ fn ir_seed_wide_ceilings_generic(uint64 arch_a64, uint64 cap) {
     uint64 set_bytes = ir_live_words * 8
     if ir_seed_live_buf == 0 {
         ir_seed_live_cap = 1024 * 8
-        ir_seed_live_buf = alloc(ir_seed_live_cap)
+        ir_seed_live_buf = cg_alloc(ir_seed_live_cap)
     }
     if set_bytes > ir_seed_live_cap {
         write(2, "error: seed live buffer overflow\n", 33)
@@ -6874,7 +6874,7 @@ fn ir_color_ceil_reset() {
 fn ir_color_ceil_set(uint64 vreg, uint64 maxc) {
     if ir_color_ceil_cap == 0 {
         ir_color_ceil_cap = 65536
-        ir_color_ceil = alloc(ir_color_ceil_cap * 4)
+        ir_color_ceil = cg_alloc(ir_color_ceil_cap * 4)
     }
     if vreg >= ir_color_ceil_cap { return }
     uint64 p = ir_color_ceil + vreg * 4
@@ -7055,7 +7055,7 @@ fn ir_graph_color() {
     // Register-assignment table — oversized to 65536 vregs once (256 KB).
     if ir_reg_assign_cap == 0 {
         ir_reg_assign_cap = 65536
-        ir_reg_assign = alloc(ir_reg_assign_cap * 4)
+        ir_reg_assign = cg_alloc(ir_reg_assign_cap * 4)
     }
     if vcount > ir_reg_assign_cap {
         write(2, "error: vreg count exceeds ir_reg_assign capacity\n", 49)
@@ -7100,7 +7100,7 @@ fn ir_graph_color() {
     uint64 set_bytes = ir_live_words * 8
     if ir_color_tmp_buf == 0 {
         ir_color_tmp_cap = 1024 * 8
-        ir_color_tmp_buf = alloc(ir_color_tmp_cap)
+        ir_color_tmp_buf = cg_alloc(ir_color_tmp_cap)
     }
     if set_bytes > ir_color_tmp_cap {
         write(2, "error: color tmp buffer overflow\n", 33)
@@ -7244,7 +7244,7 @@ fn ir_graph_color() {
         if ir_uf_parent != 0 { dealloc(ir_uf_parent) }
         ir_uf_cap = vcount
         if ir_uf_cap < 64 { ir_uf_cap = 64 }
-        ir_uf_parent = alloc(ir_uf_cap * 4)
+        ir_uf_parent = cg_alloc(ir_uf_cap * 4)
     }
     uint64 ufi = 0
     while ufi < vcount {
@@ -7260,7 +7260,7 @@ fn ir_graph_color() {
         if ir_uf_deg != 0 { dealloc(ir_uf_deg) }
         ir_uf_deg_cap = vcount
         if ir_uf_deg_cap < 64 { ir_uf_deg_cap = 64 }
-        ir_uf_deg = alloc(ir_uf_deg_cap * 4)
+        ir_uf_deg = cg_alloc(ir_uf_deg_cap * 4)
     }
     uint64 dgi = 0
     while dgi < vcount {
@@ -7513,7 +7513,7 @@ fn ir_graph_color() {
     // colours second sees the first's colour; the order is only a
     // priority. Counting sort keeps this O(vcount).
     if ir_color_order_buf == 0 {
-        ir_color_order_buf = alloc(65536 * 4)
+        ir_color_order_buf = cg_alloc(65536 * 4)
     }
     uint64[256] uc_start
     uint64 wci = 0
@@ -8051,7 +8051,7 @@ fn ir_x86_xmm_mark_unsafe() {
     uint64 set_bytes = ir_live_words * 8
     if ir_seed_live_buf == 0 {
         ir_seed_live_cap = 1024 * 8
-        ir_seed_live_buf = alloc(ir_seed_live_cap)
+        ir_seed_live_buf = cg_alloc(ir_seed_live_cap)
     }
     if set_bytes > ir_seed_live_cap {
         write(2, "error: xmm live buffer overflow\n", 32)
@@ -8178,7 +8178,7 @@ fn ir_x86_xmm_alloc(uint64 enable) {
     ir_xmm_on = 0
     if ir_xmm_map == 0 {
         ir_xmm_map_cap = 65536
-        ir_xmm_map = alloc(ir_xmm_map_cap)
+        ir_xmm_map = cg_alloc(ir_xmm_map_cap)
     }
     if vcount > ir_xmm_map_cap { return }
     memset(ir_xmm_map, 0, vcount)
@@ -8187,7 +8187,7 @@ fn ir_x86_xmm_alloc(uint64 enable) {
     if ir_ig_buf == 0 { return }
     if ir_xmm_block_buf == 0 {
         ir_xmm_block_cap = 65536
-        ir_xmm_block_buf = alloc(ir_xmm_block_cap)
+        ir_xmm_block_buf = cg_alloc(ir_xmm_block_cap)
     }
     if vcount > ir_xmm_block_cap { return }
     memset(ir_xmm_block_buf, 0, vcount)
@@ -13105,7 +13105,7 @@ fn ir_w32_single_def(uint64 v) -> uint64 {
 fn ir_opt_const_fold() {
     // Recompute the per-vreg def count for this pass (LICM/CSE/rotate between
     // const-fold runs add fresh single-def vregs at high indices).
-    if ir_w32_multidef == 0 { ir_w32_multidef = alloc(65536) }
+    if ir_w32_multidef == 0 { ir_w32_multidef = cg_alloc(65536) }
     uint64 ir_cf_clear = ir_vreg_next
     if ir_cf_clear > 65536 { ir_cf_clear = 65536 }
     memset(ir_w32_multidef, 0, ir_cf_clear)
@@ -13727,7 +13727,7 @@ fn ir_opt_dce_mark(uint64 vreg, uint64 changed_ptr) -> uint64 {
 }
 
 fn ir_opt_dce() {
-    if ir_dce_live == 0 { ir_dce_live = alloc(65536) }
+    if ir_dce_live == 0 { ir_dce_live = cg_alloc(65536) }
     uint64 dce_clear = ir_vreg_next
     if dce_clear > 65536 { dce_clear = 65536 }
     memset(ir_dce_live, 0, dce_clear)
@@ -13902,14 +13902,14 @@ fn ir_opt_cse_is_pure(uint64 op) -> uint64 {
 }
 
 fn ir_opt_cse() {
-    if ir_cse_table == 0 { ir_cse_table = alloc(4096 * 40) }
-    if ir_cse_canon == 0 { ir_cse_canon = alloc(65536 * 4) }
+    if ir_cse_table == 0 { ir_cse_table = cg_alloc(4096 * 40) }
+    if ir_cse_canon == 0 { ir_cse_canon = cg_alloc(65536 * 4) }
     if ir_cse_table_gen == 0 {
-        ir_cse_table_gen = alloc(4096 * 4)
+        ir_cse_table_gen = cg_alloc(4096 * 4)
         memset(ir_cse_table_gen, 0, 4096 * 4)
     }
     if ir_cse_canon_gen == 0 {
-        ir_cse_canon_gen = alloc(65536 * 4)
+        ir_cse_canon_gen = cg_alloc(65536 * 4)
         memset(ir_cse_canon_gen, 0, 65536 * 4)
     }
     ir_cse_gen = ir_cse_gen + 1
@@ -14065,9 +14065,9 @@ static uint64 ir_bb_list_cap = 0
 // instead of miscompiling.
 fn ir_build_bb_lists() {
     if ir_bb_list_off == 0 {
-        ir_bb_list_off = alloc(4097 * 4)
+        ir_bb_list_off = cg_alloc(4097 * 4)
         ir_bb_list_cap = 65536
-        ir_bb_list_buf = alloc(ir_bb_list_cap * 4)
+        ir_bb_list_buf = cg_alloc(ir_bb_list_cap * 4)
     }
     if ir_insn_count > ir_bb_list_cap {
         uint64 newcap = ir_bb_list_cap
@@ -14135,7 +14135,7 @@ fn ir_licm_is_hoistable(uint64 op) -> uint64 {
 fn ir_licm_build_def_bb_map() {
     if ir_def_bb_buf == 0 {
         ir_def_bb_cap = 65536
-        ir_def_bb_buf = alloc(ir_def_bb_cap * 4)
+        ir_def_bb_buf = cg_alloc(ir_def_bb_cap * 4)
     }
     if ir_vreg_next > ir_def_bb_cap {
         // Quietly skip — out of capacity
@@ -14308,9 +14308,9 @@ fn ir_opt_licm() {
 }
 
 fn ir_optimize() {
-    if ir_const_values == 0 { ir_const_values = alloc(65536 * 8) }
-    if ir_const_known == 0 { ir_const_known = alloc(65536) }
-    if ir_w32_clean == 0 { ir_w32_clean = alloc(65536) }
+    if ir_const_values == 0 { ir_const_values = cg_alloc(65536 * 8) }
+    if ir_const_known == 0 { ir_const_known = cg_alloc(65536) }
+    if ir_w32_clean == 0 { ir_w32_clean = cg_alloc(65536) }
     uint64 opt_clear = ir_vreg_next
     if opt_clear > 65536 { opt_clear = 65536 }
     memset(ir_const_known, 0, opt_clear)
@@ -14568,8 +14568,8 @@ fn ir_lea_mem_reads(uint64 ii, uint64 v) -> uint64 {
 }
 
 fn ir_opt_fuse_lea_mem() {
-    if ir_lea_mem_matched == 0 { ir_lea_mem_matched = alloc(256 * 4) }
-    if ir_lea_mem_dirty == 0 { ir_lea_mem_dirty = alloc(65536) }
+    if ir_lea_mem_matched == 0 { ir_lea_mem_matched = cg_alloc(256 * 4) }
+    if ir_lea_mem_dirty == 0 { ir_lea_mem_dirty = cg_alloc(65536) }
     uint64 lm_clear = ir_vreg_next
     if lm_clear > 65536 { lm_clear = 65536 }
     memset(ir_lea_mem_dirty, 0, lm_clear)
@@ -14732,7 +14732,7 @@ static uint64 ir_def_idx_cap = 0
 fn ir_build_def_idx() {
     if ir_def_idx_buf == 0 {
         ir_def_idx_cap = 65536
-        ir_def_idx_buf = alloc(ir_def_idx_cap * 4)
+        ir_def_idx_buf = cg_alloc(ir_def_idx_cap * 4)
     }
     // 0xFFFFFFFF sentinel = no def found. Only clear the live vreg range —
     // ir_def_idx guards vreg >= ir_vreg_next, so stale entries above the
@@ -14960,7 +14960,7 @@ fn ir_naked_diagnose_generic(uint64 fn_node, uint64 arch_a64) {
     uint64 set_bytes = ir_live_words * 8
     if ir_seed_live_buf == 0 {
         ir_seed_live_cap = 1024 * 8
-        ir_seed_live_buf = alloc(ir_seed_live_cap)
+        ir_seed_live_buf = cg_alloc(ir_seed_live_cap)
     }
     if set_bytes > ir_seed_live_cap { return }
     uint64 tmp = ir_seed_live_buf
@@ -15507,21 +15507,21 @@ fn ir_emit_x86_function(uint64 fn_node) {
     if bo_need < 4096 { bo_need = 4096 }
     if bo_need > ir_block_offsets_cap {
         if ir_block_offsets != 0 { dealloc(ir_block_offsets) }
-        ir_block_offsets = alloc(bo_need * 8)
+        ir_block_offsets = cg_alloc(bo_need * 8)
         ir_block_offsets_cap = bo_need
     }
     uint64 br_need = ir_bb_count * 4
     if br_need < 2048 { br_need = 2048 }
     if br_need > ir_br_fixups_cap {
         if ir_br_fixups != 0 { dealloc(ir_br_fixups) }
-        ir_br_fixups = alloc(br_need * 8)
+        ir_br_fixups = cg_alloc(br_need * 8)
         ir_br_fixups_cap = br_need
     }
     uint64 ret_need = ir_bb_count
     if ret_need < 1024 { ret_need = 1024 }
     if ret_need > ir_ret_fixups_cap {
         if ir_ret_fixups != 0 { dealloc(ir_ret_fixups) }
-        ir_ret_fixups = alloc(ret_need * 4)
+        ir_ret_fixups = cg_alloc(ret_need * 4)
         ir_ret_fixups_cap = ret_need
     }
     ir_br_fixup_count = 0

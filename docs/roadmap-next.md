@@ -67,7 +67,7 @@ ApexRift was and why.
 
 **(Historic) arm64 `in`/`out` asm constraints are documented, not
 implemented.** Found porting ApexRift's crash record to native arm64 (not an
-embedded target, but the same IR). `docs/LANGUAGE.md:1057` lists `x0`…`x30` as
+embedded target, but the same IR). `docs/LANGUAGE.md:1201` lists `x0`…`x30` as
 valid ARM64 register names for `in`/`out` clauses, and that section's own
 Limitations list does not exclude them — but `krc2 --arch=arm64` rejects any
 such constraint with `unknown inline-asm constraint register 'x0' (want rax
@@ -77,7 +77,7 @@ feature. The natural escape hatch, `@naked` on a value-returning function, is
 also blocked — the all-paths-return check runs before naked-ness is
 considered, so `@naked fn f() -> uint64 {...}` fails "may not return a value
 on all paths" even when the body is one asm block that sets the return
-register (`docs/CHEATSHEET.md:252` shows only the void form). Net effect: no
+register (`docs/CHEATSHEET.md:257` shows only the void form). Net effect: no
 supported way to read an arm64 system register into a KernRift variable —
 `arch/arm64/a64_sysreg.kr` in ApexRift works around it by storing the
 register to memory from asm and reading it back with `load64`, an unchecked
@@ -343,7 +343,7 @@ nonsense.
 The `in(...)`/`out(...)` constraints do not help: x86 register names are the
 only names accepted on any target (`in(a -> rax)` above compiles clean for
 arm64, and `x0` is rejected for arm64 — the mirror-image complaint already
-recorded in `docs/LANGUAGE.md:1057` vs. what the compiler implements). So there
+recorded in `docs/LANGUAGE.md:1201` vs. what the compiler implements). So there
 is no way to write a raw-hex asm block that refuses to build for the wrong
 architecture.
 

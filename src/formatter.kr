@@ -11,7 +11,7 @@ fn fmt_file(uint64 path) {
         exit(1)
     }
     uint64 size = file_size(fd)
-    uint64 src = alloc(size + 1)
+    uint64 src = cg_alloc(size + 1)
     uint64 fgot = read_exact(fd, src, size)
     file_close(fd)
     if fgot != size {
@@ -27,7 +27,7 @@ fn fmt_file(uint64 path) {
 
     // Output buffer (generous: 2x input)
     uint64 out_cap = size * 2 + 1024
-    uint64 out = alloc(out_cap)
+    uint64 out = cg_alloc(out_cap)
     uint64 op = 0
 
     uint64 depth = 0

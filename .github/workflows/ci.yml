@@ -144,7 +144,7 @@ jobs:
           echo '#!/bin/bash' > /tmp/krc-test
           echo 'exec ./build/krc2 --arch=x86_64 "$@"' >> /tmp/krc-test
           chmod +x /tmp/krc-test
-          KRC=/tmp/krc-test bash tests/run_tests.sh
+          KRC=/tmp/krc-test KRC_RAW="$PWD/build/krc2" bash tests/run_tests.sh
 
       - name: Smoke suite (Linux x86_64 IR)
         run: KRC=./build/krc2 bash tests/smoke/run.sh
@@ -671,7 +671,7 @@ jobs:
           echo '#!/bin/bash' > /tmp/krc-test
           echo 'exec ./build/krc3 --arch=arm64 "$@"' >> /tmp/krc-test
           chmod +x /tmp/krc-test
-          KRC=/tmp/krc-test bash tests/run_tests.sh
+          KRC=/tmp/krc-test KRC_RAW="$PWD/build/krc3" bash tests/run_tests.sh
           TESTEXIT=$?
           echo
           echo "=== SUMMARY ==="

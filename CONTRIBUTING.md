@@ -28,7 +28,7 @@ first failure:
    compiles itself to a stable fixed point).
 2. **Test suite** — run it as `make test`, never as bare `bash
    tests/run_tests.sh` (which defaults `KRC` to `build/krc3` with no `--arch`
-   and reports mass failures on a healthy tree). 2045 tests on this tree.
+   and reports mass failures on a healthy tree). 2065 tests on this tree.
 3. **IR-vs-legacy differential** — `tests/diff_ir_legacy.sh` and
    `diff_ir_legacy_stdout.sh` compile+run each probe on all four backends
    (IR/legacy × x86_64/arm64, arm64 under `qemu-aarch64-static`) and
@@ -45,10 +45,10 @@ first failure:
 toolchain still gives a usable answer. **For merge and release gating run
 `make gate`** (`REQUIRE_FULL_RUN=1 make test`; no CI workflow sets it, so a
 release is gated by running it by hand on a host with every tool): in that
-mode every skip is a FAIL -- a
-missing tool (wine, qemu, python3), or the README row-count gate on a partial
-toolchain -- and the failure names the missing tool, so the gate passes only
-when every row ran and passed.
+mode every skip is a FAIL -- a missing tool (wine, qemu, objdump, the
+xtensa/riscv toolchains, python3), a precondition the suite cannot satisfy
+itself, or a sub-check that did not run -- and the failure names what is
+missing, so the gate passes only when every row ran and passed.
 
 ### Local merge gates: `make pe-gate` (and `make gate`)
 

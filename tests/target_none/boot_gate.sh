@@ -51,7 +51,7 @@
 # first design passed with the subject broken or absent (review 2, O5).
 #
 # HARD DEPENDENCIES — absence of any is a FAILURE, never a skip. The suite's
-# existing qemu skips (tests/run_tests.sh:5240, :5720) do not increment TOTAL,
+# existing qemu skips (tests/run_tests.sh:13268, :13748) do not increment TOTAL,
 # so a skip there is indistinguishable from a pass; that pattern is exactly
 # what this gate must not copy.
 #
@@ -471,11 +471,12 @@ X86_STACK_TOP=0x90000
 # headers for what each address actually is in image form.
 #
 # EXIT STATUS IS CHECKED, AND SO IS THE ARTIFACT'S SIZE. The `image:` line is
-# printed BEFORE the file is written (src/main.kr, report ~:3204 vs
-# codegen_write_output ~:3383), so a well-formed report can describe a file
+# printed BEFORE the file is written (src/main.kr, report ~:5264 vs
+# codegen_write_output ~:5767), so a well-formed report can describe a file
 # that does not exist and a grep-only parse goes green on it. Exit status
-# alone does not close that either: codegen_write_output ignores file_write's
-# return (src/codegen.kr:16126-16130), so a SHORT write exits 0. All three are
+# alone did not close that either: codegen_write_output used to ignore
+# file_write's return, so a SHORT write exited 0 (it now stops on one,
+# write_all_or_die, src/codegen.kr:20608). All three are still
 # required here — exit 0, a parsable line, and on-disk size == the reported
 # filesz. The full compiler output is kept beside the artifact ($WORK survives
 # a red run) instead of going to /dev/null as the ELF form did, so a failed
@@ -1225,8 +1226,8 @@ leg1() {
     # THE REPORT-vs-entry_addr CLAUSE IS A TAUTOLOGY WITH RESPECT TO THE
     # COMPILER. Both numbers are the SAME variable: `xs_start32` in
     # emit_x86_image_stub feeds `patch_u32(xs_hdr_entry, ld + xs_start32)`
-    # (src/main.kr:2537) AND `x86stub_start32_off` -> `img_stub_off` ->
-    # `entry_off` (:2403, :3119, :3586), which is what the `image:` line
+    # (src/main.kr:3015) AND `x86stub_start32_off` -> `img_stub_off` ->
+    # `entry_off` (:2806, :4311, :4897), which is what the `image:` line
     # prints. They cannot disagree, so on its own this clause catches a
     # spelling or parsing mistake in THIS SCRIPT and nothing about the
     # compiler. Demonstrated: publishing the entry two bytes late — skipping
@@ -2418,7 +2419,7 @@ UEFI_BATCH_POS=""
 # Compile a gate program to a UEFI APPLICATION and echo the reported entry RVA
 # (decimal) on stdout.
 #
-# THE `image:` SED AT :474-475 DOES NOT MATCH THIS BUILD, and that is the reason
+# THE `image:` SED AT :521-522 DOES NOT MATCH THIS BUILD, and that is the reason
 # this is a separate function rather than a fifth argument to build_image. The
 # --emit=uefi report line is
 #     uefi: arch=x86_64 entry=4772 filesz=8192 memsz=8192 hdr=4096
@@ -3105,7 +3106,7 @@ leg8() {
 #     the only difference. `rv_verdict` accepts either shape under one name,
 #     because what discriminates the map fault is that **`L` NEVER PRINTS**, not
 #     the tail of the capture. A control that grepped for a capture ENDING in
-#     `RP` would pass on a correct compiler too (tests/run_tests.sh:9116 carries
+#     `RP` would pass on a correct compiler too (tests/run_tests.sh:17548 carries
 #     the same warning).
 #   * THE RAM CEILING IS NOT THE MAP CEILING. `--stack-top` is validated against
 #     the 4 GiB identity map, and the compiler cannot know how much RAM the

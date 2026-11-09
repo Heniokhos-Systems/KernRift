@@ -32,10 +32,10 @@ build: build/krc2
 # clobbered, slice bus-errors at startup).
 #
 # `kr` is a shell wrapper (packaging/kr.sh) that catches exit 120 from
-# kr-bin and re-execs the extracted ./kr-exec — needed on Termux/Android
-# where raw execve from app data dirs is SELinux-denied. Other hosts hit
-# the wrapper's `exit $status` line as a no-op since the runner exec's
-# the slice directly.
+# kr-bin and runs the slice kr-bin wrote to the wrapper's own per-run file
+# ($KR_EXEC_FALLBACK) — needed on Termux/Android where raw execve from app
+# data dirs is SELinux-denied. Other hosts hit the wrapper's `exit $status`
+# line as a no-op since the runner exec's the slice directly.
 kr-runner: build/kr build/kr-bin
 
 build/kr-runner.kr: src/runner.kr src/bcj.kr
@@ -61,7 +61,7 @@ build/kr: packaging/kr.sh
 	@echo "Built build/kr (shell wrapper for kr-bin)"
 
 # $(SRCS) is main.kr's import list, hand-inlined in dependency order, so
-# main.kr's own 25 `import` lines are dead text once concatenated -- and they
+# main.kr's own `import` lines are dead text once concatenated -- and they
 # land MID-FILE, past the leading run that import_process() reads. They were
 # tolerated only because the parser used to discard a stray top-level `import`
 # without a word; it now rejects one, because that silence is what made a
@@ -69,8 +69,9 @@ build/kr: packaging/kr.sh
 #
 # Dropping them costs nothing: `krc src/main.kr` (imports, no concat) and the
 # stripped concat compile to byte-identical output. The anchored pattern
-# matches only column-0 `import "`, which in $(SRCS) is exactly those 25 lines
-# -- an indented or otherwise-shaped import would survive the filter and then
+# matches only column-0 `import "`, which in $(SRCS) is exactly main.kr's own
+# `import` lines (no count here: it goes stale whenever a source file is
+# added) -- an indented or otherwise-shaped import would survive the filter and then
 # fail the build loudly, which is the outcome we want.
 build/krc.kr: $(SRCS)
 	@mkdir -p build
@@ -99,6 +100,30 @@ build-import: build/krc2
 	chmod +x build/krc-import
 
 # Run test suite
+# How the suite is run (review rounds 9-10):
+# - Refused up front if the checkout path or TMPDIR contains whitespace: the
+#   suite passes paths unquoted in hundreds of places and does not support
+#   it.
+# - The compiler wrapper is build/krc-test, inside this checkout (build/ is
+#   ignored): no shared /tmp name, nothing to clean up. It is written to
+#   build/krc-test.<pid> and renamed into place, and it execs
+#   build/krc2 next to it by its own absolute path, so a row that cds
+#   elsewhere still finds the compiler.
+# - The suite runs in the background in its own session (setsid, where
+#   available), so INT, TERM and HUP reach this recipe's traps at once (a
+#   foreground child would defer them until the whole suite ended), and each
+#   trap sends TERM to every process in the suite's session -- the running
+#   row's children included, even those `timeout` put in a process group of
+#   their own (pkill -s; the group and the pid as a fallback) -- and exits
+#   130, 143 or 129. The suite's own TERM trap then removes its private
+#   TMPDIR and the files its rows name after its pid. The traps read $$! rather
+#   than a variable set after `&`, so there is no window where the suite has
+#   started but cannot be found.
+# - Measured (round 11): Ctrl-C, or INT/TERM/HUP sent to make's process
+#   group, ends the run within a second, no suite process left; TERM sent to
+#   make alone does the same (make passes TERM on to the recipe); INT or HUP
+#   sent to make alone is NOT passed on, so make waits and the suite runs to
+#   its end.
 # Depends on build/kr-bin because the suite asserts the RUNNER's reported
 # version matches the changelog. That check deliberately fails rather than
 # skips when the binary is absent, so the binary has to be built here --
@@ -106,8 +131,17 @@ build-import: build/krc2
 # to prevent.
 test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
-	@echo '#!/bin/bash' > /tmp/krc-test && echo 'exec ./build/krc2 --arch=x86_64 "$$@"' >> /tmp/krc-test && chmod +x /tmp/krc-test
-	@KRC=/tmp/krc-test bash tests/run_tests.sh
+	@case "$(CURDIR)" in *[[:space:]]*) echo "error: make test: the checkout path '$(CURDIR)' contains whitespace, which the suite does not support; move the checkout" >&2; exit 2 ;; esac; \
+	 case "$${TMPDIR:-/tmp}" in *[[:space:]]*) echo "error: make test: TMPDIR '$$TMPDIR' contains whitespace, which the suite does not support; unset it or choose another" >&2; exit 2 ;; esac; \
+	 t="build/krc-test.$$$$"; \
+	 trap 'rm -f "$$t"' EXIT; \
+	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 130' INT; \
+	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 143' TERM; \
+	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 129' HUP; \
+	 printf '%s\n' '#!/bin/bash' 'exec "$${0%/*}/krc2" --arch=x86_64 "$$@"' > "$$t" && chmod +x "$$t" && mv -f "$$t" build/krc-test || exit 1; \
+	 S=; command -v setsid > /dev/null 2>&1 && S=setsid; \
+	 KRC="$(CURDIR)/build/krc-test" $$S bash tests/run_tests.sh & \
+	 wait $$!; st=$$?; exit $$st
 
 # The local merge gate of #143 (Windows unwind tables): the full suite, run as
 # `make gate` runs it (make test under REQUIRE_FULL_RUN=1), to a log, then

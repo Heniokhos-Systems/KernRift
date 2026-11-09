@@ -5,12 +5,12 @@
 // 32-byte slice, inserted between the stack-array region and the
 // callee-saved block).
 //
-// str_len("abcd") -> 4: byte-scan-to-NUL loop (mirror of ir_riscv.kr:1684,
+// str_len("abcd") -> 4: byte-scan-to-NUL loop (mirror of ir_riscv.kr:1703,
 // STRLEN "abcd" already materializes fine via Task 1's STR_CONST — STRLEN
 // is the first genuinely NEW op this test hits).
 //
 // str_eq("hi","hi") -> 1, str_eq("hi","ho") -> 0: byte-by-byte compare loop
-// (mirror of ir_riscv.kr:1721), no condition flags on this ISA so the
+// (mirror of ir_riscv.kr:1740), no condition flags on this ISA so the
 // CMP+B.NE pair becomes a direct two-register `bne`/`beqz` pair.
 //
 // fmt_uint(buf, 60705) -> writes "60705" (5 ASCII digits, correct
@@ -21,7 +21,7 @@
 // riscv's t5_fmtuint.kr choosing 12345 for the same reason — every digit
 // position is distinct). The returned count (not a NUL scan) drives how
 // many bytes of buf get printed, matching FMT_UINT's actual contract
-// (ir.kr:2190-2199: "dest = digit count").
+// (ir.kr:2910-2919: "dest = digit count").
 //
 // Expected output under `qemu-system-xtensa -M lx60 -semihosting`:
 //   4

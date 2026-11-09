@@ -31,7 +31,7 @@ import "gpu_portable.kr"
 import "gpu_navi32.kr"
 import "gmc_constants.kr"
 
-// The validated CONTEXT0 CNTL value (MLRift gmc.mlr:323, live 4/4). Also
+// The validated CONTEXT0 CNTL value (MLRift gmc.mlr:323 at f0ab7c9, live 4/4). Also
 // the vm_context_cntl handed to MES ADD_QUEUE: amdgpu's add_hw_queue
 // packs hub->vm_cntx_cntl (the per-VMID context CNTL template); ours is
 // depth=1 to match the 2-level PD0+PT — self-consistent with the
@@ -288,7 +288,7 @@ fn gmc_init_aperture_identity(u64 bar5,
 // fetch through GFXHUB, NOT MMHUB — MES ucode ICACHE fetch of
 // CP_MES_IC_BASE needs THIS hub up. Byte-for-byte mirror of the MMHUB
 // identity sequence at GCVM/GCMC offsets @ NAVI32_GC0 (BASE_IDX 0);
-// offsets verified vs gc_11_0_0_offset.h in MLRift gmc.mlr:441-463
+// offsets verified vs gc_11_0_0_offset.h in MLRift gmc.mlr:441-463 (at f0ab7c9)
 // (same UTCL2 IP/field layout as MMHUB). depth-0 CONTEXT0 => GC-client
 // MC addr == bus address (no page-table walk).
 // =====================================================================

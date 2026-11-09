@@ -125,8 +125,10 @@ KRC="${KRC:-$REPO/build/krc2}"
 # a bare compiler produces a fat KRBOFAT container. Anything else means $KRC
 # is injecting an arch somewhere, and gate 1 cannot measure through it.
 if [ -n "${KRC:-}" ]; then
-    _pk_src="$(mktemp /tmp/krc_archprobe_XXXXXX.kr)"
-    _pk_out="$(mktemp -u /tmp/krc_archprobe_XXXXXX.bin)"
+    _pk_src="$(mktemp "${TMPDIR:-/tmp}/krc_archprobe_XXXXXX.kr")" && [ -n "$_pk_src" ] \
+        || { echo "error: mktemp failed for the arch probe" >&2; exit 2; }
+    _pk_out="$(mktemp -u "${TMPDIR:-/tmp}/krc_archprobe_XXXXXX.bin")" && [ -n "$_pk_out" ] \
+        || { rm -f "$_pk_src"; echo "error: mktemp -u failed for the arch probe" >&2; exit 2; }
     printf 'fn main() -> uint64 {\n    return 0\n}\n' > "$_pk_src"
     if $KRC "$_pk_src" -o "$_pk_out" >/dev/null 2>&1 && [ -s "$_pk_out" ]; then
         _pk_magic="$(head -c 8 "$_pk_out" | od -An -tx1 | tr -d ' \n')"
@@ -165,18 +167,154 @@ fi
 # in the commit message which rows moved and why. Do not re-base it to silence a
 # surprise.
 #
-# One consequence of pinning it to a MERGED commit rather than a fork point:
-# BEFORE is now HEAD's own sources compiled by the compiler under test, so a
-# freshly re-based gate 1 is a self-build comparison and passes only at the
-# bootstrap fixed point. Run `make bootstrap` first if it reports a wide diff.
-# RE-PINNED to c2ecc49 (main) on suite-skip-hygiene, review round 13. 6e37819's
-# sources no longer compile under the compiler they are compared with (main's
-# duplicate-static refusal), so gate 1 could not run at all ("the BASE sources
-# did not compile"). Against c2ecc49 every row is identical: this branch
-# changes tests only.
-# RE-PINNED to e19daac (main) by the merge of suite-skip-hygiene: the main it
-# joins, so every row must be identical (the merge changes no compiler code).
-TN_BASE="${TN_BASE:-e19daaccf8156f22cbba4588c988007453662fd0}"
+# One consequence of pinning it to a COMMIT rather than a fork point: BEFORE is
+# TN_BASE's sources compiled by the compiler under test. If TN_BASE is set to
+# HEAD itself that degenerates into a self-build comparison which passes only at
+# the bootstrap fixed point -- run `make bootstrap` first if it reports a wide
+# diff. It is NOT set to HEAD today; see the re-base note below, which pins it
+# one codegen commit behind HEAD on purpose so the comparison still has two
+# distinct source trees in it.
+#
+# RE-BASED 2026-09-28 to daf57b7, the inliner argument-effect fix, which moved
+# 12 of these 147 rows. Recorded here so the next reader does not have to
+# reconstruct it:
+#
+#   WHAT MOVED. Every row whose input is tests/target_none/corpus/arith.kr --
+#   bm_image / bm_image_stub / bm_uefi / bm_arx on both arches,
+#   bm_resetvec_x86_64_arith, rv32_hosted_arith, rv32_freestanding_arith and
+#   xt_freestanding_arith. Nothing else in the matrix moved, on any arch, any
+#   container or any backend; bmarr.kr and probe_io.kr are untouched.
+#
+#   WHY. arith.kr:27 is `counter = add3(counter, table[i], i)`. daf57b7 made
+#   the inliner decline a call whose argument is not effect-free, and
+#   `table[i]` is an Index node, which inline_kind_is_pure does not whitelist
+#   and deliberately must not (an index read can fault, and under --debug it
+#   emits a bounds check that aborts). So add3 is no longer inlined there: ONE
+#   static call site loses its inline, and because that site sits in the
+#   `while i < 8` loop the emitted call runs eight times. One declined site,
+#   not eight -- the earlier wording of this note said "eight declined calls",
+#   which overstated it.
+#
+#   WHY THAT IS SAFE. add3's body reads each parameter exactly once, in
+#   parameter order, unconditionally, so inlining WAS sound there; declining is
+#   a missed optimisation, not a correctness change. Verified by EXECUTION, not
+#   argued. arith.kr parks in `loop { }` and cannot be run, so the argument uses
+#   a variant with `exit(counter & 0xFF)` in place of the park, built by three
+#   compilers -- base ab51c92, the guard commit daf57b7, and HEAD -- and run
+#   on every target among these 12 rows that can be executed here:
+#
+#     --arch=riscv32 {IR, --legacy, --O0}, qemu-riscv32-static
+#         rc=209 from all three compilers in all three configs (9 runs)
+#     --arch=riscv32 --freestanding, qemu-system-riscv32 -machine virt -bios
+#         status=209 from all three compilers
+#     --arch=xtensa --freestanding, qemu-system-xtensa -M lx60 -semihosting
+#         status=209 from all three compilers
+#     --arch=x86_64 and --arch=arm64, {IR, --O0}
+#         rc=209 from all three compilers (arm64 under qemu-aarch64-static)
+#
+#   and the declined inline is visible in the artifact: `call @` in main for
+#   --emit=ir --arch=riscv32 goes 1 (base) -> 2 (HEAD), the second being add3.
+#
+#   ONE CAVEAT, STATED BECAUSE AN EARLIER VERSION OF THIS NOTE GOT IT WRONG:
+#   under --legacy the hosted x86_64 and arm64 variant returns rc=139, NOT 209.
+#   That is NOT caused by this change -- it is identical on base, on the
+#   top-down guard and on HEAD. It is defect #99, and the input carries it:
+#   arith.kr declares `static uint32 table[8]`, a C-style array declaration
+#   KernRift does not have. The parser swallows the stray `[8]` as top-level
+#   junk without a diagnostic, so `table` is ONE uint32 static, and `table[i]`
+#   on a scalar is no array access: the IR backend reads and writes table's
+#   own address whatever i is (one byte on x86_64 and arm64), which still
+#   yields 209 because only the low byte of each mix(i) reaches the sum and
+#   the result is taken & 0xFF; the --legacy x86_64 and arm64 builds take
+#   the base from a stack slot main never writes (0 under gdb on x86_64), add
+#   i unscaled and store 8 bytes there (`mov %rax,(%rcx)`, rcx = 0) -- a wild
+#   write, which faults at i = 0 (SIGSEGV, rc=139). The
+#   same variant with the declaration written `static uint32[8] table` returns
+#   209 under --legacy on both (and on the IR backend and --O0), measured with
+#   this branch's compiler. The frozen input is left as is on this branch: the
+#   parse error for top-level junk, the corrected arith.kr and its re-frozen
+#   pin land together on lexer-import-fixes. (An earlier version of this note
+#   called the 139 "a pre-existing --legacy defect in the static uint32
+#   table[8] indexed in a loop", which put it in the backend; it is the input.)
+#   The riscv32 --legacy leg is unaffected (209). An earlier draft of this
+#   comment claimed 209 "on the IR backend, --legacy and --O0", which was false
+#   for the two 64-bit --legacy legs; the conclusion stands because the number
+#   is the same before and after, but the sentence did not.
+#
+#   WHAT IS STILL EXECUTION-UNVERIFIED, AND IT IS NOT COVERED ELSEWHERE.
+#   Of the 9 bare-metal rows among these 12 -- bm_image / bm_image_stub /
+#   bm_uefi / bm_arx on each of x86_64 and arm64, plus
+#   bm_resetvec_x86_64_arith -- 6 have never been booted by anything:
+#   bm_image on x86_64, bm_uefi on both arches, bm_arx on both arches, and
+#   bm_resetvec. bm_image on x86_64 has no --stack-top, hence no multiboot
+#   header, and `qemu-system-x86_64 -kernel` refuses it ("invalid kernel
+#   header" -- boot_gate.sh's L1_no_header_image_refused asserts exactly that);
+#   this tree has no other loader for a headerless x86_64 image.
+#
+#   DO NOT read "boot_gate.sh is the tree's boot harness" as a pointer to
+#   coverage for them. It is not. boot_gate.sh boots its OWN programs --
+#   tests/target_none/boot/{sentinel,uefi_sentinel,heap*}_{x86,a64}.kr -- and
+#   the string "arith.kr" does not appear in it. No script in this tree boots
+#   arith.kr under any container. The argument for those 6 rows is therefore
+#   an inference, not a measurement: they share the IR and codegen paths with
+#   the hosted x86_64/arm64 legs above, which DO execute at 209 on all three
+#   compilers. If you need them proven, they need a harness written.
+#
+#   3 of the 9 HAVE been executed, externally and by hand rather than by this
+#   script, with an arith variant that prints `ARITH=<counter & 0xFF>` over the
+#   16550 / PL011 instead of parking, built at boot_gate.sh's addresses
+#   (--load-addr=0x400000 / 0x40400000 and, for the stub form,
+#   --stack-top=0x90000 / 0x40800000) rather than this script's:
+#     bm_image_stub x86_64   qemu-system-x86_64 -kernel <image>
+#     bm_image_stub arm64    -device loader,file=<image>,force-raw=on plus a
+#                            reset-PC -device loader on the emitted stub
+#     bm_image arm64         the same image placement behind boot_gate.sh's
+#                            EXTERNAL make_stub.py stub, which sets SP and
+#                            branches to the entry (with the reset PC parked
+#                            on the entry itself and no SP it stays silent)
+#   All three printed serial='ARITH=209' from compilers built from base
+#   ab51c92, the guard commit daf57b7 and this branch's HEAD; the headerless
+#   x86_64 bm_image was refused by qemu on all three. An earlier version of
+#   this note said all four bm_image/bm_image_stub rows ran, the x86_64 ones
+#   "via -kernel" and all of them built with --stack-top=: a --stack-top=
+#   build IS bm_image_stub, so what ran under the bm_image name on x86_64 was
+#   the stub build, and the headerless bm_image cannot boot that way. It also
+#   said this narrowed the unverified set from 9 to 5; it narrows it to 6.
+#   NOT automated here, so a future run of this script does not re-establish
+#   it.
+#
+#   The baseline is therefore re-seeded rather than left reporting. A gate
+#   that is known-noisy stops being read, and the next person could not have
+#   told this expected delta from a real one.
+#
+# Pinned to 1679573, the first parent of the merge that re-pinned it: that
+# merge's own sources are the AFTER side, so gate 1 compares two distinct
+# trees, and every row the merge moved is listed in G1_MOVED below.
+TN_PIN=167957314804a5205eee89c20b2d12a6e4f9b081
+# G1_MOVED: the rows TN_PIN is EXPECTED to differ on, one name per line, each
+# with its exit status unchanged. A commit that moves output on purpose (a
+# merge of a codegen change, say) may pin to its own parent and list here
+# exactly what it moved, instead of leaving gate 1 red or comparing HEAD with
+# itself. A row that differs and is not listed, a listed row that does not
+# differ, and a change of exit status all fail. The list belongs to the pin:
+# with TN_BASE set from outside to another commit it is empty (every row must
+# be identical) unless G1_MOVED_WANT is set too.
+# Pinned by the merge of defect-sweep to its first parent (1679573); these are
+# the rows that merge moved, measured when it was made (12 of 147).
+G1_MOVED="bm_arx_arm64_arith
+bm_arx_x86_64_arith
+bm_image_arm64_arith
+bm_image_stub_arm64_arith
+bm_image_stub_x86_64_arith
+bm_image_x86_64_arith
+bm_resetvec_x86_64_arith
+bm_uefi_arm64_arith
+bm_uefi_x86_64_arith
+rv32_freestanding_arith
+rv32_hosted_arith
+xt_freestanding_arith"
+TN_BASE="${TN_BASE:-$TN_PIN}"
+if [ "$TN_BASE" = "$TN_PIN" ]; then G1_MOVED_WANT="${G1_MOVED_WANT-$G1_MOVED}"; else G1_MOVED_WANT="${G1_MOVED_WANT-}"; fi
 
 MODE="both"
 case "${1:-}" in
@@ -196,13 +334,17 @@ if [ ! -x "$KRC" ]; then
     exit 2
 fi
 
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_tn_gate_XXXXXX")
+# A failed mktemp must stop the gate: with TMP empty every path below would
+# be rooted at / ("$TMP/base" is /base).
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_tn_gate_XXXXXX") && [ -n "$TMP" ] && [ -d "$TMP" ] \
+    || { echo "error: mktemp -d failed under ${TMPDIR:-/tmp}" >&2; exit 2; }
 # Gate 2's programs import "../std/...". Imports resolve against the importing
 # FILE's own directory first, then against the INSTALLED stdlib -- so a program
 # in /tmp would either fail to resolve or silently pick up whatever
 # ~/.local/share/kernrift/std happens to hold, which is not the tree under
 # test. This directory therefore has to live in the repo.
-INREPO=$(mktemp -d "$REPO/krc_tn_gate_XXXXXX")
+INREPO=$(mktemp -d "$REPO/krc_tn_gate_XXXXXX") && [ -n "$INREPO" ] && [ -d "$INREPO" ] \
+    || { rm -rf "$TMP"; echo "error: mktemp -d failed under $REPO" >&2; exit 2; }
 cleanup() { rm -rf "$TMP" "$INREPO"; }
 trap cleanup EXIT
 
@@ -437,6 +579,7 @@ DERIVE
 
     # --- run the matrix -----------------------------------------------------
     G1_ROWS=0; G1_SAME=0; G1_DIFF=0; G1_ARTIFACTS=0; G1_DIFFLIST=""; G1_NOBUILD=""
+    G1_MOVED_GOT=""; G1_EXIT_CHANGED=""
     while IFS='|' read -r name flags input; do
         [ -n "$name" ] || continue
         G1_ROWS=$((G1_ROWS + 1))
@@ -463,6 +606,9 @@ DERIVE
             G1_SAME=$((G1_SAME + 1))
         else
             G1_DIFF=$((G1_DIFF + 1))
+            G1_MOVED_GOT="$G1_MOVED_GOT$name
+"
+            [ "$bst" = "$ast" ] || G1_EXIT_CHANGED="$G1_EXIT_CHANGED $name($bst->$ast)"
             G1_DIFFLIST="$G1_DIFFLIST
     $name: exit $bst->$ast, ${bh:0:12}->${ah:0:12}  [$flags $(basename "$input")]"
         fi
@@ -498,10 +644,20 @@ DERIVE
     else
         ok "gate1_build_outcomes" "140 rows built, 7 refused (the suite's own esp32-guard and riscv32 IR-op-52 negatives, and krc.kr for windows under --legacy / --emit=obj)"
     fi
-    if [ "$G1_DIFF" = "0" ]; then
+    G1_MOVED_GOT=$(printf '%s' "$G1_MOVED_GOT" | sed '/^$/d' | sort)
+    G1_MOVED_WANT_S=$(printf '%s\n' "$G1_MOVED_WANT" | sed 's/^ *//; /^$/d' | sort)
+    if [ "$G1_DIFF" = "0" ] && [ -z "$G1_MOVED_WANT_S" ]; then
         ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical"
+    elif [ -n "$G1_MOVED_WANT_S" ] && [ "$G1_MOVED_GOT" = "$G1_MOVED_WANT_S" ] && [ -z "$G1_EXIT_CHANGED" ]; then
+        ok "gate1_byte_identity" "$G1_SAME/$G1_ROWS rows identical; the other $G1_DIFF moved exactly as G1_MOVED lists for this pin, every exit status unchanged"
     else
-        bad "gate1_byte_identity" "$G1_DIFF of $G1_ROWS rows differ:$G1_DIFFLIST"
+        G1_WHY=""
+        [ -z "$G1_EXIT_CHANGED" ] || G1_WHY="$G1_WHY exit status changed:$G1_EXIT_CHANGED;"
+        G1_UNLISTED=$(comm -23 <(printf '%s\n' "$G1_MOVED_GOT" | sed '/^$/d') <(printf '%s\n' "$G1_MOVED_WANT_S" | sed '/^$/d') | tr '\n' ' ')
+        G1_STALE=$(comm -13 <(printf '%s\n' "$G1_MOVED_GOT" | sed '/^$/d') <(printf '%s\n' "$G1_MOVED_WANT_S" | sed '/^$/d') | tr '\n' ' ')
+        [ -z "$G1_UNLISTED" ] || G1_WHY="$G1_WHY differ but not listed: $G1_UNLISTED;"
+        [ -z "$G1_STALE" ] || G1_WHY="$G1_WHY listed but identical: $G1_STALE;"
+        bad "gate1_byte_identity" "$G1_DIFF of $G1_ROWS rows differ ($G1_WHY):$G1_DIFFLIST"
     fi
 }
 
@@ -742,12 +898,12 @@ gate2() {
     #
     # src/ir.kr emits IR_ALLOC from six sites that have no --target=none arm
     # and no provider routing:
-    #   :3413  struct copy on assignment
-    #   :3461  struct returned by value
-    #   :3894  struct literal
-    #   :4164  local array over the stack-array threshold
-    #   :4192  struct declaration with an initialiser
-    #   :4209  local array OF structs
+    #   :3704  struct argument copied for a by-value call
+    #   :3752  struct returned by value
+    #   :4185  struct literal
+    #   :4450  local array over the stack-array threshold
+    #   :4478  struct declaration with an initialiser
+    #   :4495  local array OF structs
     # Only the print/f-string IR_ALLOC was rerouted (Task 5). So on bare metal
     # a struct literal, or a `uint32[2048]`, refuses with the GENERIC message
     # naming 'alloc' -- a builtin the programmer never wrote -- and it does so

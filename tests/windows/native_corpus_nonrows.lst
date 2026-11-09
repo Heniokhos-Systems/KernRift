@@ -103,3 +103,7 @@ win_file_std_write
 win_print_only
 nonexistent_win_file_errors
 _windows_wine
+
+# defect-sweep: its FAIL line appends the reason ($LSH_WHY) to the row's whole
+# name; the checker reads that as a $-template that makes no row
+legacy_file_open_write_holds_the_file_wine$LSH_WHY
