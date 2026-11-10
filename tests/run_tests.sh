@@ -35591,12 +35591,12 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
                 return $rc
             }
             rws_abort() {
-                [ -z "$RWS_FG" ] || kill -TERM $RWS_FG 2> /dev/null
+                [ -z "$RWS_FG" ] || { kill -0 $RWS_FG 2> /dev/null && kill -TERM $RWS_FG 2> /dev/null; }
                 : > "$RWS_D/kr-release" 2> /dev/null; : > "$RWS_D/kr-go" 2> /dev/null
                 local t=0
                 [ -n "$RWS_BG" ] || return 0
                 while [ $t -lt 20 ] && kill -0 $RWS_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
-                kill -TERM $RWS_BG 2> /dev/null
+                kill -0 $RWS_BG 2> /dev/null && kill -TERM $RWS_BG 2> /dev/null
             }
             ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 360 "$RWS_WINE" hold.exe > /dev/null 2>&1 ) &
             RWS_BG=$!
@@ -35679,12 +35679,12 @@ else
             return $rc
         }
         lsh_abort() {
-            [ -z "$LSH_FG" ] || kill -TERM $LSH_FG 2> /dev/null
+            [ -z "$LSH_FG" ] || { kill -0 $LSH_FG 2> /dev/null && kill -TERM $LSH_FG 2> /dev/null; }
             : > "$LSH_D/kr-release" 2> /dev/null
             local t=0
             [ -n "$LSH_BG" ] || return 0
             while [ $t -lt 20 ] && kill -0 $LSH_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
-            kill -TERM $LSH_BG 2> /dev/null
+            kill -0 $LSH_BG 2> /dev/null && kill -TERM $LSH_BG 2> /dev/null
         }
         ( cd "$LSH_D" && WINEDEBUG=-all exec timeout -k 5 360 "$LSH_WINE" hold.exe > /dev/null 2>&1 ) &
         LSH_BG=$!

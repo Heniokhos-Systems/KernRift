@@ -17,7 +17,11 @@ now a handshake: the holder creates `.\kr-held` once it holds the file and holds
 until `.\kr-release` exists; the two-at-once half's first program lives until
 `.\kr-go`. A holder that does not report in 60 s is an inconclusive FAIL, never
 a run against an unheld slot. tests/windows/native_concurrent.sh runs the same
-programs and handshake natively.
+programs and handshake natively. An interrupted run releases and stops its
+holders before the scratch directory is removed (make test's TERM never reaches
+them: timeout has its own process group), through the new SUITE_ABORT_HOOK, and
+native_concurrent.sh's cleanup releases them before removing the laptop's
+directory.
 
 **Fixed: the citation checker reads only files that are part of the tree.**
 `scripts/gen-ir-reference-citations.py` walked docs/ and src/ on disk, so on a
