@@ -6,6 +6,19 @@ All notable changes to `kernriftc` are documented in this file.
 
 **CI: the macOS jobs run on `macos-26` and `macos-26-intel`.** GitHub retired the `macos-14` arm64 image. `ci.yml`'s `test-macos` and `cross-platform.yml`'s `test-macos-arm` move to `macos-26`; `cross-platform.yml`'s `test-macos-x64` moves to the native Intel `macos-26-intel`, so the x86_64 test binaries and self-compile no longer run under Rosetta there (the fat-binary job's x86_64 slice still does, on `macos-26`). README's macOS rows say so.
 
+**Fixed: the Wine slot-lock rows no longer race Wine's start-up.**
+`runner_windows_slots_are_claimed` waited up to 10 s for its lock holder's file
+and then ran the runner whether or not the holder had the lock, and the holder
+held it for a fixed 6 s; under load Wine took longer to start, the runner took
+slot 0 and the row went red with nothing wrong (and its two-at-once half relied
+on a 1 s sleep against a 2 s program).
+`legacy_file_open_write_holds_the_file_wine` had the same race. Every overlap is
+now a handshake: the holder creates `.\kr-held` once it holds the file and holds
+until `.\kr-release` exists; the two-at-once half's first program lives until
+`.\kr-go`. A holder that does not report in 60 s is an inconclusive FAIL, never
+a run against an unheld slot. tests/windows/native_concurrent.sh runs the same
+programs and handshake natively.
+
 **Fixed: the citation checker reads only files that are part of the tree.**
 `scripts/gen-ir-reference-citations.py` walked docs/ and src/ on disk, so on a
 working checkout it read the gitignored docs/superpowers/ planning notes, whose

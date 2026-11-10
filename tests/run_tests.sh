@@ -35527,6 +35527,18 @@ rm -rf "$RXP_D"
 # kr-run-0.exe; (2) two runs at once both exit 42, from two slots. Wine is
 # $KR_WINE when it is set (set but not an executable file is a FAIL, never a
 # skip), else `wine` from PATH; none is a counted skip.
+#
+# EVERY OVERLAP IS A HANDSHAKE, NOT A SLEEP. The row used to wait up to 10 s
+# for the holder's lock file and then run the runner whether or not the holder
+# had it, and the holder held for a fixed 6 s; under load Wine took longer than
+# that to start, the runner took slot 0 and the holder exited 9 -- a red with
+# nothing wrong. Now hold.exe takes the lock, creates .\kr-held and holds until
+# .\kr-release exists (exit 7 if that never comes within 300 s); the row waits
+# up to 60 s for kr-held (none is an inconclusive FAIL, and the runner is not
+# run), and releases the holder only after the runner has returned. In (2) the
+# first run's program (first.exe) creates .\kr-up and lives until .\kr-go
+# exists, so the second run starts while the first holds its slot, whatever
+# the load.
 rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
     TOTAL=$((TOTAL + 1))
     RWS_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
@@ -35539,32 +35551,46 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
         RWS_WHY=""
         cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$RWS_D/runner.kr"
         printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$RWS_D/slow.kr"
-        printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$RWS_D/hold.kr"
+        printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 s = file_open(".\\\\kr-held", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-release", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(0)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$RWS_D/hold.kr"
+        printf 'fn main() {\n    uint64 s = file_open(".\\\\kr-up", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-go", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(42)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$RWS_D/first.kr"
         if ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/runner.kr" -o "$RWS_D/kr.exe" > /dev/null 2>&1 \
            || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/slow.kr" -o "$RWS_D/slow.exe" > /dev/null 2>&1 \
-           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1; then
+           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1 \
+           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/first.kr" -o "$RWS_D/first.exe" > /dev/null 2>&1; then
             RWS_WHY=" [build failed]"
         else
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
+            rws_wait() {   # <file>: wait up to 60 s for it; 0 once it exists
+                local t=0
+                while [ ! -e "$RWS_D/$1" ] && [ $t -lt 600 ]; do sleep 0.1; t=$((t + 1)); done
+                [ -e "$RWS_D/$1" ]
+            }
+            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 360 "$RWS_WINE" hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
             RWS_BG=$!
-            # Wait for the holder to have the lock (it creates the file).
-            RWS_T=0
-            while [ ! -e "$RWS_D/kr-run-0.lock" ] && [ $RWS_T -lt 100 ]; do sleep 0.1; RWS_T=$((RWS_T + 1)); done
-            sleep 0.5
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
+            if ! rws_wait kr-held; then
+                RWS_WHY="$RWS_WHY [the holder did not take slot 0's lock within 60 s: inconclusive]"
+            else
+                ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 120 "$RWS_WINE" kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
+                [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
+                [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
+                [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
+            fi
+            : > "$RWS_D/kr-release"
             wait "$RWS_BG"
-            [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
-            [ "$(cat "$RWS_D/h.st" 2>/dev/null)" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder could not take slot 0's lock]"
-            [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
-            [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
+            RWS_H=$(cat "$RWS_D/h.st" 2>/dev/null)
+            [ "$RWS_H" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder exited ${RWS_H:-?}, want 0 (9: it could not take slot 0's lock; 8: no kr-held; 7: never released)]"
             rm -f "$RWS_D"/kr-run-*
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
+            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 360 "$RWS_WINE" kr.exe first.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
             RWS_BG=$!
-            sleep 1
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
+            RWS_B=""
+            if ! rws_wait kr-up; then
+                RWS_WHY="$RWS_WHY [the first run's program did not start within 60 s: not two at once, inconclusive]"
+            else
+                ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 120 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
+            fi
+            : > "$RWS_D/kr-go"
             wait "$RWS_BG"
             RWS_A=$(cat "$RWS_D/a.st" 2>/dev/null)
-            [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits $RWS_A and $RWS_B, want 42 42]"
+            [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits ${RWS_A:-?} and ${RWS_B:-?}, want 42 42 (first: 8 no kr-up, 7 never released)]"
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
         fi
         if [ -z "$RWS_WHY" ]; then
@@ -35588,7 +35614,10 @@ rws_row runner_windows_slots_are_claimed ""
 # both programs built --legacy: while one holds .\kr-share.lock open for
 # writing, a second file_open(.\kr-share.lock, 1) must FAIL (exit 3); once the
 # holder has exited it must succeed (exit 0). Red before the fix (the second
-# open succeeded while the file was held).
+# open succeeded while the file was held). The holder holds by handshake, as
+# in runner_windows_slots_are_claimed above: it creates .\kr-held once it has
+# the file and holds until .\kr-release exists; no kr-held within 60 s is an
+# inconclusive FAIL and the probe is not run.
 TOTAL=$((TOTAL + 1))
 LSH_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
 if [ -n "${KR_WINE+set}" ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
@@ -35598,22 +35627,27 @@ elif [ -z "$LSH_WINE" ]; then
 else
     LSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_lsh.XXXXXX")
     LSH_WHY=""
-    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$LSH_D/hold.kr"
+    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 s = file_open(".\\\\kr-held", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-release", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(0)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$LSH_D/hold.kr"
     printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(3) }\n    exit(0)\n}\n' > "$LSH_D/probe.kr"
     if ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/hold.kr" -o "$LSH_D/hold.exe" > /dev/null 2>&1 \
        || ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/probe.kr" -o "$LSH_D/probe.exe" > /dev/null 2>&1; then
         LSH_WHY=" [build failed]"
     else
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" hold.exe > /dev/null 2>&1; echo $? > "$LSH_D/h.st" ) &
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 360 "$LSH_WINE" hold.exe > /dev/null 2>&1; echo $? > "$LSH_D/h.st" ) &
         LSH_BG=$!
         LSH_T=0
-        while [ ! -e "$LSH_D/kr-share.lock" ] && [ $LSH_T -lt 100 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
-        sleep 0.5
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_HELD=$?
+        while [ ! -e "$LSH_D/kr-held" ] && [ $LSH_T -lt 600 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
+        if [ ! -e "$LSH_D/kr-held" ]; then
+            LSH_WHY="$LSH_WHY [the holder did not open the file within 60 s: inconclusive]"
+        else
+            ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_HELD=$?
+            [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
+        fi
+        : > "$LSH_D/kr-release"
         wait "$LSH_BG"
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_FREE=$?
-        [ "$(cat "$LSH_D/h.st" 2>/dev/null)" = "0" ] || LSH_WHY="$LSH_WHY [the holder could not open the file: exit $(cat "$LSH_D/h.st" 2>/dev/null)]"
-        [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
+        LSH_H=$(cat "$LSH_D/h.st" 2>/dev/null)
+        [ "$LSH_H" = "0" ] || LSH_WHY="$LSH_WHY [the holder could not open the file: exit ${LSH_H:-?} (9: could not open it; 8: no kr-held; 7: never released)]"
+        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_FREE=$?
         [ "$LSH_FREE" = "0" ] || LSH_WHY="$LSH_WHY [after the holder exited: exit $LSH_FREE, want 0]"
     fi
     if [ -z "$LSH_WHY" ]; then
