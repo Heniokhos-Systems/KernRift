@@ -43,16 +43,32 @@ blank line, and a citation of a file that does not exist.
 
 ONLY FILES THAT ARE PART OF THE TREE COUNT, on both sides of a citation. When
 ROOT is the top of a git work tree, the tree is what
-`git ls-files --cached --others --exclude-standard` lists: the tracked files
-plus the untracked ones .gitignore does not exclude (a new doc a contributor
-has not `git add`ed yet is checked, and so is a file a suite row plants in a
-scratch repo), and NEVER an ignored one. docs/superpowers/ is ignored and holds
-local planning notes that cite long-gone line numbers; walking it made the
-check fail on a working checkout while passing on every fresh clone. An
-ignored file is also not a valid citation TARGET: it does not exist in a clone.
-When ROOT is not the top of a git work tree (an exported copy without .git, a
-scratch copy inside some other repo) or git is not installed, every file on
-disk counts, as before.
+`git ls-files --cached --others --exclude-standard` lists: every tracked file,
+plus the untracked ones git's standard ignore rules do not exclude (a new doc a
+contributor has not `git add`ed yet is checked, and so is a file a suite row
+plants in a scratch repo), and NEVER an ignored one. docs/superpowers/ is
+ignored and holds local planning notes that cite long-gone line numbers;
+walking it made the check fail on a working checkout while passing on every
+fresh clone. An ignored file is also not a valid citation TARGET: it does not
+exist in a clone, so a citation of one says "does not exist".
+
+"Ignored" is git's full standard set: the .gitignore files, .git/info/exclude,
+and the user's core.excludesFile. Those last two are per-checkout and per-user,
+on purpose: they only ever decide about UNTRACKED files, which no clone has, and
+a note a user ignores locally is the same case as docs/superpowers/. (Turning
+the user's config off would also drop safe.directory, and fail a checkout git
+itself accepts.) Every GIT_* variable is removed from git's environment, so a
+hook's GIT_DIR or GIT_INDEX_FILE cannot point the listing at another repo.
+
+ls-files lists a nested untracked repo, or a submodule, as its directory and
+not its files, so files inside one are not part of the tree: they are not
+scanned, and a citation into one says "does not exist".
+
+When ROOT has no .git of its own (an exported copy, a scratch copy that may sit
+inside some other repo) every file on disk counts, as before. When it HAS one
+but git cannot list it (git not installed, "dubious ownership", a corrupt
+index), the checker stops with git's message and exit status 2 instead of
+silently walking the disk, which would bring the ignored files back.
 
 After editing src/, the docs, or the citations, CHECK EACH CITATION AGAINST THE
 CODE, then:
@@ -68,22 +84,32 @@ out = os.path.join(ROOT, "tests/ir_reference_citations.txt")
 
 def tree_files():
     """The repo-relative paths that are part of the tree (see the docstring),
-    or None when ROOT is not the top of a git work tree: then everything on
-    disk counts."""
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+    or None when ROOT has no .git of its own: then everything on disk counts.
+    Exits 2 when ROOT has a .git but git cannot list it."""
+    own = os.path.lexists(os.path.join(ROOT, ".git"))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     def git(*args):
-        r = subprocess.run(["git", "-C", ROOT] + list(args), env=env,
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        return r.stdout.decode("utf-8", "surrogateescape") if r.returncode == 0 else None
-    try:
-        top = git("rev-parse", "--show-toplevel")
-        if top is None or os.path.realpath(top.strip()) != os.path.realpath(ROOT):
-            return None
-        out = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
-    except OSError:     # no git
+        try:
+            r = subprocess.run(["git", "-C", ROOT] + list(args), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as e:
+            return None, f"cannot run git: {e}"
+        err = r.stderr.decode("utf-8", "replace").strip()
+        return (r.stdout.decode("utf-8", "surrogateescape") if r.returncode == 0 else None), err
+    def refuse(why):
+        print(f"{ROOT} has a .git, but {why}", file=sys.stderr)
+        print("not walking the disk instead: that would count the ignored files too", file=sys.stderr)
+        sys.exit(2)
+    top, err = git("rev-parse", "--show-toplevel")
+    if top is None or os.path.realpath(top.strip()) != os.path.realpath(ROOT):
+        if own:
+            refuse(f"git rev-parse --show-toplevel failed: {err}" if top is None
+                   else f"git says the top of its work tree is {top.strip()}")
         return None
-    return None if out is None else set(p for p in out.split("\0") if p)
+    out, err = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    if out is None:
+        refuse(f"git ls-files failed: {err}")
+    return set(p for p in out.split("\0") if p)
 
 TREE = tree_files()
 

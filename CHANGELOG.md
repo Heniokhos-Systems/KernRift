@@ -12,13 +12,21 @@ working checkout it read the gitignored docs/superpowers/ planning notes, whose
 citations are stale by design, and `make gate` failed `ir_reference_citations`
 and `ir_reference_citations_refuses_bad_shapes` there while passing on every
 fresh clone. When the root is the top of a git work tree it now takes the files
-from `git ls-files --cached --others --exclude-standard`: tracked files, and
-untracked ones .gitignore does not exclude (a new doc not yet added is still
-checked), never an ignored one, on either side of a citation. Without git, or
-outside a work tree, every file on disk counts as before. The
-refuses-bad-shapes row copies only those files into its scratch tree, and a
-new row checks a scratch repo: a bad citation in an ignored file is not
-reported, in a tracked or untracked-not-ignored file it is.
+from `git ls-files --cached --others --exclude-standard`: every tracked file,
+and the untracked ones git's standard ignore rules (the .gitignore files,
+.git/info/exclude, the user's core.excludesFile) do not exclude, so a new doc
+not yet added is still checked. An ignored file is neither scanned nor a valid
+citation target: a citation of one says it does not exist, as it would in a
+clone. git runs with every GIT_* variable removed, so a hook's GIT_DIR cannot
+point it at another repo; a root with a .git that git cannot list (dubious
+ownership, a corrupt index, no git) stops the checker with git's message and
+exit status 2 instead of quietly walking the disk again. A root without its own
+.git, alone or inside some other repo, is walked as before. The
+refuses-bad-shapes row copies only those files (NUL-separated) into its scratch
+tree, and a new row, `ir_reference_citations_skips_ignored_files`, checks all of
+it in scratch repos: ignored, tracked and untracked-not-ignored files, an
+ignored target, a corrupt index, the no-.git and nested fallbacks, and a decoy
+GIT_DIR left untouched.
 
 **Fixed: a comment in one source file that cites a line of another is checked
 too.** `scripts/gen-ir-reference-citations.py` fingerprinted the citations in

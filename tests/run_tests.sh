@@ -13965,25 +13965,37 @@ TOTAL=$((TOTAL + 1))
 CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
 mkdir -p "$CSH_D/scripts" "$CSH_D/tests"
 cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
+CSH_WHY=""
+# git with every GIT_* variable removed, as the checker runs it: a hook's
+# GIT_DIR / GIT_INDEX_FILE must not point these rows at some other repo.
+cite_git() { ( for v in $(compgen -e | grep '^GIT_'); do unset "$v"; done; exec git "$@" ); }
 # Copy only what the checker counts as the tree. The copy is not a git repo, so
 # the checker counts every file in it; a blind `cp -R docs` carried the
 # checkout's IGNORED docs/superpowers/ notes (stale citations by design) into
 # it, and the control below failed on a working checkout but not on a clone.
+# Like the checker: a tree with its own .git is listed by git (or the row
+# fails), one without is copied whole. -z, so no path is quoted out of reach;
+# the only listed file allowed to be missing is a tracked one deleted on disk.
 csh_root=$(cd "$DIR/.." && pwd -P)
-csh_top=$(git -C "$csh_root" rev-parse --show-toplevel 2> /dev/null) && csh_top=$(cd "$csh_top" && pwd -P)
-if [ "$csh_top" = "$csh_root" ]; then
-    git -C "$csh_root" ls-files --cached --others --exclude-standard -- src docs ':(glob)*.md' \
-        | while IFS= read -r csh_f; do
-              [ -f "$csh_root/$csh_f" ] || continue
-              mkdir -p "$CSH_D/$(dirname "$csh_f")" && cp "$csh_root/$csh_f" "$CSH_D/$csh_f"
-          done
+if [ -e "$csh_root/.git" ]; then
+    cite_git -C "$csh_root" ls-files -z --cached --others --exclude-standard -- src docs ':(glob)*.md' > "$CSH_D/files.lst" \
+        || CSH_WHY="$CSH_WHY [git ls-files failed in $csh_root]"
+    while IFS= read -r -d '' csh_f; do
+        if [ ! -f "$csh_root/$csh_f" ]; then
+            [ -n "$(cite_git -C "$csh_root" ls-files --deleted -- ":(literal)$csh_f")" ] \
+                || CSH_WHY="$CSH_WHY [git lists $csh_f, but it is not a file]"
+            continue
+        fi
+        mkdir -p "$CSH_D/$(dirname "$csh_f")" && cp "$csh_root/$csh_f" "$CSH_D/$csh_f" \
+            || CSH_WHY="$CSH_WHY [could not copy $csh_f]"
+    done < "$CSH_D/files.lst"
+    rm -f "$CSH_D/files.lst"
 else
     cp -R "$DIR/../src" "$CSH_D/src"
     cp -R "$DIR/../docs" "$CSH_D/docs"
     for csh_f in "$DIR"/../*.md; do [ -f "$csh_f" ] && cp "$csh_f" "$CSH_D/"; done
 fi
 cp "$DIR/run_tests.sh" "$CITE_MANIFEST" "$CSH_D/tests/"
-CSH_WHY=""
 csh_check() {   # <tag> <want rc> <grep -F pattern...>: --check on the copy as it is now
     local tag="$1" want="$2" pat; shift 2
     python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/$tag.out" 2>&1
@@ -14044,13 +14056,23 @@ rm -rf "$CSH_D"
 # .gitignore, one bad citation (a blank line) is planted in turn in an ignored
 # file (must NOT be reported), a tracked file and an untracked-but-not-ignored
 # one (both MUST be); a tracked file citing an ignored .md must be told it does
-# not exist (it does not, in a clone); and the same tree without .git falls
-# back to every file on disk, so the ignored one is reported there.
+# not exist (it does not, in a clone); a corrupt index must stop the checker
+# (exit 2), not send it silently back to walking the disk; the same tree
+# without .git falls back to every file on disk, so the ignored one is reported
+# there, and so it is when that tree sits, ignored, inside an outer repo (the
+# outer repo's listing is not this tree's).
+# All of it runs with GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE pointing at a
+# decoy repo, as in a hook, and the checker also gets a GIT_OBJECT_DIRECTORY
+# that does not exist, as in a push quarantine: the results must not change and
+# the decoy must not be touched. The row's own git calls drop
+# every GIT_* and the user's config; the checker's git gets an empty HOME, so
+# the user's core.excludesFile cannot move a result either.
 # No .md citation is written literally here: this file's prose is scanned too.
 TOTAL=$((TOTAL + 1))
-CIG_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_cig.XXXXXX")
+CIG_P=$(mktemp -d "${TMPDIR:-/tmp}/krc_cig.XXXXXX")
+CIG_D="$CIG_P/tree" CIG_R="$CIG_P/tree"
 CIG_WHY=""
-mkdir -p "$CIG_D/scripts" "$CIG_D/tests" "$CIG_D/src" "$CIG_D/docs/ignored"
+mkdir -p "$CIG_D/scripts" "$CIG_D/tests" "$CIG_D/src" "$CIG_D/docs/ignored" "$CIG_P/home" "$CIG_P/decoy"
 cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CIG_D/scripts/"
 printf '# ref\n' > "$CIG_D/docs/IR_REFERENCE.md"
 printf 'one\n\nthree\n' > "$CIG_D/docs/TARGET.md"
@@ -14060,48 +14082,78 @@ cig_bad=$(printf 'See `%s:%s`.' TARGET.md 2)
 cig_ign=$(printf 'See `%s:%s`.' LOCAL.md 1)
 cig_blank=$(printf '%s:%s is a blank line' docs/TARGET.md 2)   # what the bad citation gets
 cig_at() { printf '%s:%s: ' "$1" 1; }                          # "<file>:1: ", where it sits
-cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on the tree as it is now
+cig_git() {     # git with no GIT_* from the caller and no user or system config
+    ( for v in $(compgen -e | grep '^GIT_'); do unset "$v"; done
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" \
+          exec git "$@" )
+}
+cig_run() {     # the checker in $CIG_R, its git seeing an empty HOME (and, below, a hook's GIT_*)
+    HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" GIT_OBJECT_DIRECTORY="$CIG_P/no-such-objects" python3 "$CIG_R/scripts/gen-ir-reference-citations.py" "$@"
+}
+cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on $CIG_R as it is now
     local tag="$1" want="$2" pat; shift 2
-    python3 "$CIG_D/scripts/gen-ir-reference-citations.py" --check > "$CIG_D/$tag.out" 2>&1
+    cig_run --check > "$CIG_P/$tag.out" 2>&1
     local rc=$?
-    [ "$rc" = "$want" ] || CIG_WHY="$CIG_WHY [$tag: --check exited $rc, want $want: $(head -2 "$CIG_D/$tag.out" | tr '\n' ' ')]"
+    [ "$rc" = "$want" ] || CIG_WHY="$CIG_WHY [$tag: --check exited $rc, want $want: $(head -2 "$CIG_P/$tag.out" | tr '\n' ' ')]"
     for pat in "$@"; do
         case "$pat" in
-            +*) grep -qF -- "${pat#+}" "$CIG_D/$tag.out" || CIG_WHY="$CIG_WHY [$tag: '${pat#+}' was not reported]" ;;
-            -*) grep -qF -- "${pat#-}" "$CIG_D/$tag.out" && CIG_WHY="$CIG_WHY [$tag: '${pat#-}' was reported]" ;;
+            +*) grep -qF -- "${pat#+}" "$CIG_P/$tag.out" || CIG_WHY="$CIG_WHY [$tag: '${pat#+}' was not reported]" ;;
+            -*) grep -qF -- "${pat#-}" "$CIG_P/$tag.out" && CIG_WHY="$CIG_WHY [$tag: '${pat#-}' was reported]" ;;
         esac
     done
 }
-if ! git -C "$CIG_D" init -q 2> /dev/null; then
+cig_snap() { ( cd "$CIG_P/decoy" && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
+if ! { cig_git -C "$CIG_D" init -q --template= && cig_git -C "$CIG_P/decoy" init -q --template=; } > /dev/null 2>&1; then
     CIG_WHY=" [git init failed: this row needs git]"
 else
-    git -C "$CIG_D" add -A
-    python3 "$CIG_D/scripts/gen-ir-reference-citations.py" > /dev/null 2>&1 \
-        || CIG_WHY="$CIG_WHY [could not write the scratch manifest]"
-    git -C "$CIG_D" add -A
+    printf 'decoy\n' > "$CIG_P/decoy/d.md"
+    cig_git -C "$CIG_P/decoy" add d.md
+    printf 'untracked\n' > "$CIG_P/decoy/u.md"     # so a stray `add -A` would change its index
+    cig_decoy=$(cig_snap)
+    export GIT_DIR="$CIG_P/decoy/.git" GIT_WORK_TREE="$CIG_P/decoy" GIT_INDEX_FILE="$CIG_P/decoy/.git/index"
+    cig_git -C "$CIG_D" add -A
+    cig_run > /dev/null 2>&1 || CIG_WHY="$CIG_WHY [could not write the scratch manifest]"
+    cig_git -C "$CIG_D" add -A
     cig_check control 0
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/ignored/note.md"
     cig_check ignored 0 "-docs/ignored/note.md"
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/tracked.md"
-    git -C "$CIG_D" add docs/tracked.md
+    cig_git -C "$CIG_D" add docs/tracked.md
     cig_check tracked 1 "+$(cig_at docs/tracked.md)$cig_blank" "-docs/ignored/note.md"
-    git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
+    cig_git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/new.md"
     cig_check untracked 1 "+$(cig_at docs/new.md)$cig_blank" "-docs/ignored/note.md"
     rm -f "$CIG_D/docs/new.md"
     printf '%s\n' "$cig_ign" > "$CIG_D/docs/tracked.md"
-    git -C "$CIG_D" add docs/tracked.md
+    cig_git -C "$CIG_D" add docs/tracked.md
     cig_check target 1 "+$(cig_at docs/tracked.md)docs/LOCAL.md does not exist"
-    git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
+    cig_git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
+    cp "$CIG_D/.git/index" "$CIG_P/index.orig"
+    printf 'not an index\n' > "$CIG_D/.git/index"
+    cig_check corrupt 2 "+not walking the disk instead" "-docs/ignored/note.md"
+    cp "$CIG_P/index.orig" "$CIG_D/.git/index"
+    cig_check restored 0
     rm -rf "$CIG_D/.git"
     cig_check nogit 1 "+$(cig_at docs/ignored/note.md)$cig_blank"
+    mkdir -p "$CIG_P/outer"
+    if cig_git -C "$CIG_P/outer" init -q --template= > /dev/null 2>&1; then
+        printf '/inner/\n' > "$CIG_P/outer/.gitignore"
+        cp -R "$CIG_D" "$CIG_P/outer/inner"
+        CIG_R="$CIG_P/outer/inner"
+        cig_check nested 1 "+$(cig_at docs/ignored/note.md)$cig_blank"
+        CIG_R="$CIG_D"
+    else
+        CIG_WHY="$CIG_WHY [git init of the outer repo failed]"
+    fi
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    [ "$(cig_snap)" = "$cig_decoy" ] || CIG_WHY="$CIG_WHY [the decoy repo named by GIT_DIR was modified]"
 fi
 if [ -z "$CIG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; without .git every file counts)"
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; a corrupt index stops the checker; without its own .git, alone or inside an outer repo, every file counts; a hook's GIT_DIR changes nothing and touches nothing)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_skips_ignored_files$CIG_WHY"
 fi
-rm -rf "$CIG_D"
+rm -rf "$CIG_P"
 
 # examples/tutorial-btree ships the page manager from docs/tutorial-btree.md
 # §2 -- the mmap-backed persistence the whole tutorial rests on. The stdlib has
