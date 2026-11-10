@@ -35576,7 +35576,9 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
             # PID $! is: the subshell execs it), before suite_abort removes
             # $RWS_D and with it any chance of a release. A foreground run is
             # started the same way (rws_fg) and simply TERMed.
-            RWS_FG=""
+            # Each PID is cleared the moment it is reaped, so the hook never
+            # signals a finished run's PID (which the system may have reused).
+            RWS_FG=""; RWS_BG=""
             # (The output file is an argument, not a redirection of the call:
             # a trap that runs during the call would write into it.)
             rws_fg() {     # <output file> <args>: under Wine, 120 s; its status
@@ -35584,11 +35586,15 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
                 ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 120 "$RWS_WINE" "$@" > "$o" 2>&1 ) &
                 RWS_FG=$!
                 wait "$RWS_FG"
+                local rc=$?
+                RWS_FG=""
+                return $rc
             }
             rws_abort() {
                 [ -z "$RWS_FG" ] || kill -TERM $RWS_FG 2> /dev/null
                 : > "$RWS_D/kr-release" 2> /dev/null; : > "$RWS_D/kr-go" 2> /dev/null
                 local t=0
+                [ -n "$RWS_BG" ] || return 0
                 while [ $t -lt 20 ] && kill -0 $RWS_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
                 kill -TERM $RWS_BG 2> /dev/null
             }
@@ -35604,7 +35610,7 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
                 [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
             fi
             : > "$RWS_D/kr-release"
-            wait "$RWS_BG"; RWS_H=$?
+            wait "$RWS_BG"; RWS_H=$?; RWS_BG=""
             [ "$RWS_H" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder exited ${RWS_H:-?}, want 0 (9: it could not take slot 0's lock; 8: no kr-held; 7: never released)]"
             rm -f "$RWS_D"/kr-run-*
             ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 360 "$RWS_WINE" kr.exe first.exe > /dev/null 2>&1 ) &
@@ -35616,7 +35622,7 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
                 rws_fg /dev/null kr.exe slow.exe; RWS_B=$?
             fi
             : > "$RWS_D/kr-go"
-            wait "$RWS_BG"; RWS_A=$?
+            wait "$RWS_BG"; RWS_A=$?; RWS_BG=""
             SUITE_ABORT_HOOK=""
             [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits ${RWS_A:-?} and ${RWS_B:-?}, want 42 42 (first: 8 no kr-up, 7 never released)]"
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
@@ -35663,16 +35669,20 @@ else
     else
         # Interrupted while the holder waits: release it, 2 s, then TERM its
         # timeout (as rws_abort above does); a running probe is TERMed.
-        LSH_FG=""
+        LSH_FG=""; LSH_BG=""   # cleared when reaped, as in rws_row
         lsh_fg() {     # probe.exe under Wine, 120 s; its status
             ( cd "$LSH_D" && WINEDEBUG=-all exec timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ) &
             LSH_FG=$!
             wait "$LSH_FG"
+            local rc=$?
+            LSH_FG=""
+            return $rc
         }
         lsh_abort() {
             [ -z "$LSH_FG" ] || kill -TERM $LSH_FG 2> /dev/null
             : > "$LSH_D/kr-release" 2> /dev/null
             local t=0
+            [ -n "$LSH_BG" ] || return 0
             while [ $t -lt 20 ] && kill -0 $LSH_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
             kill -TERM $LSH_BG 2> /dev/null
         }
@@ -35688,7 +35698,7 @@ else
             [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
         fi
         : > "$LSH_D/kr-release"
-        wait "$LSH_BG"; LSH_H=$?
+        wait "$LSH_BG"; LSH_H=$?; LSH_BG=""
         [ "$LSH_H" = "0" ] || LSH_WHY="$LSH_WHY [the holder exited ${LSH_H:-?}, want 0 (9: it could not open the file; 8: no kr-held; 7: never released)]"
         lsh_fg; LSH_FREE=$?
         SUITE_ABORT_HOOK=""
