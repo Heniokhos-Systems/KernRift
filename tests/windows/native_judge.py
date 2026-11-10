@@ -127,7 +127,8 @@ def main(argv):
         bad.append('native_corpus.lst lists %s more than once' % ', '.join(dup))
     last = next((l for l in reversed(log) if l.strip()), '')
     if not re.match(r'^=== Results: \d+/\d+ passed, \d+ failed(, \d+ skipped)? ===$', last):
-        bad.append('suite.log does not end with its "=== Results:" line (empty or truncated run)')
+        bad.append('suite.log does not end with its "=== Results:" line (empty or truncated run); its last '
+                   'non-empty line is %r' % last[:120])
     seen = {}
     for l in log:
         m = re.match(r'^\s+([A-Za-z0-9_]+): (PASS|FAIL|SKIP)\b ?(.*)$', l)

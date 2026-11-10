@@ -24,9 +24,11 @@
 # The suite's stdin is /dev/null: native_exec.sh forwards its stdin to the
 # program, so only a row that redirects stdin itself (the win_file_std* rows)
 # may hand it input; an inherited open pipe would stall every job.
-# native_concurrent.sh is bounded (timeout 3600: its own ssh/scp calls are
-# bounded, 3300 s at most together); killed, it leaves its rows without a
-# result, which the judge FAILs.
+# native_concurrent.sh bounds itself: 7 compiles x 60 s + mkdir 300 s + 3 scp
+# x 300 s + 3 row runs x 600 s + cleanup 300 s = 3720 s at most. It runs under
+# timeout -k 60 3900 (180 s of slack, then KILL 60 s after the TERM) as a
+# backstop only; killed, it leaves its rows without a result, which the judge
+# FAILs.
 # Exit: the judge's (0 when nothing FAILed).
 set -u
 SUMONLY=0; if [ "${1:-}" = --summary-only ]; then SUMONLY=1; shift; fi
@@ -38,7 +40,7 @@ export NATIVE_SESSION="suite$$"
 printf '#!/bin/bash\nexec "%s/build/krc2" --arch=x86_64 "$@"\n' "$TREE" > "$OUT/krc-test"; chmod +x "$OUT/krc-test"
 ( cd "$TREE" && KRC="$OUT/krc-test" KRC_RAW="$TREE/build/krc2" KR_WINE="$HERE/native_exec.sh" NATIVE_SESSION="$NATIVE_SESSION" timeout 14400 bash tests/run_tests.sh < /dev/null ) > "$OUT/suite.log" 2>&1
 "$HERE/native_exec.sh" --end-session || echo "native_suite.sh: session cleanup failed" >&2
-timeout 3600 bash "$HERE/native_concurrent.sh" "$TREE/build/krc2" "$TREE/tests/fixtures" > "$OUT/concurrent.txt" 2>&1
+timeout -k 60 3900 bash "$HERE/native_concurrent.sh" "$TREE/build/krc2" "$TREE/tests/fixtures" > "$OUT/concurrent.txt" 2>&1
 bash "$HERE/native_hostrows.sh" "$TREE/build/krc2" "$TREE/tests/fixtures" > "$OUT/hostrows.txt" 2>&1
 fi
 python3 -B "$HERE/native_judge.py" "$OUT"
