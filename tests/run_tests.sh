@@ -25,8 +25,13 @@ KR_GIT_LOCATION_FIXED="GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT
     GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE
     GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM"
 KR_GIT_PATHSPEC_VARS="GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS"
+kr_git_location_vars() {   # the fixed list, then what the git on PATH names
+    printf '%s\n' $KR_GIT_LOCATION_FIXED
+    ( unset $KR_GIT_LOCATION_FIXED; cd / && git rev-parse --local-env-vars ) 2> /dev/null \
+        | grep '^GIT_[A-Za-z0-9_]*$' | grep -v '^GIT_CONFIG'
+}
 unset $KR_GIT_LOCATION_FIXED $KR_GIT_PATHSPEC_VARS
-KR_GIT_LOCATION_VARS="$KR_GIT_LOCATION_FIXED $( (cd / && git rev-parse --local-env-vars) 2> /dev/null | grep '^GIT_[A-Za-z0-9_]*$' | grep -v '^GIT_CONFIG')"
+KR_GIT_LOCATION_VARS=$(kr_git_location_vars | tr '\n' ' ')
 unset $KR_GIT_LOCATION_VARS
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14173,6 +14178,23 @@ for v in $cig_named; do
         *) CIG_WHY="$CIG_WHY [git names $v a location variable, and the suite's unset at the top did not take it]" ;;
     esac
 done
+# Today's git names nothing past the fixed list, so the union with what git
+# names is exercised with a wrapper git in $CIG_P/bin: it adds
+# GIT_KR_PROBE_LOCATION to --local-env-vars and, like a real location
+# variable pointing nowhere, fails every other command while it is set. The
+# suite header's list (kr_git_location_vars) must take it, and the checker
+# must strip it (below, in the repo).
+mkdir -p "$CIG_P/bin"
+cig_realgit=$(command -v git)
+{ printf '#!/bin/sh\nREAL=%s\n' "'$cig_realgit'"
+  printf '%s\n' 'if [ "$1" = rev-parse ] && [ "$2" = --local-env-vars ]; then "$REAL" "$@" || exit $?; echo GIT_KR_PROBE_LOCATION; exit 0; fi' \
+                 'if [ -n "${GIT_KR_PROBE_LOCATION+x}" ]; then echo "fatal: GIT_KR_PROBE_LOCATION is set: not a git repository" >&2; exit 128; fi' \
+                 'exec "$REAL" "$@"'; } > "$CIG_P/bin/git"
+chmod +x "$CIG_P/bin/git"
+( export GIT_KR_PROBE_LOCATION="$CIG_P/no-such-probe" PATH="$CIG_P/bin:$PATH"
+  unset $(kr_git_location_vars)
+  [ -z "${GIT_KR_PROBE_LOCATION+x}" ] ) \
+    || CIG_WHY="$CIG_WHY [a location variable only the installed git names (probe) is not in the suite header's list]"
 cig_snap() { ( cd "$CIG_P/decoy" && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
 if ! { cig_git -C "$CIG_D" init -q --template= && cig_git -C "$CIG_P/decoy" init -q --template=; } > /dev/null 2>&1; then
     CIG_WHY=" [git init failed: this row needs git]"
@@ -14191,6 +14213,8 @@ else
         CIG_ENV=("$v=$CIG_P/no-such-$v")
         cig_check "strip_$v" 0
     done
+    CIG_ENV=("GIT_KR_PROBE_LOCATION=$CIG_P/no-such-probe" "PATH=$CIG_P/bin:$PATH")
+    cig_check probe 0
     CIG_ENV=()
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/ignored/note.md"
     cig_check ignored 0 "-docs/ignored/note.md"
