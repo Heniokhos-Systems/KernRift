@@ -1,6 +1,21 @@
 #!/bin/bash
 # No set -e: test binaries return non-zero exit codes intentionally
 
+# The suite must not depend on which repo its CALLER's git points at: a hook
+# (pre-commit, pre-push) runs with GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE
+# set, and every `git -C "$DIR/.."` below would then list or stage THAT repo.
+# Unset the repo-location variables once, here, for every row: this is
+# `git rev-parse --local-env-vars` minus its GIT_CONFIG* entries, plus
+# GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM -- the list
+# scripts/gen-ir-reference-citations.py uses (GIT_LOCATION_VARS). Config from
+# the environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n, ...) is kept. No row relies
+# on an inherited GIT_* variable.
+KR_GIT_LOCATION_VARS="GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT_DIR
+    GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE
+    GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE
+    GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM"
+unset $KR_GIT_LOCATION_VARS
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
 # A relative compiler path ("./build/krc2", "build/krc3") is made absolute
@@ -13966,9 +13981,9 @@ CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
 mkdir -p "$CSH_D/scripts" "$CSH_D/tests"
 cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
 CSH_WHY=""
-# git with every GIT_* variable removed, as the checker runs it: a hook's
-# GIT_DIR / GIT_INDEX_FILE must not point these rows at some other repo.
-cite_git() { ( for v in $(compgen -e | grep '^GIT_'); do unset "$v"; done; exec git "$@" ); }
+# git without the repo-location variables, as the checker runs it (the suite
+# unset them at the top; this keeps the rows right if one is run on its own).
+cite_git() { ( unset $KR_GIT_LOCATION_VARS; exec git "$@" ); }
 # Copy only what the checker counts as the tree. The copy is not a git repo, so
 # the checker counts every file in it; a blind `cp -R docs` carried the
 # checkout's IGNORED docs/superpowers/ notes (stale citations by design) into
@@ -14056,17 +14071,22 @@ rm -rf "$CSH_D"
 # .gitignore, one bad citation (a blank line) is planted in turn in an ignored
 # file (must NOT be reported), a tracked file and an untracked-but-not-ignored
 # one (both MUST be); a tracked file citing an ignored .md must be told it does
-# not exist (it does not, in a clone); a corrupt index must stop the checker
-# (exit 2), not send it silently back to walking the disk; the same tree
+# not exist (it does not, in a clone); a core.excludesFile given through the
+# environment (GIT_CONFIG_COUNT/KEY_0/VALUE_0) is honoured, as git honours it;
+# a corrupt index, and a .git that names a gitdir that is not there, must stop
+# the checker (exit 2), not send it silently back to walking the disk; the same tree
 # without .git falls back to every file on disk, so the ignored one is reported
 # there, and so it is when that tree sits, ignored, inside an outer repo (the
 # outer repo's listing is not this tree's).
 # All of it runs with GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE pointing at a
 # decoy repo, as in a hook, and the checker also gets a GIT_OBJECT_DIRECTORY
 # that does not exist, as in a push quarantine: the results must not change and
-# the decoy must not be touched. The row's own git calls drop
-# every GIT_* and the user's config; the checker's git gets an empty HOME, so
-# the user's core.excludesFile cannot move a result either.
+# the decoy must not be touched (and the caller's values of the three are
+# restored afterwards, not left changed for the rows below). The row's own git
+# calls drop every GIT_* and the user's config; the checker's git keeps the
+# environment's config but not the caller's: an empty HOME, no global or system
+# config and none of the caller's GIT_CONFIG*, so the user's settings cannot
+# move a result either.
 # No .md citation is written literally here: this file's prose is scanned too.
 TOTAL=$((TOTAL + 1))
 CIG_P=$(mktemp -d "${TMPDIR:-/tmp}/krc_cig.XXXXXX")
@@ -14087,9 +14107,14 @@ cig_git() {     # git with no GIT_* from the caller and no user or system config
       GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" \
           exec git "$@" )
 }
-cig_run() {     # the checker in $CIG_R, its git seeing an empty HOME (and, below, a hook's GIT_*)
-    HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" GIT_OBJECT_DIRECTORY="$CIG_P/no-such-objects" python3 "$CIG_R/scripts/gen-ir-reference-citations.py" "$@"
+cig_run() {     # the checker in $CIG_R: no user config, a hook's GIT_* (below), and $CIG_ENV
+    ( for v in $(compgen -e | grep '^GIT_CONFIG'); do unset "$v"; done
+      export HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" GIT_CONFIG_GLOBAL=/dev/null \
+             GIT_CONFIG_NOSYSTEM=1 GIT_OBJECT_DIRECTORY="$CIG_P/no-such-objects"
+      [ -z "$CIG_ENV" ] || export $CIG_ENV
+      exec python3 "$CIG_R/scripts/gen-ir-reference-citations.py" "$@" )
 }
+CIG_ENV=""
 cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on $CIG_R as it is now
     local tag="$1" want="$2" pat; shift 2
     cig_run --check > "$CIG_P/$tag.out" 2>&1
@@ -14110,6 +14135,7 @@ else
     cig_git -C "$CIG_P/decoy" add d.md
     printf 'untracked\n' > "$CIG_P/decoy/u.md"     # so a stray `add -A` would change its index
     cig_decoy=$(cig_snap)
+    cig_saved=$(export -p | grep -E '^declare -x (GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE)=')
     export GIT_DIR="$CIG_P/decoy/.git" GIT_WORK_TREE="$CIG_P/decoy" GIT_INDEX_FILE="$CIG_P/decoy/.git/index"
     cig_git -C "$CIG_D" add -A
     cig_run > /dev/null 2>&1 || CIG_WHY="$CIG_WHY [could not write the scratch manifest]"
@@ -14128,12 +14154,21 @@ else
     cig_git -C "$CIG_D" add docs/tracked.md
     cig_check target 1 "+$(cig_at docs/tracked.md)docs/LOCAL.md does not exist"
     cig_git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
+    printf '%s\n' "$cig_bad" > "$CIG_D/docs/excl.md"
+    printf '/docs/excl.md\n' > "$CIG_P/excl"
+    CIG_ENV="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0=$CIG_P/excl"
+    cig_check envconfig 0 "-docs/excl.md"
+    CIG_ENV=""
+    rm -f "$CIG_D/docs/excl.md"
     cp "$CIG_D/.git/index" "$CIG_P/index.orig"
     printf 'not an index\n' > "$CIG_D/.git/index"
     cig_check corrupt 2 "+not walking the disk instead" "-docs/ignored/note.md"
     cp "$CIG_P/index.orig" "$CIG_D/.git/index"
     cig_check restored 0
-    rm -rf "$CIG_D/.git"
+    mv "$CIG_D/.git" "$CIG_P/git.real"
+    printf 'gitdir: %s\n' "$CIG_P/no-such-gitdir" > "$CIG_D/.git"
+    cig_check gitfile 2 "+not walking the disk instead" "-docs/ignored/note.md"
+    rm -f "$CIG_D/.git"
     cig_check nogit 1 "+$(cig_at docs/ignored/note.md)$cig_blank"
     mkdir -p "$CIG_P/outer"
     if cig_git -C "$CIG_P/outer" init -q --template= > /dev/null 2>&1; then
@@ -14146,10 +14181,11 @@ else
         CIG_WHY="$CIG_WHY [git init of the outer repo failed]"
     fi
     unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    eval "$cig_saved"
     [ "$(cig_snap)" = "$cig_decoy" ] || CIG_WHY="$CIG_WHY [the decoy repo named by GIT_DIR was modified]"
 fi
 if [ -z "$CIG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; a corrupt index stops the checker; without its own .git, alone or inside an outer repo, every file counts; a hook's GIT_DIR changes nothing and touches nothing)"
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; a core.excludesFile from the environment is honoured; a corrupt index or a dangling gitdir stops the checker; without its own .git, alone or inside an outer repo, every file counts; a hook's GIT_DIR changes nothing and touches nothing)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_skips_ignored_files$CIG_WHY"
 fi

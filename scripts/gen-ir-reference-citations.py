@@ -57,8 +57,13 @@ and the user's core.excludesFile. Those last two are per-checkout and per-user,
 on purpose: they only ever decide about UNTRACKED files, which no clone has, and
 a note a user ignores locally is the same case as docs/superpowers/. (Turning
 the user's config off would also drop safe.directory, and fail a checkout git
-itself accepts.) Every GIT_* variable is removed from git's environment, so a
-hook's GIT_DIR or GIT_INDEX_FILE cannot point the listing at another repo.
+itself accepts.) The variables that say WHICH repo git is in are removed from
+its environment (GIT_LOCATION_VARS below), so a hook's GIT_DIR or
+GIT_INDEX_FILE, or a push quarantine's GIT_OBJECT_DIRECTORY, cannot point the
+listing at another repo or fail it. Configuration from the environment
+(GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS, GIT_CONFIG_GLOBAL, ...)
+and GIT_EXEC_PATH are kept: they are where safe.directory and core.excludesFile
+may come from, and the listing must agree with the git the user runs.
 
 ls-files lists a nested untracked repo, or a submodule, as its directory and
 not its files, so files inside one are not part of the tree: they are not
@@ -82,12 +87,27 @@ EXT = "mlr" if os.path.exists(os.path.join(ROOT, "src", "main.mlr")) else "kr"
 doc = os.path.join(ROOT, "docs/IR_REFERENCE.md")
 out = os.path.join(ROOT, "tests/ir_reference_citations.txt")
 
+# The repo-location variables: `git rev-parse --local-env-vars` (git 2.43)
+# minus its configuration entries (GIT_CONFIG, GIT_CONFIG_PARAMETERS,
+# GIT_CONFIG_COUNT), plus the two that steer repository discovery
+# (GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM). Fixed here, not
+# asked of git at run time: that would need a git run that is itself clean of
+# them, and the answer differs between git versions. tests/run_tests.sh unsets
+# the same list.
+GIT_LOCATION_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
+    "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
+
 def tree_files():
     """The repo-relative paths that are part of the tree (see the docstring),
     or None when ROOT has no .git of its own: then everything on disk counts.
     Exits 2 when ROOT has a .git but git cannot list it."""
     own = os.path.lexists(os.path.join(ROOT, ".git"))
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
     def git(*args):
         try:
             r = subprocess.run(["git", "-C", ROOT] + list(args), env=env,
