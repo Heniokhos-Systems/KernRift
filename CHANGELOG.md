@@ -2,7 +2,30 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
-## Unreleased
+## v2.11.0 — 2026-11-10
+
+**Windows can unwind through KernRift code (#143).** PE images and Windows COFF
+objects carry `.pdata`/`.xdata`, so a fault in KernRift code is reported with
+its stack, and debuggers and `RtlCaptureStackBackTrace` see the callers. A
+function sets up a frame pointer only where its stack pointer moves after the
+prologue, so executed instruction counts are within 0.05 % of v2.10.0 on IR and
+up to 6.4 % lower on `--legacy` (`tests/gates/pe_unwind_perf.sh`); native
+timings on the laptop are within run-to-run noise. Checked natively on a
+physical Windows 11 x86_64 laptop (a debugger's stack walk chains through each
+fault fixture, and the suite's Windows rows run there) and, for arm64, on
+GitHub's `windows-11-arm` runner, which walks the same fixtures;
+`windows-latest` runs the table-carrying x86_64 binaries. Not fixed: KernRift
+code does not preserve the Win64-nonvolatile `rsi`, `rdi` and `xmm6`-`xmm15`
+(#160); the suite pins it with its one known red row,
+`pe_unwind_host_rsi_across_kr`.
+
+Also in this release: the Windows I/O builtins report failure (-5) instead of 0
+or a stale value (#136, #138, #145, #163, #165, #167, #168); one **breaking**
+change, a second `static` or `const` of the same name is an error and `@shared`
+declares one variable across files; a sweep of silent failures made into errors
+(oversized integer literals, multi-character character literals, running out of
+stack on Linux and Android, two `kr` runs at once); and a test suite that counts
+a skipped row as a skip. 2861 tests; bootstrap fixed point 1501304 bytes.
 
 **CI: the macOS jobs run on `macos-26` and `macos-26-intel`.** GitHub retired the `macos-14` arm64 image. `ci.yml`'s `test-macos` and `cross-platform.yml`'s `test-macos-arm` move to `macos-26`; `cross-platform.yml`'s `test-macos-x64` moves to the native Intel `macos-26-intel`, so the x86_64 test binaries and self-compile no longer run under Rosetta there (the fat-binary job's x86_64 slice still does, on `macos-26`). README's macOS rows say so.
 
@@ -279,7 +302,9 @@ the first: the first initializer was kept, the second dropped, and conflicting
 types were accepted. ApexRift carried a live bug of exactly that shape (the
 local console's escape-sequence state and the remote shell's were one variable,
 because two files each declared `ansi_state`); a sweep of every KernRift and
-ApexRift build input found 11 such duplicates, none deliberate. Now:
+ApexRift build input found 11 such duplicates, none deliberate. No
+deprecation period: the silent merge was itself a correctness bug
+(ABI_POLICY's emergency clause). Now:
 
 ```
 b.kr:3:15: error: duplicate static `count` (first declared at a.kr:7); rename one, or mark EVERY declaration `@shared` if they are meant to be the same variable

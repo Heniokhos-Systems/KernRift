@@ -81,11 +81,20 @@ right — and **Xtensa/ESP32 was the goal and is the part that works**, with rea
 firmware flashed to real boards. Their lack of `std/` is by design; riscv32's
 own incompleteness is not, and does not hold Xtensa back.
 
-**v2.10.0 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
+**v2.11.0 highlights** (full details in [CHANGELOG.md](CHANGELOG.md)):
 
-**The release where bare metal stopped meaning QEMU.** A KernRift program, compiled by KernRift, boots from a USB stick on a physical AMD Ryzen 9 7900X with no operating system underneath it — and prints the CPU's own brand string out of `CPUID`, so the photograph above cannot have been produced under emulation. Three more results moved onto real devices in this release: the compiler self-compiles to a bootstrap fixed point on a physical Android handset under bionic and on a physical Windows laptop, and a KernRift-emitted kernel module loads into a running Linux kernel. Everything else bare-metal — arm64 images, UEFI under OVMF, the reset-vector path — is still QEMU, and [What is actually proven](#what-is-actually-proven) says so per row. Secure Boot is **incompatible** by construction: the images are unsigned. The boot gate has 59 legs and runs in CI on every push, including on a native ARM64 runner.
+**Windows can unwind through KernRift code (#143).** PE images and Windows COFF objects now carry `.pdata`/`.xdata` unwind tables, so a fault in KernRift code is reported with its stack, and debuggers and `RtlCaptureStackBackTrace` see the callers. A function sets up a frame pointer only where its stack pointer moves after the prologue, so executed instruction counts are within 0.05 % of v2.10.0 on IR and up to 6.4 % lower on `--legacy`; native timings are within run-to-run noise. Checked natively on a physical Windows 11 x86_64 laptop (a debugger's stack walk chains through each fault fixture) and, for arm64, on GitHub's `windows-11-arm` runner, which walks the same fixtures; `windows-latest` runs the table-carrying x86_64 binaries. Not fixed: KernRift code does not preserve the Win64-nonvolatile `rsi`, `rdi` and `xmm6`-`xmm15` (#160), so C callers must treat them as clobbered; the suite pins this with its one known red row.
 
-This release also fixes a long list of silent miscompiles, the worst of which made `bool b = true; b * 2` evaluate to **0** on the default backend. See the changelog.
+- **Windows I/O reports failure.** `read`/`write`, `file_read`/`file_write` and `file_size` return **-5** on a failed Win32 call instead of 0 (which also meant end of file) or a stale stack value (a read from a closed pipe is still end of file), on all four Windows backends, and fds 0..2 are the standard handles everywhere.
+- **Breaking:** a second `static` or `const` of the same name is now an error; `@shared` is how two files declare one variable. Until now the second declaration silently became the same variable as the first.
+- **Silent failures made errors:** integer literals that overflow 64 bits, character literals with more than one character, running out of stack on Linux and Android (was a bare SIGSEGV), and two `kr` runs at once overwriting each other's program.
+- **An honest test count:** skipped rows are counted as skips, not passes, so a box without Wine or qemu no longer reports a clean run.
+
+**v2.10.0 highlights:**
+
+**The release where bare metal stopped meaning QEMU.** A KernRift program, compiled by KernRift, boots from a USB stick on a physical AMD Ryzen 9 7900X with no operating system underneath it — and prints the CPU's own brand string out of `CPUID`, so the photograph above cannot have been produced under emulation. Three more results moved onto real devices in v2.10.0: the compiler self-compiles to a bootstrap fixed point on a physical Android handset under bionic and on a physical Windows laptop, and a KernRift-emitted kernel module loads into a running Linux kernel. Everything else bare-metal — arm64 images, UEFI under OVMF, the reset-vector path — is still QEMU, and [What is actually proven](#what-is-actually-proven) says so per row. Secure Boot is **incompatible** by construction: the images are unsigned. The boot gate has 59 legs and runs in CI on every push, including on a native ARM64 runner.
+
+v2.10.0 also fixed a long list of silent miscompiles, the worst of which made `bool b = true; b * 2` evaluate to **0** on the default backend. See the changelog.
 
 - **`--target=none`** — freestanding, no libc, no host OS. Refuses every OS-bound construct and routes `print`/`println`/f-strings/`alloc` through pluggable write/alloc providers instead.
 - **`--emit=image`** — raw flat binary, no container, plus a QEMU boot gate in the test suite that requires a computed sentinel value on the wire, not just "QEMU didn't crash".
@@ -162,7 +171,7 @@ krc lc program.kr
 
 ### Self-compilation (388 950 tokens, 245 512 AST nodes, 3 854 634 bytes of source)
 
-The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2861 tests**; on this tree every row passes but the 1 known red row listed in `tests/pe_unwind_known_reds.lst`). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm`, `macos-26` and `macos-26-intel` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.10.0 either.
+The compiler emits binaries for all 8 targets. CI verifies the **bootstrap fixed point (krc3 == krc4) and the full suite natively on Linux x86_64 and Linux ARM64** (**2861 tests**; on this tree every row passes but the 1 known red row listed in `tests/pe_unwind_known_reds.lst`). Windows and macOS are exercised on real `windows-latest`, `windows-11-arm`, `macos-26` and `macos-26-intel` runners. The **Android** jobs are the weak link: they run PIE ELFs under the **glibc** loader on Linux, never bionic and never a device. See the per-target table for what each one actually ran. Numbers below were re-measured on an AMD Ryzen 9 7900X with the compiler built from this commit — see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for the gcc / rustc comparisons — note that file is a **v2.8.33 run from 2026-07-28** and has not been re-run for v2.11.0 either.
 
 | Target | Legacy codegen | IR codegen (default) | IR vs legacy |
 |--------|---------------:|---------------------:|-------------:|
@@ -416,7 +425,7 @@ Import with `import "std/string.kr"` etc. The compiler searches `~/.local/share/
 
 ## Editor Support
 
-A VS Code extension (v2.10.0, versioned in step with the compiler) is available on the VS Code Marketplace:
+A VS Code extension (v2.9.0; it is released separately from the compiler and was last published with v2.9.0) is available on the VS Code Marketplace:
 
 - Syntax highlighting (TextMate grammar)
 - LSP server with diagnostics (`krc check`), completions, hover docs, and go-to-definition
@@ -427,7 +436,7 @@ See the [`examples/`](examples/) directory for runnable programs covering every 
 
 ## Architecture
 
-86 363 lines of KernRift across the 28 source files the compiler is built from, plus 55 stdlib modules (12 792 lines). Self-compiles to a 1.43 MiB x86_64 native binary in ~0.65 s (IR, default), a 1.22 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~4.07 s on an AMD Ryzen 9 7900X. **2861 tests** run on this tree; every row passes but the 1 known red row listed in `tests/pe_unwind_known_reds.lst`. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.10.0 either).
+86 363 lines of KernRift across the 28 source files the compiler is built from, plus 55 stdlib modules (12 792 lines). Self-compiles to a 1.43 MiB x86_64 native binary in ~0.65 s (IR, default), a 1.22 MiB ARM64 binary, or an 8-slice fat binary (BCJ + LZ-Rift compression) in ~4.07 s on an AMD Ryzen 9 7900X. **2861 tests** run on this tree; every row passes but the 1 known red row listed in `tests/pe_unwind_known_reds.lst`. Bootstrap fixed point is verified **natively on Linux x86_64, Linux ARM64, and a physical Android ARM64 handset**; Windows and macOS run their own chains on real runners. Android x86_64 is the one target executed only under a glibc loader on Linux. See [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) for micro-benchmarks vs gcc / rustc and peak-memory numbers (a v2.8.33 run, not re-measured for v2.11.0 either).
 
 | File | Purpose |
 |------|---------|

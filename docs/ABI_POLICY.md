@@ -4,7 +4,7 @@ This document defines what "ABI compatibility" means in KernRift, which
 versions are compatible with which, and what we promise not to break
 between releases.
 
-The current release is **v2.10.0**. KernRift is pre-1.0. The policy below
+The current release is **v2.11.0**. KernRift is pre-1.0. The policy below
 describes what we do today; it will tighten at 1.0.
 
 ## Scope of the ABI
