@@ -42,7 +42,12 @@
 # passed, 1 otherwise, 2 on a transport error (ssh 255, or an ssh that timed
 # out or was killed; a PowerShell failure on the laptop is a FAIL of its row).
 # The laptop's scratch directory is removed at the end, on a transport error
-# and on INT/TERM/HUP.
+# and on INT/TERM/HUP. A row cut off mid-run (a dropped connection, runrow's
+# 600 s cap) can leave hold.exe or first.exe waiting for its release for up
+# to 300 s with $RD open, so the cleanup first creates every release file
+# (rws\kr-release, rws\kr-go, lsh\kr-release; errors ignored): a released
+# program sees it within 50 ms and exits, and the removal's retries (60 s)
+# outlast that.
 # Time bounds, each by `timeout -k 10` (TERM at the bound, KILL 10 s later):
 # 8 compiles x (60+10) s = 560 s; the remote mkdir 300+10 s; 3 scp x (300+10)
 # s = 930 s; 3 row runs x (600+10) s = 1830 s; the cleanup 300+10 s: 3940 s at
@@ -59,7 +64,7 @@ cleanup() {
     [ "$CLEANED" = 1 ] && return 0
     CLEANED=1; rm -rf "$L"
     [ "$REMOTE" = 1 ] || return 0
-    rps "for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
+    rps "foreach (\$f in '$RD\\rws\\kr-release','$RD\\rws\\kr-go','$RD\\lsh\\kr-release') { if (Test-Path -LiteralPath (Split-Path -Parent \$f)) { try { New-Item -ItemType File -Force -Path \$f -ErrorAction Stop | Out-Null } catch { } } }; for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
         || { echo "native_concurrent.sh: remote $RD not removed" >&2; exit 2; }
 }
 trap 'cleanup; exit 2' INT TERM HUP

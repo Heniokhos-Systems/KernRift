@@ -139,7 +139,14 @@ trap "$SUITE_EXIT_TRAP" EXIT
 # and HUP the same way when run by hand): remove the private TMPDIR and the
 # files rows name after this shell's pid -- /tmp/krc_*_<pid>[...] and
 # <repo>/*_<pid>[...] -- and stop. Nothing is counted; the run is not a pass.
+# A row that leaves a process running in the background that outlives this
+# shell (timeout puts itself in its own process group, so the signal to ours
+# never reaches it) sets SUITE_ABORT_HOOK to a command that stops it, and
+# clears it again when the process is gone; suite_abort runs it FIRST, before
+# removing the scratch files that process may be waiting on.
+SUITE_ABORT_HOOK=""
 suite_abort() {
+    [ -z "$SUITE_ABORT_HOOK" ] || eval "$SUITE_ABORT_HOOK"
     rm -rf "$SUITE_TMP" /tmp/krc_*_$$ /tmp/krc_*_$$.* /tmp/krc_*_$$_* /tmp/krc$$_* \
            "$DIR"/../*_$$ "$DIR"/../*_$$.* "$DIR"/../*_$$_* 2>/dev/null
     # ...and every other /tmp/<name>_$$ path, by the names this file uses (the
@@ -35564,32 +35571,53 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
                 while [ ! -e "$RWS_D/$1" ] && [ $t -lt 600 ]; do sleep 0.1; t=$((t + 1)); done
                 [ -e "$RWS_D/$1" ]
             }
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 360 "$RWS_WINE" hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
+            # Interrupted while the holder (or the first run) waits for its
+            # release: release it, give it 2 s, then TERM its timeout (whose
+            # PID $! is: the subshell execs it), before suite_abort removes
+            # $RWS_D and with it any chance of a release. A foreground run is
+            # started the same way (rws_fg) and simply TERMed.
+            RWS_FG=""
+            # (The output file is an argument, not a redirection of the call:
+            # a trap that runs during the call would write into it.)
+            rws_fg() {     # <output file> <args>: under Wine, 120 s; its status
+                local o="$1"; shift
+                ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 120 "$RWS_WINE" "$@" > "$o" 2>&1 ) &
+                RWS_FG=$!
+                wait "$RWS_FG"
+            }
+            rws_abort() {
+                [ -z "$RWS_FG" ] || kill -TERM $RWS_FG 2> /dev/null
+                : > "$RWS_D/kr-release" 2> /dev/null; : > "$RWS_D/kr-go" 2> /dev/null
+                local t=0
+                while [ $t -lt 20 ] && kill -0 $RWS_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
+                kill -TERM $RWS_BG 2> /dev/null
+            }
+            ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 360 "$RWS_WINE" hold.exe > /dev/null 2>&1 ) &
             RWS_BG=$!
+            SUITE_ABORT_HOOK=rws_abort
             if ! rws_wait kr-held; then
                 RWS_WHY="$RWS_WHY [the holder did not take slot 0's lock within 60 s: inconclusive]"
             else
-                ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 120 "$RWS_WINE" kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
+                rws_fg "$RWS_D/r1.out" kr.exe slow.exe; RWS_R=$?
                 [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
                 [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
                 [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
             fi
             : > "$RWS_D/kr-release"
-            wait "$RWS_BG"
-            RWS_H=$(cat "$RWS_D/h.st" 2>/dev/null)
+            wait "$RWS_BG"; RWS_H=$?
             [ "$RWS_H" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder exited ${RWS_H:-?}, want 0 (9: it could not take slot 0's lock; 8: no kr-held; 7: never released)]"
             rm -f "$RWS_D"/kr-run-*
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 360 "$RWS_WINE" kr.exe first.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
+            ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 360 "$RWS_WINE" kr.exe first.exe > /dev/null 2>&1 ) &
             RWS_BG=$!
             RWS_B=""
             if ! rws_wait kr-up; then
                 RWS_WHY="$RWS_WHY [the first run's program did not start within 60 s: not two at once, inconclusive]"
             else
-                ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 120 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
+                rws_fg /dev/null kr.exe slow.exe; RWS_B=$?
             fi
             : > "$RWS_D/kr-go"
-            wait "$RWS_BG"
-            RWS_A=$(cat "$RWS_D/a.st" 2>/dev/null)
+            wait "$RWS_BG"; RWS_A=$?
+            SUITE_ABORT_HOOK=""
             [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits ${RWS_A:-?} and ${RWS_B:-?}, want 42 42 (first: 8 no kr-up, 7 never released)]"
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
         fi
@@ -35633,21 +35661,37 @@ else
        || ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/probe.kr" -o "$LSH_D/probe.exe" > /dev/null 2>&1; then
         LSH_WHY=" [build failed]"
     else
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 360 "$LSH_WINE" hold.exe > /dev/null 2>&1; echo $? > "$LSH_D/h.st" ) &
+        # Interrupted while the holder waits: release it, 2 s, then TERM its
+        # timeout (as rws_abort above does); a running probe is TERMed.
+        LSH_FG=""
+        lsh_fg() {     # probe.exe under Wine, 120 s; its status
+            ( cd "$LSH_D" && WINEDEBUG=-all exec timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ) &
+            LSH_FG=$!
+            wait "$LSH_FG"
+        }
+        lsh_abort() {
+            [ -z "$LSH_FG" ] || kill -TERM $LSH_FG 2> /dev/null
+            : > "$LSH_D/kr-release" 2> /dev/null
+            local t=0
+            while [ $t -lt 20 ] && kill -0 $LSH_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
+            kill -TERM $LSH_BG 2> /dev/null
+        }
+        ( cd "$LSH_D" && WINEDEBUG=-all exec timeout -k 5 360 "$LSH_WINE" hold.exe > /dev/null 2>&1 ) &
         LSH_BG=$!
+        SUITE_ABORT_HOOK=lsh_abort
         LSH_T=0
         while [ ! -e "$LSH_D/kr-held" ] && [ $LSH_T -lt 600 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
         if [ ! -e "$LSH_D/kr-held" ]; then
             LSH_WHY="$LSH_WHY [the holder did not open the file within 60 s: inconclusive]"
         else
-            ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_HELD=$?
+            lsh_fg; LSH_HELD=$?
             [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
         fi
         : > "$LSH_D/kr-release"
-        wait "$LSH_BG"
-        LSH_H=$(cat "$LSH_D/h.st" 2>/dev/null)
-        [ "$LSH_H" = "0" ] || LSH_WHY="$LSH_WHY [the holder could not open the file: exit ${LSH_H:-?} (9: could not open it; 8: no kr-held; 7: never released)]"
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_FREE=$?
+        wait "$LSH_BG"; LSH_H=$?
+        [ "$LSH_H" = "0" ] || LSH_WHY="$LSH_WHY [the holder exited ${LSH_H:-?}, want 0 (9: it could not open the file; 8: no kr-held; 7: never released)]"
+        lsh_fg; LSH_FREE=$?
+        SUITE_ABORT_HOOK=""
         [ "$LSH_FREE" = "0" ] || LSH_WHY="$LSH_WHY [after the holder exited: exit $LSH_FREE, want 0]"
     fi
     if [ -z "$LSH_WHY" ]; then
