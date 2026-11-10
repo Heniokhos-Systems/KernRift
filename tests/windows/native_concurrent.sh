@@ -33,20 +33,21 @@
 # is a FAIL saying so, never a PASS. A row whose build fails is reported FAIL
 # (build: <file>: rc=N; <first error: line>) and the others still run.
 # Prints "<row>: PASS|FAIL (detail)" per row and exits 0 when every row
-# passed, 1 otherwise, 2 on a transport error (ssh 255 or a timed-out ssh; a
-# PowerShell failure on the laptop is a FAIL of its row). The laptop's
+# passed, 1 otherwise, 2 on a transport error (ssh 255, or an ssh that timed
+# out or was killed; a PowerShell failure on the laptop is a FAIL of its row). The laptop's
 # scratch directory is removed at the end, on a transport error and on
 # INT/TERM/HUP.
-# Time bounds, each by `timeout`: 7 compiles x 60 s = 420 s; the remote mkdir
-# 300 s; 3 scp x 300 s = 900 s; 3 row runs x 600 s = 1800 s; the cleanup
-# 300 s: 3720 s at most in all. native_suite.sh runs this under
-# `timeout -k 60 3900` (3720 s + 180 s slack, then KILL 60 s after TERM).
+# Time bounds, each by `timeout -k 10` (TERM at the bound, KILL 10 s later):
+# 7 compiles x (60+10) s = 490 s; the remote mkdir 300+10 s; 3 scp x (300+10)
+# s = 930 s; 3 row runs x (600+10) s = 1830 s; the cleanup 300+10 s: 3870 s at
+# most in all. native_suite.sh runs this under `timeout -k 60 4000` (3870 s +
+# 130 s slack, then KILL 60 s after TERM).
 set -u -o pipefail
 NATIVE_HOST="${NATIVE_HOST:-laptop}"
 KRC="${1:?usage: native_concurrent.sh <compiler> <fixtures dir>}"; FX="${2:?fixtures dir}"
 L=$(mktemp -d "${TMPDIR:-$HOME/.cache/pe_unwind}/ncc.XXXXXX")
 RD="C:\\Users\\pante\\pe_unwind_scratch\\ncc$$"; RDF="C:/Users/pante/pe_unwind_scratch/ncc$$"
-rps() { timeout "${2:-300}" ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
+rps() { timeout -k 10 "${2:-300}" ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
 REMOTE=0; CLEANED=0
 cleanup() {
     [ "$CLEANED" = 1 ] && return 0
@@ -61,9 +62,9 @@ trap 'cleanup; exit 2' INT TERM HUP
 kb() {
     local o rc src
     src=$(printf '%s\n' "$@" | grep -m1 '\.kr$')
-    o=$( ( ulimit -v 2000000; timeout 60 "$KRC" "$@" ) 2>&1 ); rc=$?
+    o=$( ( ulimit -v 2000000; timeout -k 10 60 "$KRC" "$@" ) 2>&1 ); rc=$?
     [ "$rc" = 0 ] && return 0
-    KB_WHY="${src##*/}: rc=$rc$([ "$rc" = 124 ] && echo ' (timeout 60 s)')$(grep -m1 'error:' <<< "$o" | sed 's|^[^ ]*/||; s/^/; /')"
+    KB_WHY="${src##*/}: rc=$rc$(case "$rc" in 124) echo ' (timed out after 60 s)' ;; 137) echo ' (killed: KILL 10 s after the 60 s timeout, or from outside)' ;; esac)$(grep -m1 'error:' <<< "$o" | sed 's|^[^ ]*/||; s/^/; /')"
     return 1
 }
 FAILED=0; TERR=0
@@ -114,8 +115,10 @@ rcw() {
 }
 v() { grep -m1 "^$1=" <<< "$OUT" | cut -d= -f2-; }
 # runrow <row> <command>: runs it (600 s); 0 with OUT set, else 1 after
-# reporting: ssh's 255 or timeout's 124/137 are a transport error, any other
-# status (PowerShell's 1 on a parse or runtime error) a FAIL of the row
+# reporting: ssh's 255, 124 (timed out: TERM after 600 s) and 137 (KILLed:
+# by timeout -k 10 s after that TERM, or from outside) are a transport error,
+# any other status (PowerShell's 1 on a parse or runtime error) a FAIL of the
+# row
 runrow() {
     local rc
     rps "$2" 600 > "$L/r.out" 2> "$L/r.err"; rc=$?
@@ -123,7 +126,7 @@ runrow() {
     case "$rc" in
         0) return 0 ;;
         124|137|255) TERR=1
-            echo "native_concurrent.sh: remote run of $1: transport failure (rc=$rc$([ "$rc" = 255 ] || echo ': ssh timed out after 600 s')): $(tr -d '\r' < "$L/r.err" | tr '\n' ' ' | cut -c1-200)" >&2 ;;
+            echo "native_concurrent.sh: remote run of $1: transport failure (rc=$rc$(case "$rc" in 124) echo ': ssh timed out after 600 s' ;; 137) echo ': ssh killed, 10 s after the 600 s timeout or from outside' ;; esac)): $(tr -d '\r' < "$L/r.err" | tr '\n' ' ' | cut -c1-200)" >&2 ;;
         *) row "$1" "FAIL (remote PowerShell failed (rc=$rc): $(tr -d '\r' < "$L/r.err" | tr '\n' ' ' | cut -c1-200))" ;;
     esac
     return 1
@@ -164,7 +167,7 @@ if [ $((SLE_OK + RWS_OK + LSH_OK)) = 0 ]; then cleanup; exit 1; fi
 REMOTE=1
 rps "New-Item -ItemType Directory -Force '$RD\\sle','$RD\\rws','$RD\\lsh' | Out-Null; exit 0" > /dev/null; MRC=$?
 [ "$MRC" = 0 ] || { echo "native_concurrent.sh: remote mkdir failed (rc=$MRC)" >&2; cleanup; exit 2; }
-up() { timeout 300 scp -q -o BatchMode=yes "$@" < /dev/null; local rc=$?; [ "$rc" = 0 ] || { echo "native_concurrent.sh: scp failed (rc=$rc)" >&2; cleanup; exit 2; }; }
+up() { timeout -k 10 300 scp -q -o BatchMode=yes "$@" < /dev/null; local rc=$?; [ "$rc" = 0 ] || { echo "native_concurrent.sh: scp failed (rc=$rc)" >&2; cleanup; exit 2; }; }
 if [ "$SLE_OK" = 1 ]; then up "$L/sle/w32_hold.exe" "$L/sle/sys_lasterr.exe" "$L/sle/held.txt" "$NATIVE_HOST:$RDF/sle/"; fi
 if [ "$RWS_OK" = 1 ]; then up "$L/rws/kr.exe" "$L/rws/slow.exe" "$L/rws/hold.exe" "$NATIVE_HOST:$RDF/rws/"; fi
 if [ "$LSH_OK" = 1 ]; then up "$L/lsh/hold.exe" "$L/lsh/probe.exe" "$NATIVE_HOST:$RDF/lsh/"; fi
