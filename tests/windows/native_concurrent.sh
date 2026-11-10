@@ -20,11 +20,17 @@
 # runs slow.exe (exits 42 after 2 s). (1) While hold.exe holds
 # .\kr-run-0.lock open for writing, kr.exe slow.exe must exit 42, write no
 # kr-run-0.exe and write kr-run-1.exe, and the holder must exit 0; (2) with
-# the kr-run-* files removed, two kr.exe slow.exe at once must both exit 42 and
-# leave kr-run-0.exe and kr-run-1.exe.
+# the kr-run-* files removed, kr.exe first.exe and, while that one runs,
+# kr.exe slow.exe must both exit 42 and leave kr-run-0.exe and kr-run-1.exe.
+# Both overlaps are handshakes, as in the row: hold.exe creates .\kr-held once
+# it has the lock and holds until .\kr-release exists; first.exe creates
+# .\kr-up and runs until .\kr-go exists (each exits 7 if never released within
+# 300 s); each marker is waited for up to 60 s, none being an inconclusive
+# FAIL.
 # Row legacy_file_open_write_holds_the_file_wine (run_tests.sh, "A --legacy
 # Windows file_open for writing holds the file"): both built --legacy; while
-# hold.exe holds .\kr-share.lock open for writing, probe.exe (a second
+# hold.exe holds .\kr-share.lock open for writing (the same handshake: it
+# creates .\kr-held and holds until .\kr-release exists), probe.exe (a second
 # file_open(.\kr-share.lock, 1)) must exit 3; once the holder has exited (0),
 # probe.exe must exit 0.
 # The programs, build flags and assertions are the rows' own. A holder that
@@ -36,11 +42,16 @@
 # passed, 1 otherwise, 2 on a transport error (ssh 255, or an ssh that timed
 # out or was killed; a PowerShell failure on the laptop is a FAIL of its row).
 # The laptop's scratch directory is removed at the end, on a transport error
-# and on INT/TERM/HUP.
+# and on INT/TERM/HUP. A row cut off mid-run (a dropped connection, runrow's
+# 600 s cap) can leave hold.exe or first.exe waiting for its release for up
+# to 300 s with $RD open, so the cleanup first creates every release file
+# (rws\kr-release, rws\kr-go, lsh\kr-release; errors ignored): a released
+# program sees it within 50 ms and exits, and the removal's retries (60 s)
+# outlast that.
 # Time bounds, each by `timeout -k 10` (TERM at the bound, KILL 10 s later):
-# 7 compiles x (60+10) s = 490 s; the remote mkdir 300+10 s; 3 scp x (300+10)
-# s = 930 s; 3 row runs x (600+10) s = 1830 s; the cleanup 300+10 s: 3870 s at
-# most in all. native_suite.sh runs this under `timeout -k 60 4000` (3870 s +
+# 8 compiles x (60+10) s = 560 s; the remote mkdir 300+10 s; 3 scp x (300+10)
+# s = 930 s; 3 row runs x (600+10) s = 1830 s; the cleanup 300+10 s: 3940 s at
+# most in all. native_suite.sh runs this under `timeout -k 60 4070` (3940 s +
 # 130 s slack, then KILL 60 s after TERM).
 set -u -o pipefail
 NATIVE_HOST="${NATIVE_HOST:-laptop}"
@@ -53,7 +64,7 @@ cleanup() {
     [ "$CLEANED" = 1 ] && return 0
     CLEANED=1; rm -rf "$L"
     [ "$REMOTE" = 1 ] || return 0
-    rps "for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
+    rps "foreach (\$f in '$RD\\rws\\kr-release','$RD\\rws\\kr-go','$RD\\lsh\\kr-release') { if (Test-Path -LiteralPath (Split-Path -Parent \$f)) { try { New-Item -ItemType File -Force -Path \$f -ErrorAction Stop | Out-Null } catch { } } }; for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
         || { echo "native_concurrent.sh: remote $RD not removed" >&2; exit 2; }
 }
 trap 'cleanup; exit 2' INT TERM HUP
@@ -145,15 +156,17 @@ fi
 TREE="$(cd "$(dirname "$0")/../.." && pwd)"
 cat "$TREE/src/runner.kr" "$TREE/src/bcj.kr" > "$L/rws/runner.kr"
 printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$L/rws/slow.kr"
-printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$L/rws/hold.kr"
+printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 s = file_open(".\\\\kr-held", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-release", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(0)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$L/rws/hold.kr"
+printf 'fn main() {\n    uint64 s = file_open(".\\\\kr-up", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-go", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(42)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$L/rws/first.kr"
 if kb --arch=x86_64 --emit=windows "$L/rws/runner.kr" -o "$L/rws/kr.exe" \
    && kb --arch=x86_64 --emit=windows "$L/rws/slow.kr" -o "$L/rws/slow.exe" \
-   && kb --arch=x86_64 --emit=windows "$L/rws/hold.kr" -o "$L/rws/hold.exe"; then
+   && kb --arch=x86_64 --emit=windows "$L/rws/hold.kr" -o "$L/rws/hold.exe" \
+   && kb --arch=x86_64 --emit=windows "$L/rws/first.kr" -o "$L/rws/first.exe"; then
     RWS_OK=1
 else
     row runner_windows_slots_are_claimed "FAIL (build: $KB_WHY)"
 fi
-printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$L/lsh/hold.kr"
+printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 s = file_open(".\\\\kr-held", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-release", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(0)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$L/lsh/hold.kr"
 printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(3) }\n    exit(0)\n}\n' > "$L/lsh/probe.kr"
 if kb --arch=x86_64 --emit=windows --legacy "$L/lsh/hold.kr" -o "$L/lsh/hold.exe" \
    && kb --arch=x86_64 --emit=windows --legacy "$L/lsh/probe.kr" -o "$L/lsh/probe.exe"; then
@@ -169,7 +182,7 @@ rps "New-Item -ItemType Directory -Force '$RD\\sle','$RD\\rws','$RD\\lsh' | Out-
 [ "$MRC" = 0 ] || { echo "native_concurrent.sh: remote mkdir failed (rc=$MRC)" >&2; cleanup; exit 2; }
 up() { timeout -k 10 300 scp -q -o BatchMode=yes "$@" < /dev/null; local rc=$?; [ "$rc" = 0 ] || { echo "native_concurrent.sh: scp failed (rc=$rc)" >&2; cleanup; exit 2; }; }
 if [ "$SLE_OK" = 1 ]; then up "$L/sle/w32_hold.exe" "$L/sle/sys_lasterr.exe" "$L/sle/held.txt" "$NATIVE_HOST:$RDF/sle/"; fi
-if [ "$RWS_OK" = 1 ]; then up "$L/rws/kr.exe" "$L/rws/slow.exe" "$L/rws/hold.exe" "$NATIVE_HOST:$RDF/rws/"; fi
+if [ "$RWS_OK" = 1 ]; then up "$L/rws/kr.exe" "$L/rws/slow.exe" "$L/rws/hold.exe" "$L/rws/first.exe" "$NATIVE_HOST:$RDF/rws/"; fi
 if [ "$LSH_OK" = 1 ]; then up "$L/lsh/hold.exe" "$L/lsh/probe.exe" "$NATIVE_HOST:$RDF/lsh/"; fi
 
 # --- sys_last_errno_windows_wine ---------------------------------------------
@@ -204,44 +217,48 @@ NcWait 'HOLD_RC' \$h 'hold';
 fi
 
 # --- runner_windows_slots_are_claimed ----------------------------------------
-# (1) hold.exe holds kr-run-0.lock (waited for as the row does: up to 10 s for
-# the file, then 0.5 s), kr.exe slow.exe meanwhile; (2) the kr-run-* files
-# removed (retried for up to 10 s; a leftover is reported), one kr.exe
-# slow.exe, 1 s later a second while the first still runs
+# (1) hold.exe takes kr-run-0.lock (its kr-held waited for up to 60 s, as the
+# row does), kr.exe slow.exe meanwhile, then kr-release; (2) the kr-run-* files
+# removed (retried for up to 10 s; a leftover is reported), kr.exe first.exe
+# (its kr-up waited for up to 60 s), kr.exe slow.exe while it runs, then kr-go
 if [ "$RWS_OK" = 1 ]; then
     C=$(psrow "$RD\\rws" "Set-Location \$D;
 \$h=NcStart 'hold' 'hold.exe';
-if (\$h) { for (\$i=0; \$i -lt 100 -and -not (Test-Path (\$D+'\\kr-run-0.lock')); \$i++) { Start-Sleep -Milliseconds 100 } };
-Start-Sleep -Milliseconds 500;
-\$p=NcStart 'r1' 'kr.exe' @('slow.exe');
-NcWait 'R1_RC' \$p 'r1';
-'ALIVE='+(NcAlive \$h);
+if (\$h) { for (\$i=0; \$i -lt 600 -and -not (Test-Path (\$D+'\\kr-held')); \$i++) { Start-Sleep -Milliseconds 100 } };
+'READY='+(Test-Path (\$D+'\\kr-held'));
+if (Test-Path (\$D+'\\kr-held')) { \$p=NcStart 'r1' 'kr.exe' @('slow.exe'); NcWait 'R1_RC' \$p 'r1'; 'ALIVE='+(NcAlive \$h); 'R1_SLOT0='+(Test-Path (\$D+'\\kr-run-0.exe')); 'R1_SLOT1='+(Test-Path (\$D+'\\kr-run-1.exe')); 'R1_OUT='+(NcOut 'r1') };
+New-Item -ItemType File -Force (\$D+'\\kr-release') | Out-Null;
 NcWait 'HOLD_RC' \$h 'hold';
-'R1_SLOT0='+(Test-Path (\$D+'\\kr-run-0.exe'));
-'R1_SLOT1='+(Test-Path (\$D+'\\kr-run-1.exe'));
-'R1_OUT='+(NcOut 'r1');
 for (\$i=0; \$i -lt 20 -and (Test-Path (\$D+'\\kr-run-*')); \$i++) { Remove-Item -Path (\$D+'\\kr-run-*') -Force -ErrorAction SilentlyContinue; if (Test-Path (\$D+'\\kr-run-*')) { Start-Sleep -Milliseconds 500 } };
 'LEFT='+((Get-ChildItem -Name -Path (\$D+'\\kr-run-*')) -join ' ');
-\$a=NcStart 'a' 'kr.exe' @('slow.exe');
-Start-Sleep -Seconds 1;
-\$b=NcStart 'b' 'kr.exe' @('slow.exe');
-'A_ALIVE='+(NcAlive \$a);
-NcWait 'B_RC' \$b 'b';
+\$a=NcStart 'a' 'kr.exe' @('first.exe');
+if (\$a) { for (\$i=0; \$i -lt 600 -and -not (Test-Path (\$D+'\\kr-up')); \$i++) { Start-Sleep -Milliseconds 100 } };
+'UP='+(Test-Path (\$D+'\\kr-up'));
+if (Test-Path (\$D+'\\kr-up')) { \$b=NcStart 'b' 'kr.exe' @('slow.exe'); NcWait 'B_RC' \$b 'b'; 'A_ALIVE='+(NcAlive \$a) };
+New-Item -ItemType File -Force (\$D+'\\kr-go') | Out-Null;
 NcWait 'A_RC' \$a 'a';
 'SLOT0='+(Test-Path (\$D+'\\kr-run-0.exe'));
 'SLOT1='+(Test-Path (\$D+'\\kr-run-1.exe'));
 'FILES='+((Get-ChildItem -Name -Path (\$D+'\\kr-run-*')) -join ' ');") || { cleanup; exit 2; }
     if runrow runner_windows_slots_are_claimed "$C"; then
         WHY=""
-        rcw R1_RC 42 "slot 0 held" "$(v R1_OUT | cut -c1-80)"
-        rcw HOLD_RC 0 "the lock holder" "it could not take slot 0's lock"
-        [ "$(v ALIVE)" = True ] || WHY="$WHY [the lock holder exited before kr.exe finished: inconclusive]"
-        [ "$(v R1_SLOT0)" = False ] || WHY="$WHY [kr-run-0.exe was written while slot 0's lock was held]"
-        [ "$(v R1_SLOT1)" = True ] || WHY="$WHY [no kr-run-1.exe: slot 1 was not used]"
+        if [ "$(v READY)" != True ]; then
+            WHY="$WHY [the holder did not take slot 0's lock within 60 s: inconclusive]"
+        else
+            rcw R1_RC 42 "slot 0 held" "$(v R1_OUT | cut -c1-80)"
+            [ "$(v ALIVE)" = True ] || WHY="$WHY [the lock holder exited before kr.exe finished: inconclusive]"
+            [ "$(v R1_SLOT0)" = False ] || WHY="$WHY [kr-run-0.exe was written while slot 0's lock was held]"
+            [ "$(v R1_SLOT1)" = True ] || WHY="$WHY [no kr-run-1.exe: slot 1 was not used]"
+        fi
+        rcw HOLD_RC 0 "the lock holder" "9: it could not take slot 0's lock; 8: no kr-held; 7: never released"
         [ -z "$(v LEFT)" ] || WHY="$WHY [kr-run-* not removable before the two-at-once run: $(v LEFT)]"
-        [ "$(v A_ALIVE)" = True ] || WHY="$WHY [the first kr.exe exited before the second started: not two at once, inconclusive]"
-        rcw A_RC 42 "two at once, first"
-        rcw B_RC 42 "two at once, second"
+        if [ "$(v UP)" != True ]; then
+            WHY="$WHY [the first run's program did not start within 60 s: not two at once, inconclusive]"
+        else
+            [ "$(v A_ALIVE)" = True ] || WHY="$WHY [the first kr.exe exited before the second finished: not two at once, inconclusive]"
+            rcw B_RC 42 "two at once, second"
+        fi
+        rcw A_RC 42 "two at once, first" "8: no kr-up; 7: never released"
         [ "$(v SLOT0)" = True ] && [ "$(v SLOT1)" = True ] || WHY="$WHY [two at once did not use two slots: $(v FILES)]"
         done_or_incomplete
         if [ -z "$WHY" ]; then
@@ -253,24 +270,28 @@ NcWait 'A_RC' \$a 'a';
 fi
 
 # --- legacy_file_open_write_holds_the_file_wine ------------------------------
-# hold.exe holds kr-share.lock (waited for as the row does), probe.exe
-# meanwhile, then probe.exe again once the holder has exited
+# hold.exe takes kr-share.lock (its kr-held waited for up to 60 s, as the row
+# does), probe.exe meanwhile, then kr-release, and probe.exe again once the
+# holder has exited
 if [ "$LSH_OK" = 1 ]; then
     C=$(psrow "$RD\\lsh" "Set-Location \$D;
 \$h=NcStart 'hold' 'hold.exe';
-if (\$h) { for (\$i=0; \$i -lt 100 -and -not (Test-Path (\$D+'\\kr-share.lock')); \$i++) { Start-Sleep -Milliseconds 100 } };
-Start-Sleep -Milliseconds 500;
-\$p=NcStart 'held' 'probe.exe';
-NcWait 'HELD_RC' \$p 'held';
-'ALIVE='+(NcAlive \$h);
+if (\$h) { for (\$i=0; \$i -lt 600 -and -not (Test-Path (\$D+'\\kr-held')); \$i++) { Start-Sleep -Milliseconds 100 } };
+'READY='+(Test-Path (\$D+'\\kr-held'));
+if (Test-Path (\$D+'\\kr-held')) { \$p=NcStart 'held' 'probe.exe'; NcWait 'HELD_RC' \$p 'held'; 'ALIVE='+(NcAlive \$h) };
+New-Item -ItemType File -Force (\$D+'\\kr-release') | Out-Null;
 NcWait 'HOLD_RC' \$h 'hold';
 \$p=NcStart 'free' 'probe.exe';
 NcWait 'FREE_RC' \$p 'free';") || { cleanup; exit 2; }
     if runrow legacy_file_open_write_holds_the_file_wine "$C"; then
         WHY=""
-        rcw HOLD_RC 0 "the holder" "it could not open the file"
-        [ "$(v ALIVE)" = True ] || WHY="$WHY [the holder exited before the probe finished: inconclusive]"
-        rcw HELD_RC 3 "while held" "a second writer must be refused"
+        rcw HOLD_RC 0 "the holder" "9: it could not open the file; 8: no kr-held; 7: never released"
+        if [ "$(v READY)" != True ]; then
+            WHY="$WHY [the holder did not open the file within 60 s: inconclusive]"
+        else
+            [ "$(v ALIVE)" = True ] || WHY="$WHY [the holder exited before the probe finished: inconclusive]"
+            rcw HELD_RC 3 "while held" "a second writer must be refused"
+        fi
         rcw FREE_RC 0 "after the holder exited"
         done_or_incomplete
         if [ -z "$WHY" ]; then

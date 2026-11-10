@@ -41,17 +41,120 @@ It also refuses shapes that cannot be right whatever the code says: a range
 whose end is before its start, a line number past the end of the file, a
 blank line, and a citation of a file that does not exist.
 
+ONLY FILES THAT ARE PART OF THE TREE COUNT, on both sides of a citation. When
+ROOT is the top of a git work tree, the tree is what
+`git ls-files --cached --others --exclude-standard` lists: every tracked file,
+plus the untracked ones git's standard ignore rules do not exclude (a new doc a
+contributor has not `git add`ed yet is checked, and so is a file a suite row
+plants in a scratch repo), and NEVER an ignored one. docs/superpowers/ is
+ignored and holds local planning notes that cite long-gone line numbers;
+walking it made the check fail on a working checkout while passing on every
+fresh clone. An ignored file is also not a valid citation TARGET: it does not
+exist in a clone, so a citation of one says "does not exist".
+
+"Ignored" is git's full standard set: the .gitignore files, .git/info/exclude,
+and the user's core.excludesFile. Those last two are per-checkout and per-user,
+on purpose: they only ever decide about UNTRACKED files, which no clone has, and
+a note a user ignores locally is the same case as docs/superpowers/. (Turning
+the user's config off would also drop safe.directory, and fail a checkout git
+itself accepts.) The variables that say WHICH repo git is in are removed from
+its environment (GIT_LOCATION_VARS below), so a hook's GIT_DIR or
+GIT_INDEX_FILE, or a push quarantine's GIT_OBJECT_DIRECTORY, cannot point the
+listing at another repo or fail it. Configuration from the environment
+(GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS, GIT_CONFIG_GLOBAL, ...)
+and GIT_EXEC_PATH are kept: they are where safe.directory and core.excludesFile
+may come from, and the listing must agree with the git the user runs.
+
+ls-files lists a nested untracked repo, or a submodule, as its directory and
+not its files, so files inside one are not part of the tree: they are not
+scanned, and a citation into one says "does not exist".
+
+When ROOT has no .git of its own (an exported copy, a scratch copy that may sit
+inside some other repo) every file on disk counts, as before. When it HAS one
+but git cannot list it (git not installed, "dubious ownership", a corrupt
+index), the checker stops with git's message and exit status 2 instead of
+silently walking the disk, which would bring the ignored files back.
+
 After editing src/, the docs, or the citations, CHECK EACH CITATION AGAINST THE
 CODE, then:
     python3 scripts/gen-ir-reference-citations.py
 tests/run_tests.sh runs it with --check.
 """
-import hashlib, re, sys, os
+import hashlib, re, sys, os, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT = "mlr" if os.path.exists(os.path.join(ROOT, "src", "main.mlr")) else "kr"
 doc = os.path.join(ROOT, "docs/IR_REFERENCE.md")
 out = os.path.join(ROOT, "tests/ir_reference_citations.txt")
+
+# The repo-location variables: `git rev-parse --local-env-vars` minus its
+# configuration entries (GIT_CONFIG, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT),
+# plus the two that steer repository discovery (GIT_CEILING_DIRECTORIES,
+# GIT_DISCOVERY_ACROSS_FILESYSTEM), as git 2.43 and 2.53 print it. This fixed
+# list is the floor and must equal tests/run_tests.sh's KR_GIT_LOCATION_FIXED
+# (the row ir_reference_citations_skips_ignored_files checks that). On top of
+# it, whatever the installed git's --local-env-vars names (minus GIT_CONFIG*)
+# is stripped too, so a newer git's new location variable is handled without
+# a tree change; the query runs from / with the fixed list already removed, so
+# a hostile GIT_DIR cannot fail it and it needs no repo. If the query fails,
+# the fixed list alone is stripped. The *_PATHSPECS variables are not
+# stripped: the one ls-files below takes no pathspec.
+GIT_LOCATION_VARS = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
+    "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_PREFIX",
+    "GIT_SHALLOW_FILE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
+
+def location_vars():
+    """GIT_LOCATION_VARS plus the installed git's own list (see above)."""
+    env = {k: v for k, v in os.environ.items() if k not in GIT_LOCATION_VARS}
+    try:
+        r = subprocess.run(["git", "rev-parse", "--local-env-vars"], cwd=os.path.abspath(os.sep),
+                           env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return set(GIT_LOCATION_VARS)
+    named = r.stdout.decode("utf-8", "replace").split() if r.returncode == 0 else []
+    return set(GIT_LOCATION_VARS) | {v for v in named if not v.startswith("GIT_CONFIG")}
+
+def tree_files():
+    """The repo-relative paths that are part of the tree (see the docstring),
+    or None when ROOT has no .git of its own: then everything on disk counts.
+    Exits 2 when ROOT has a .git but git cannot list it."""
+    own = os.path.lexists(os.path.join(ROOT, ".git"))
+    strip = location_vars()
+    env = {k: v for k, v in os.environ.items() if k not in strip}
+    def git(*args):
+        try:
+            r = subprocess.run(["git", "-C", ROOT] + list(args), env=env,
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except OSError as e:
+            return None, f"cannot run git: {e}"
+        err = r.stderr.decode("utf-8", "replace").strip()
+        return (r.stdout.decode("utf-8", "surrogateescape") if r.returncode == 0 else None), err
+    def refuse(why):
+        print(f"{ROOT} has a .git, but {why}", file=sys.stderr)
+        print("not walking the disk instead: that would count the ignored files too", file=sys.stderr)
+        sys.exit(2)
+    top, err = git("rev-parse", "--show-toplevel")
+    if top is None or os.path.realpath(top.strip()) != os.path.realpath(ROOT):
+        if own:
+            refuse(f"git rev-parse --show-toplevel failed: {err}" if top is None
+                   else f"git says the top of its work tree is {top.strip()}")
+        return None
+    out, err = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    if out is None:
+        refuse(f"git ls-files failed: {err}")
+    return set(p for p in out.split("\0") if p)
+
+TREE = tree_files()
+
+def in_tree(rel):
+    """rel exists and is part of the tree."""
+    if not os.path.isfile(os.path.join(ROOT, rel)):
+        return False
+    return TREE is None or os.path.normpath(rel).replace(os.sep, "/") in TREE
 
 MAIN = re.compile(r'src/([a-z_0-9]+\.' + EXT + r'):(\d+)')
 MD = re.compile(r'(?<![\w/.-])((?:docs/)?[A-Za-z][A-Za-z0-9_-]*\.md):(\d+)')
@@ -91,7 +194,7 @@ cache = {}
 def lines_of(rel):
     if rel not in cache:
         p = os.path.join(ROOT, rel)
-        cache[rel] = open(p, encoding="utf-8", errors="replace").read().split("\n") if os.path.isfile(p) else None
+        cache[rel] = open(p, encoding="utf-8", errors="replace").read().split("\n") if in_tree(rel) else None
     return cache[rel]
 
 spans = {}
@@ -114,24 +217,26 @@ def md_target(name):
     if name.startswith("docs/"):
         return name
     for cand in ("docs/" + name, name):
-        if os.path.isfile(os.path.join(ROOT, cand)):
+        if in_tree(cand):
             return cand
     return "docs/" + name
 
 def prose_files():
-    """Every file whose prose may cite a .md line, repo-relative, sorted."""
+    """Every file of the tree whose prose may cite a .md line, repo-relative,
+    sorted. Only files that are part of the tree (see the docstring)."""
     res = []
     for name in sorted(os.listdir(ROOT)):
-        if name.endswith(".md") and os.path.isfile(os.path.join(ROOT, name)):
+        if name.endswith(".md") and in_tree(name):
             res.append(name)
     for sub in ("docs", "src"):
         top = os.path.join(ROOT, sub)
         for dp, dns, fns in os.walk(top):
             dns.sort()
             for fn in sorted(fns):
-                if fn.endswith(".md") or (sub == "src" and fn.endswith("." + EXT)):
-                    res.append(os.path.relpath(os.path.join(dp, fn), ROOT))
-    if os.path.isfile(os.path.join(ROOT, "tests/run_tests.sh")):
+                rel = os.path.relpath(os.path.join(dp, fn), ROOT)
+                if (fn.endswith(".md") or (sub == "src" and fn.endswith("." + EXT))) and in_tree(rel):
+                    res.append(rel)
+    if in_tree("tests/run_tests.sh"):
         res.append("tests/run_tests.sh")
     return res
 

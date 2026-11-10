@@ -1,6 +1,39 @@
 #!/bin/bash
 # No set -e: test binaries return non-zero exit codes intentionally
 
+# The suite must not depend on which repo its CALLER's git points at: a hook
+# (pre-commit, pre-push) runs with GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE
+# set, and every `git -C "$DIR/.."` below would then list or stage THAT repo.
+# Unset the repo-location variables once, here, for every row: the fixed list
+# KR_GIT_LOCATION_FIXED (`git rev-parse --local-env-vars` of git 2.43/2.53
+# minus its GIT_CONFIG* entries, plus GIT_CEILING_DIRECTORIES and
+# GIT_DISCOVERY_ACROSS_FILESYSTEM; it must equal the script's
+# GIT_LOCATION_VARS), plus whatever the installed git's --local-env-vars names
+# minus GIT_CONFIG* -- asked from / with the fixed list already gone, as
+# scripts/gen-ir-reference-citations.py does -- so a newer git's new location
+# variable is unset too, with no tree change. Config from the environment
+# (GIT_CONFIG_COUNT/KEY_n/VALUE_n, ...) is kept. No row relies on an inherited
+# GIT_* variable. ir_reference_citations_skips_ignored_files checks the two
+# fixed lists agree and that every variable git names is stripped.
+#
+# The four *_PATHSPECS variables go too: they change what every pathspec in a
+# row means (GIT_LITERAL_PATHSPECS=1 turns 'tests/fixtures/*.kr' into a file
+# name that matches nothing), and the rows' pathspecs are written for git's
+# default reading. They are a caller's preference, not where its repo is.
+KR_GIT_LOCATION_FIXED="GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT_DIR
+    GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE
+    GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE
+    GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM"
+KR_GIT_PATHSPEC_VARS="GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS"
+kr_git_location_vars() {   # the fixed list, then what the git on PATH names
+    printf '%s\n' $KR_GIT_LOCATION_FIXED
+    ( unset $KR_GIT_LOCATION_FIXED; cd / && git rev-parse --local-env-vars ) 2> /dev/null \
+        | grep '^GIT_[A-Za-z0-9_]*$' | grep -v '^GIT_CONFIG'
+}
+unset $KR_GIT_LOCATION_FIXED $KR_GIT_PATHSPEC_VARS
+KR_GIT_LOCATION_VARS=$(kr_git_location_vars | tr '\n' ' ')
+unset $KR_GIT_LOCATION_VARS
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
 # A relative compiler path ("./build/krc2", "build/krc3") is made absolute
@@ -106,7 +139,14 @@ trap "$SUITE_EXIT_TRAP" EXIT
 # and HUP the same way when run by hand): remove the private TMPDIR and the
 # files rows name after this shell's pid -- /tmp/krc_*_<pid>[...] and
 # <repo>/*_<pid>[...] -- and stop. Nothing is counted; the run is not a pass.
+# A row that leaves a process running in the background that outlives this
+# shell (timeout puts itself in its own process group, so the signal to ours
+# never reaches it) sets SUITE_ABORT_HOOK to a command that stops it, and
+# clears it again when the process is gone; suite_abort runs it FIRST, before
+# removing the scratch files that process may be waiting on.
+SUITE_ABORT_HOOK=""
 suite_abort() {
+    [ -z "$SUITE_ABORT_HOOK" ] || eval "$SUITE_ABORT_HOOK"
     rm -rf "$SUITE_TMP" /tmp/krc_*_$$ /tmp/krc_*_$$.* /tmp/krc_*_$$_* /tmp/krc$$_* \
            "$DIR"/../*_$$ "$DIR"/../*_$$.* "$DIR"/../*_$$_* 2>/dev/null
     # ...and every other /tmp/<name>_$$ path, by the names this file uses (the
@@ -13965,11 +14005,47 @@ TOTAL=$((TOTAL + 1))
 CSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_csh.XXXXXX")
 mkdir -p "$CSH_D/scripts" "$CSH_D/tests"
 cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
-cp -R "$DIR/../src" "$CSH_D/src"
-cp -R "$DIR/../docs" "$CSH_D/docs"
-for csh_f in "$DIR"/../*.md; do [ -f "$csh_f" ] && cp "$csh_f" "$CSH_D/"; done
-cp "$DIR/run_tests.sh" "$CITE_MANIFEST" "$CSH_D/tests/"
 CSH_WHY=""
+# git without the repo-location variables, as the checker runs it (the suite
+# unset them at the top; this keeps the rows right if one is run on its own).
+cite_git() { ( unset $KR_GIT_LOCATION_VARS $KR_GIT_PATHSPEC_VARS; exec git "$@" ); }
+# Copy only what the checker counts as the tree. The copy is not a git repo, so
+# the checker counts every file in it; a blind `cp -R docs` carried the
+# checkout's IGNORED docs/superpowers/ notes (stale citations by design) into
+# it, and the control below failed on a working checkout but not on a clone.
+# Like the checker: a tree with its own .git is listed by git (or the row
+# fails), one without is copied whole. -z, so no path is quoted out of reach;
+# the only listed file allowed to be missing is a tracked one deleted on disk.
+# The whole listing is filtered here, with no pathspec, so no caller setting
+# (GIT_LITERAL_PATHSPECS and friends) can change what it selects.
+csh_root=$(cd "$DIR/.." && pwd -P)
+if [ -e "$csh_root/.git" ]; then
+    cite_git -C "$csh_root" ls-files -z --cached --others --exclude-standard > "$CSH_D/files.lst" \
+        || CSH_WHY="$CSH_WHY [git ls-files failed in $csh_root]"
+    csh_topmd=0
+    while IFS= read -r -d '' csh_f; do
+        case "$csh_f" in
+            src/*|docs/*) ;;
+            */*) continue ;;
+            *.md) csh_topmd=$((csh_topmd + 1)) ;;
+            *) continue ;;
+        esac
+        if [ ! -f "$csh_root/$csh_f" ]; then
+            [ -n "$(cite_git -C "$csh_root" ls-files --deleted -- ":(literal)$csh_f")" ] \
+                || CSH_WHY="$CSH_WHY [git lists $csh_f, but it is not a file]"
+            continue
+        fi
+        mkdir -p "$CSH_D/$(dirname "$csh_f")" && cp "$csh_root/$csh_f" "$CSH_D/$csh_f" \
+            || CSH_WHY="$CSH_WHY [could not copy $csh_f]"
+    done < "$CSH_D/files.lst"
+    rm -f "$CSH_D/files.lst"
+    [ "$csh_topmd" -gt 0 ] || CSH_WHY="$CSH_WHY [git listed no top-level .md file to copy]"
+else
+    cp -R "$DIR/../src" "$CSH_D/src"
+    cp -R "$DIR/../docs" "$CSH_D/docs"
+    for csh_f in "$DIR"/../*.md; do [ -f "$csh_f" ] && cp "$csh_f" "$CSH_D/"; done
+fi
+cp "$DIR/run_tests.sh" "$CITE_MANIFEST" "$CSH_D/tests/"
 csh_check() {   # <tag> <want rc> <grep -F pattern...>: --check on the copy as it is now
     local tag="$1" want="$2" pat; shift 2
     python3 "$CSH_D/scripts/gen-ir-reference-citations.py" --check > "$CSH_D/$tag.out" 2>&1
@@ -14022,6 +14098,180 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_refuses_bad_shapes$CSH_WHY"
 fi
 rm -rf "$CSH_D"
+
+# ...and it checks only files that are part of the tree. It walked docs/ and
+# src/ on disk, so on a working checkout it read the IGNORED docs/superpowers/
+# planning notes, whose citations are stale by design, and `make gate` failed
+# there while passing on every fresh clone. In a scratch git repo with a
+# .gitignore, one bad citation (a blank line) is planted in turn in an ignored
+# file (must NOT be reported), a tracked file and an untracked-but-not-ignored
+# one (both MUST be); a tracked file citing an ignored .md must be told it does
+# not exist (it does not, in a clone); a core.excludesFile given through the
+# environment (GIT_CONFIG_COUNT/KEY_0/VALUE_0) is honoured, as git honours it;
+# a corrupt index, and a .git that names a gitdir that is not there, must stop
+# the checker (exit 2), not send it silently back to walking the disk; the same tree
+# without .git falls back to every file on disk, so the ignored one is reported
+# there, and so it is when that tree sits, ignored, inside an outer repo (the
+# outer repo's listing is not this tree's).
+# All of it runs with GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE pointing at a
+# decoy repo, as in a hook, and the checker also gets a GIT_OBJECT_DIRECTORY
+# that does not exist, as in a push quarantine: the results must not change and
+# the decoy must not be touched (and the caller's values of the three are
+# restored afterwards, not left changed for the rows below). The row's own git
+# calls drop every GIT_* and the user's config; the checker's git keeps the
+# environment's config but not the caller's: an empty HOME, no global or system
+# config and none of the caller's GIT_CONFIG*, so the user's settings cannot
+# move a result either.
+# No .md citation is written literally here: this file's prose is scanned too.
+TOTAL=$((TOTAL + 1))
+CIG_P=$(mktemp -d "${TMPDIR:-/tmp}/krc_cig.XXXXXX")
+CIG_D="$CIG_P/tree" CIG_R="$CIG_P/tree"
+CIG_WHY=""
+mkdir -p "$CIG_D/scripts" "$CIG_D/tests" "$CIG_D/src" "$CIG_D/docs/ignored" "$CIG_P/home" "$CIG_P/decoy"
+cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CIG_D/scripts/"
+printf '# ref\n' > "$CIG_D/docs/IR_REFERENCE.md"
+printf 'one\n\nthree\n' > "$CIG_D/docs/TARGET.md"
+printf 'local\n' > "$CIG_D/docs/LOCAL.md"
+printf '/docs/ignored/\n/docs/LOCAL.md\n' > "$CIG_D/.gitignore"
+cig_bad=$(printf 'See `%s:%s`.' TARGET.md 2)
+cig_ign=$(printf 'See `%s:%s`.' LOCAL.md 1)
+cig_blank=$(printf '%s:%s is a blank line' docs/TARGET.md 2)   # what the bad citation gets
+cig_at() { printf '%s:%s: ' "$1" 1; }                          # "<file>:1: ", where it sits
+cig_git() {     # git with no GIT_* from the caller and no user or system config
+    ( for v in $(compgen -e | grep '^GIT_'); do unset "$v"; done
+      GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" \
+          exec git "$@" )
+}
+cig_run() {     # the checker in $CIG_R: no user config, a hook's GIT_* (below), and $CIG_ENV
+    ( for v in $(compgen -e | grep '^GIT_CONFIG'); do unset "$v"; done
+      export HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" GIT_CONFIG_GLOBAL=/dev/null \
+             GIT_CONFIG_NOSYSTEM=1 GIT_OBJECT_DIRECTORY="$CIG_P/no-such-objects"
+      [ "${#CIG_ENV[@]}" -eq 0 ] || export "${CIG_ENV[@]}"
+      exec python3 "$CIG_R/scripts/gen-ir-reference-citations.py" "$@" )
+}
+CIG_ENV=()
+cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on $CIG_R as it is now
+    local tag="$1" want="$2" pat; shift 2
+    cig_run --check > "$CIG_P/$tag.out" 2>&1
+    local rc=$?
+    [ "$rc" = "$want" ] || CIG_WHY="$CIG_WHY [$tag: --check exited $rc, want $want: $(head -2 "$CIG_P/$tag.out" | tr '\n' ' ')]"
+    for pat in "$@"; do
+        case "$pat" in
+            +*) grep -qF -- "${pat#+}" "$CIG_P/$tag.out" || CIG_WHY="$CIG_WHY [$tag: '${pat#+}' was not reported]" ;;
+            -*) grep -qF -- "${pat#-}" "$CIG_P/$tag.out" && CIG_WHY="$CIG_WHY [$tag: '${pat#-}' was reported]" ;;
+        esac
+    done
+}
+# The checker's fixed list must be this file's fixed list (a tree invariant).
+# And every location variable the git here names must be stripped, by the
+# suite's unset and by the checker: each is set to a path that does not exist
+# and the checker must still list the tree (that runs below, in the repo). A
+# newer git's new variable is not a failure; a git that cannot answer
+# --local-env-vars is (every git the rows need, >= 1.8.5, can).
+cig_pylist=$(python3 -c 'import ast, sys
+for n in ast.parse(open(sys.argv[1]).read()).body:
+    if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "GIT_LOCATION_VARS":
+        print(" ".join(sorted(ast.literal_eval(n.value))))' "$CIG_D/scripts/gen-ir-reference-citations.py")
+cig_shlist=$(printf '%s\n' $KR_GIT_LOCATION_FIXED | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
+[ -n "$cig_pylist" ] && [ "$(printf '%s\n' $cig_pylist | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" = "$cig_shlist" ] \
+    || CIG_WHY="$CIG_WHY [the script's GIT_LOCATION_VARS ($cig_pylist) is not run_tests.sh's KR_GIT_LOCATION_FIXED ($cig_shlist)]"
+cig_named=$( (cd / && cig_git rev-parse --local-env-vars) 2> "$CIG_P/lev.err")
+printf '%s\n' "$cig_named" | grep -qx 'GIT_DIR' \
+    || CIG_WHY="$CIG_WHY [git rev-parse --local-env-vars did not name GIT_DIR: $(head -1 "$CIG_P/lev.err")]"
+cig_named=$(printf '%s\n' "$cig_named" | grep '^GIT_[A-Za-z0-9_]*$' | grep -v '^GIT_CONFIG')
+for v in $cig_named; do
+    case " $(echo $KR_GIT_LOCATION_VARS) " in
+        *" $v "*) ;;
+        *) CIG_WHY="$CIG_WHY [git names $v a location variable, and the suite's unset at the top did not take it]" ;;
+    esac
+done
+# Today's git names nothing past the fixed list, so the union with what git
+# names is exercised with a wrapper git in $CIG_P/bin: it adds
+# GIT_KR_PROBE_LOCATION to --local-env-vars and, like a real location
+# variable pointing nowhere, fails every other command while it is set. The
+# suite header's list (kr_git_location_vars) must take it, and the checker
+# must strip it (below, in the repo).
+mkdir -p "$CIG_P/bin"
+cig_realgit=$(command -v git)
+{ printf '#!/bin/sh\nREAL=%s\n' "'$cig_realgit'"
+  printf '%s\n' 'if [ "$1" = rev-parse ] && [ "$2" = --local-env-vars ]; then "$REAL" "$@" || exit $?; echo GIT_KR_PROBE_LOCATION; exit 0; fi' \
+                 'if [ -n "${GIT_KR_PROBE_LOCATION+x}" ]; then echo "fatal: GIT_KR_PROBE_LOCATION is set: not a git repository" >&2; exit 128; fi' \
+                 'exec "$REAL" "$@"'; } > "$CIG_P/bin/git"
+chmod +x "$CIG_P/bin/git"
+( export GIT_KR_PROBE_LOCATION="$CIG_P/no-such-probe" PATH="$CIG_P/bin:$PATH"
+  unset $(kr_git_location_vars)
+  [ -z "${GIT_KR_PROBE_LOCATION+x}" ] ) \
+    || CIG_WHY="$CIG_WHY [a location variable only the installed git names (probe) is not in the suite header's list]"
+cig_snap() { ( cd "$CIG_P/decoy" && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
+if ! { cig_git -C "$CIG_D" init -q --template= && cig_git -C "$CIG_P/decoy" init -q --template=; } > /dev/null 2>&1; then
+    CIG_WHY=" [git init failed: this row needs git]"
+else
+    printf 'decoy\n' > "$CIG_P/decoy/d.md"
+    cig_git -C "$CIG_P/decoy" add d.md
+    printf 'untracked\n' > "$CIG_P/decoy/u.md"     # so a stray `add -A` would change its index
+    cig_decoy=$(cig_snap)
+    cig_saved=$(export -p | grep -E '^declare -x (GIT_DIR|GIT_WORK_TREE|GIT_INDEX_FILE)=')
+    export GIT_DIR="$CIG_P/decoy/.git" GIT_WORK_TREE="$CIG_P/decoy" GIT_INDEX_FILE="$CIG_P/decoy/.git/index"
+    cig_git -C "$CIG_D" add -A
+    cig_run > /dev/null 2>&1 || CIG_WHY="$CIG_WHY [could not write the scratch manifest]"
+    cig_git -C "$CIG_D" add -A
+    cig_check control 0
+    for v in $cig_named; do     # each one set to nowhere: the checker must strip it
+        CIG_ENV=("$v=$CIG_P/no-such-$v")
+        cig_check "strip_$v" 0
+    done
+    CIG_ENV=("GIT_KR_PROBE_LOCATION=$CIG_P/no-such-probe" "PATH=$CIG_P/bin:$PATH")
+    cig_check probe 0
+    CIG_ENV=()
+    printf '%s\n' "$cig_bad" > "$CIG_D/docs/ignored/note.md"
+    cig_check ignored 0 "-docs/ignored/note.md"
+    printf '%s\n' "$cig_bad" > "$CIG_D/docs/tracked.md"
+    cig_git -C "$CIG_D" add docs/tracked.md
+    cig_check tracked 1 "+$(cig_at docs/tracked.md)$cig_blank" "-docs/ignored/note.md"
+    cig_git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
+    printf '%s\n' "$cig_bad" > "$CIG_D/docs/new.md"
+    cig_check untracked 1 "+$(cig_at docs/new.md)$cig_blank" "-docs/ignored/note.md"
+    rm -f "$CIG_D/docs/new.md"
+    printf '%s\n' "$cig_ign" > "$CIG_D/docs/tracked.md"
+    cig_git -C "$CIG_D" add docs/tracked.md
+    cig_check target 1 "+$(cig_at docs/tracked.md)docs/LOCAL.md does not exist"
+    cig_git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
+    printf '%s\n' "$cig_bad" > "$CIG_D/docs/excl.md"
+    printf '/docs/excl.md\n' > "$CIG_P/excl"
+    CIG_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile "GIT_CONFIG_VALUE_0=$CIG_P/excl")
+    cig_check envconfig 0 "-docs/excl.md"
+    CIG_ENV=()
+    rm -f "$CIG_D/docs/excl.md"
+    cp "$CIG_D/.git/index" "$CIG_P/index.orig"
+    printf 'not an index\n' > "$CIG_D/.git/index"
+    cig_check corrupt 2 "+not walking the disk instead" "-docs/ignored/note.md"
+    cp "$CIG_P/index.orig" "$CIG_D/.git/index"
+    cig_check restored 0
+    mv "$CIG_D/.git" "$CIG_P/git.real"
+    printf 'gitdir: %s\n' "$CIG_P/no-such-gitdir" > "$CIG_D/.git"
+    cig_check gitfile 2 "+not walking the disk instead" "-docs/ignored/note.md"
+    rm -f "$CIG_D/.git"
+    cig_check nogit 1 "+$(cig_at docs/ignored/note.md)$cig_blank"
+    mkdir -p "$CIG_P/outer"
+    if cig_git -C "$CIG_P/outer" init -q --template= > /dev/null 2>&1; then
+        printf '/inner/\n' > "$CIG_P/outer/.gitignore"
+        cp -R "$CIG_D" "$CIG_P/outer/inner"
+        CIG_R="$CIG_P/outer/inner"
+        cig_check nested 1 "+$(cig_at docs/ignored/note.md)$cig_blank"
+        CIG_R="$CIG_D"
+    else
+        CIG_WHY="$CIG_WHY [git init of the outer repo failed]"
+    fi
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    eval "$cig_saved"
+    [ "$(cig_snap)" = "$cig_decoy" ] || CIG_WHY="$CIG_WHY [the decoy repo named by GIT_DIR was modified]"
+fi
+if [ -z "$CIG_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; a core.excludesFile from the environment is honoured; a corrupt index or a dangling gitdir stops the checker; without its own .git, alone or inside an outer repo, every file counts; every location variable git names is stripped; a hook's GIT_DIR changes nothing and touches nothing)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_skips_ignored_files$CIG_WHY"
+fi
+rm -rf "$CIG_P"
 
 # examples/tutorial-btree ships the page manager from docs/tutorial-btree.md
 # §2 -- the mmap-backed persistence the whole tutorial rests on. The stdlib has
@@ -35284,6 +35534,18 @@ rm -rf "$RXP_D"
 # kr-run-0.exe; (2) two runs at once both exit 42, from two slots. Wine is
 # $KR_WINE when it is set (set but not an executable file is a FAIL, never a
 # skip), else `wine` from PATH; none is a counted skip.
+#
+# EVERY OVERLAP IS A HANDSHAKE, NOT A SLEEP. The row used to wait up to 10 s
+# for the holder's lock file and then run the runner whether or not the holder
+# had it, and the holder held for a fixed 6 s; under load Wine took longer than
+# that to start, the runner took slot 0 and the holder exited 9 -- a red with
+# nothing wrong. Now hold.exe takes the lock, creates .\kr-held and holds until
+# .\kr-release exists (exit 7 if that never comes within 300 s); the row waits
+# up to 60 s for kr-held (none is an inconclusive FAIL, and the runner is not
+# run), and releases the holder only after the runner has returned. In (2) the
+# first run's program (first.exe) creates .\kr-up and lives until .\kr-go
+# exists, so the second run starts while the first holds its slot, whatever
+# the load.
 rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
     TOTAL=$((TOTAL + 1))
     RWS_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
@@ -35296,32 +35558,73 @@ rws_row() {   # <row> <extra compiler flags, unquoted: "" or --legacy>
         RWS_WHY=""
         cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$RWS_D/runner.kr"
         printf 'fn main() {\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 2000000000 { }\n    exit(42)\n}\n' > "$RWS_D/slow.kr"
-        printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$RWS_D/hold.kr"
+        printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-run-0.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 s = file_open(".\\\\kr-held", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-release", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(0)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$RWS_D/hold.kr"
+        printf 'fn main() {\n    uint64 s = file_open(".\\\\kr-up", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-go", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(42)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$RWS_D/first.kr"
         if ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/runner.kr" -o "$RWS_D/kr.exe" > /dev/null 2>&1 \
            || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/slow.kr" -o "$RWS_D/slow.exe" > /dev/null 2>&1 \
-           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1; then
+           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/hold.kr" -o "$RWS_D/hold.exe" > /dev/null 2>&1 \
+           || ! $KRC --arch=x86_64 --emit=windows $2 "$RWS_D/first.kr" -o "$RWS_D/first.exe" > /dev/null 2>&1; then
             RWS_WHY=" [build failed]"
         else
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" hold.exe > /dev/null 2>&1; echo $? > "$RWS_D/h.st" ) &
+            rws_wait() {   # <file>: wait up to 60 s for it; 0 once it exists
+                local t=0
+                while [ ! -e "$RWS_D/$1" ] && [ $t -lt 600 ]; do sleep 0.1; t=$((t + 1)); done
+                [ -e "$RWS_D/$1" ]
+            }
+            # Interrupted while the holder (or the first run) waits for its
+            # release: release it, give it 2 s, then TERM its timeout (whose
+            # PID $! is: the subshell execs it), before suite_abort removes
+            # $RWS_D and with it any chance of a release. A foreground run is
+            # started the same way (rws_fg) and simply TERMed.
+            # Each PID is cleared the moment it is reaped, so the hook never
+            # signals a finished run's PID (which the system may have reused).
+            RWS_FG=""; RWS_BG=""
+            # (The output file is an argument, not a redirection of the call:
+            # a trap that runs during the call would write into it.)
+            rws_fg() {     # <output file> <args>: under Wine, 120 s; its status
+                local o="$1"; shift
+                ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 120 "$RWS_WINE" "$@" > "$o" 2>&1 ) &
+                RWS_FG=$!
+                wait "$RWS_FG"
+                local rc=$?
+                RWS_FG=""
+                return $rc
+            }
+            rws_abort() {
+                [ -z "$RWS_FG" ] || { kill -0 $RWS_FG 2> /dev/null && kill -TERM $RWS_FG 2> /dev/null; }
+                : > "$RWS_D/kr-release" 2> /dev/null; : > "$RWS_D/kr-go" 2> /dev/null
+                local t=0
+                [ -n "$RWS_BG" ] || return 0
+                while [ $t -lt 20 ] && kill -0 $RWS_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
+                kill -0 $RWS_BG 2> /dev/null && kill -TERM $RWS_BG 2> /dev/null
+            }
+            ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 360 "$RWS_WINE" hold.exe > /dev/null 2>&1 ) &
             RWS_BG=$!
-            # Wait for the holder to have the lock (it creates the file).
-            RWS_T=0
-            while [ ! -e "$RWS_D/kr-run-0.lock" ] && [ $RWS_T -lt 100 ]; do sleep 0.1; RWS_T=$((RWS_T + 1)); done
-            sleep 0.5
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > "$RWS_D/r1.out" 2>&1 ); RWS_R=$?
-            wait "$RWS_BG"
-            [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
-            [ "$(cat "$RWS_D/h.st" 2>/dev/null)" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder could not take slot 0's lock]"
-            [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
-            [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
+            SUITE_ABORT_HOOK=rws_abort
+            if ! rws_wait kr-held; then
+                RWS_WHY="$RWS_WHY [the holder did not take slot 0's lock within 60 s: inconclusive]"
+            else
+                rws_fg "$RWS_D/r1.out" kr.exe slow.exe; RWS_R=$?
+                [ "$RWS_R" = "42" ] || RWS_WHY="$RWS_WHY [slot 0 held: exit $RWS_R, want 42; $(head -c 80 "$RWS_D/r1.out" | tr '\n' ' ')]"
+                [ ! -e "$RWS_D/kr-run-0.exe" ] || RWS_WHY="$RWS_WHY [kr-run-0.exe was written while slot 0's lock was held]"
+                [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [no kr-run-1.exe: slot 1 was not used]"
+            fi
+            : > "$RWS_D/kr-release"
+            wait "$RWS_BG"; RWS_H=$?; RWS_BG=""
+            [ "$RWS_H" = "0" ] || RWS_WHY="$RWS_WHY [the lock holder exited ${RWS_H:-?}, want 0 (9: it could not take slot 0's lock; 8: no kr-held; 7: never released)]"
             rm -f "$RWS_D"/kr-run-*
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1; echo $? > "$RWS_D/a.st" ) &
+            ( cd "$RWS_D" && WINEDEBUG=-all exec timeout -k 5 360 "$RWS_WINE" kr.exe first.exe > /dev/null 2>&1 ) &
             RWS_BG=$!
-            sleep 1
-            ( cd "$RWS_D" && WINEDEBUG=-all timeout -k 5 60 "$RWS_WINE" kr.exe slow.exe > /dev/null 2>&1 ); RWS_B=$?
-            wait "$RWS_BG"
-            RWS_A=$(cat "$RWS_D/a.st" 2>/dev/null)
-            [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits $RWS_A and $RWS_B, want 42 42]"
+            RWS_B=""
+            if ! rws_wait kr-up; then
+                RWS_WHY="$RWS_WHY [the first run's program did not start within 60 s: not two at once, inconclusive]"
+            else
+                rws_fg /dev/null kr.exe slow.exe; RWS_B=$?
+            fi
+            : > "$RWS_D/kr-go"
+            wait "$RWS_BG"; RWS_A=$?; RWS_BG=""
+            SUITE_ABORT_HOOK=""
+            [ "$RWS_A" = "42" ] && [ "$RWS_B" = "42" ] || RWS_WHY="$RWS_WHY [two at once: exits ${RWS_A:-?} and ${RWS_B:-?}, want 42 42 (first: 8 no kr-up, 7 never released)]"
             [ -e "$RWS_D/kr-run-0.exe" ] && [ -e "$RWS_D/kr-run-1.exe" ] || RWS_WHY="$RWS_WHY [two at once did not use two slots: $(cd "$RWS_D" && ls kr-run-* 2>/dev/null | tr '\n' ' ')]"
         fi
         if [ -z "$RWS_WHY" ]; then
@@ -35345,7 +35648,10 @@ rws_row runner_windows_slots_are_claimed ""
 # both programs built --legacy: while one holds .\kr-share.lock open for
 # writing, a second file_open(.\kr-share.lock, 1) must FAIL (exit 3); once the
 # holder has exited it must succeed (exit 0). Red before the fix (the second
-# open succeeded while the file was held).
+# open succeeded while the file was held). The holder holds by handshake, as
+# in runner_windows_slots_are_claimed above: it creates .\kr-held once it has
+# the file and holds until .\kr-release exists; no kr-held within 60 s is an
+# inconclusive FAIL and the probe is not run.
 TOTAL=$((TOTAL + 1))
 LSH_WINE="${KR_WINE-$(command -v wine 2>/dev/null || true)}"
 if [ -n "${KR_WINE+set}" ] && { [ -z "$KR_WINE" ] || [ ! -f "$KR_WINE" ] || [ ! -x "$KR_WINE" ]; }; then
@@ -35355,22 +35661,47 @@ elif [ -z "$LSH_WINE" ]; then
 else
     LSH_D=$(mktemp -d "${TMPDIR:-/tmp}/krc_lsh.XXXXXX")
     LSH_WHY=""
-    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 t0 = time_ns()\n    while time_ns() - t0 < 6000000000 { }\n    exit(0)\n}\n' > "$LSH_D/hold.kr"
+    printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(9) }\n    uint64 s = file_open(".\\\\kr-held", 1)\n    if s >= 0xFFFFFFFFFFFFF000 { exit(8) }\n    file_close(s)\n    uint64 t0 = time_ns()\n    uint64 tn = 0\n    while time_ns() - t0 < 300000000000 {\n        if time_ns() - tn >= 50000000 {\n            tn = time_ns()\n            uint64 r = file_open(".\\\\kr-release", 0)\n            if r < 0xFFFFFFFFFFFFF000 {\n                file_close(r)\n                exit(0)\n            }\n        }\n    }\n    exit(7)\n}\n' > "$LSH_D/hold.kr"
     printf 'fn main() {\n    uint64 h = file_open(".\\\\kr-share.lock", 1)\n    if h >= 0xFFFFFFFFFFFFF000 { exit(3) }\n    exit(0)\n}\n' > "$LSH_D/probe.kr"
     if ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/hold.kr" -o "$LSH_D/hold.exe" > /dev/null 2>&1 \
        || ! $KRC --arch=x86_64 --emit=windows --legacy "$LSH_D/probe.kr" -o "$LSH_D/probe.exe" > /dev/null 2>&1; then
         LSH_WHY=" [build failed]"
     else
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" hold.exe > /dev/null 2>&1; echo $? > "$LSH_D/h.st" ) &
+        # Interrupted while the holder waits: release it, 2 s, then TERM its
+        # timeout (as rws_abort above does); a running probe is TERMed.
+        LSH_FG=""; LSH_BG=""   # cleared when reaped, as in rws_row
+        lsh_fg() {     # probe.exe under Wine, 120 s; its status
+            ( cd "$LSH_D" && WINEDEBUG=-all exec timeout -k 5 120 "$LSH_WINE" probe.exe > /dev/null 2>&1 ) &
+            LSH_FG=$!
+            wait "$LSH_FG"
+            local rc=$?
+            LSH_FG=""
+            return $rc
+        }
+        lsh_abort() {
+            [ -z "$LSH_FG" ] || { kill -0 $LSH_FG 2> /dev/null && kill -TERM $LSH_FG 2> /dev/null; }
+            : > "$LSH_D/kr-release" 2> /dev/null
+            local t=0
+            [ -n "$LSH_BG" ] || return 0
+            while [ $t -lt 20 ] && kill -0 $LSH_BG 2> /dev/null; do sleep 0.1; t=$((t + 1)); done
+            kill -0 $LSH_BG 2> /dev/null && kill -TERM $LSH_BG 2> /dev/null
+        }
+        ( cd "$LSH_D" && WINEDEBUG=-all exec timeout -k 5 360 "$LSH_WINE" hold.exe > /dev/null 2>&1 ) &
         LSH_BG=$!
+        SUITE_ABORT_HOOK=lsh_abort
         LSH_T=0
-        while [ ! -e "$LSH_D/kr-share.lock" ] && [ $LSH_T -lt 100 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
-        sleep 0.5
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_HELD=$?
-        wait "$LSH_BG"
-        ( cd "$LSH_D" && WINEDEBUG=-all timeout -k 5 60 "$LSH_WINE" probe.exe > /dev/null 2>&1 ); LSH_FREE=$?
-        [ "$(cat "$LSH_D/h.st" 2>/dev/null)" = "0" ] || LSH_WHY="$LSH_WHY [the holder could not open the file: exit $(cat "$LSH_D/h.st" 2>/dev/null)]"
-        [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
+        while [ ! -e "$LSH_D/kr-held" ] && [ $LSH_T -lt 600 ]; do sleep 0.1; LSH_T=$((LSH_T + 1)); done
+        if [ ! -e "$LSH_D/kr-held" ]; then
+            LSH_WHY="$LSH_WHY [the holder did not open the file within 60 s: inconclusive]"
+        else
+            lsh_fg; LSH_HELD=$?
+            [ "$LSH_HELD" = "3" ] || LSH_WHY="$LSH_WHY [while held: exit $LSH_HELD, want 3 (a second writer must be refused)]"
+        fi
+        : > "$LSH_D/kr-release"
+        wait "$LSH_BG"; LSH_H=$?; LSH_BG=""
+        [ "$LSH_H" = "0" ] || LSH_WHY="$LSH_WHY [the holder exited ${LSH_H:-?}, want 0 (9: it could not open the file; 8: no kr-held; 7: never released)]"
+        lsh_fg; LSH_FREE=$?
+        SUITE_ABORT_HOOK=""
         [ "$LSH_FREE" = "0" ] || LSH_WHY="$LSH_WHY [after the holder exited: exit $LSH_FREE, want 0]"
     fi
     if [ -z "$LSH_WHY" ]; then
