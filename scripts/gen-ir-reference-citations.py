@@ -87,13 +87,17 @@ EXT = "mlr" if os.path.exists(os.path.join(ROOT, "src", "main.mlr")) else "kr"
 doc = os.path.join(ROOT, "docs/IR_REFERENCE.md")
 out = os.path.join(ROOT, "tests/ir_reference_citations.txt")
 
-# The repo-location variables: `git rev-parse --local-env-vars` (git 2.43)
-# minus its configuration entries (GIT_CONFIG, GIT_CONFIG_PARAMETERS,
-# GIT_CONFIG_COUNT), plus the two that steer repository discovery
-# (GIT_CEILING_DIRECTORIES, GIT_DISCOVERY_ACROSS_FILESYSTEM). Fixed here, not
-# asked of git at run time: that would need a git run that is itself clean of
-# them, and the answer differs between git versions. tests/run_tests.sh unsets
-# the same list.
+# The repo-location variables: `git rev-parse --local-env-vars` minus its
+# configuration entries (GIT_CONFIG, GIT_CONFIG_PARAMETERS, GIT_CONFIG_COUNT),
+# plus the two that steer repository discovery (GIT_CEILING_DIRECTORIES,
+# GIT_DISCOVERY_ACROSS_FILESYSTEM). A fixed list, so that what is stripped does
+# not depend on the git installed, and so that it is the same list
+# tests/run_tests.sh unsets (KR_GIT_LOCATION_VARS); git 2.43 and 2.53 print
+# the same --local-env-vars. The suite row
+# ir_reference_citations_skips_ignored_files fails if the two lists differ, or
+# if the git it runs names a location variable missing from them. The
+# *_PATHSPECS variables are not stripped: the one ls-files below takes no
+# pathspec.
 GIT_LOCATION_VARS = (
     "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_DIR",
     "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE",

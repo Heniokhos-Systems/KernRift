@@ -22,8 +22,10 @@ clone. git runs without the repo-location variables (`git rev-parse
 GIT_DISCOVERY_ACROSS_FILESYSTEM), so a hook's GIT_DIR cannot point it at
 another repo, while configuration given through the environment
 (GIT_CONFIG_COUNT/KEY_n/VALUE_n and the like) still applies, as it does to git.
-tests/run_tests.sh unsets the same list once at the top, so no row depends on
-the caller's repo. A root with a .git that git cannot list (dubious ownership, a
+tests/run_tests.sh unsets the same list once at the top, with the four
+*_PATHSPECS variables, so no row depends on the caller's repo or on how the
+caller wants pathspecs read; a row fails if the two lists drift apart or miss a
+location variable the installed git names. A root with a .git that git cannot list (dubious ownership, a
 corrupt index, a dangling gitdir, no git) stops the checker with git's message
 and exit status 2 instead of quietly walking the disk again. A root without its own
 .git, alone or inside some other repo, is walked as before. The

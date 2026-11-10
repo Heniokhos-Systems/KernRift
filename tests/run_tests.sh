@@ -9,12 +9,20 @@
 # GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM -- the list
 # scripts/gen-ir-reference-citations.py uses (GIT_LOCATION_VARS). Config from
 # the environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n, ...) is kept. No row relies
-# on an inherited GIT_* variable.
+# on an inherited GIT_* variable. (ir_reference_citations_skips_ignored_files
+# fails if this list and the script's differ, or if git names a location
+# variable missing from both.)
+#
+# The four *_PATHSPECS variables go too: they change what every pathspec in a
+# row means (GIT_LITERAL_PATHSPECS=1 turns 'tests/fixtures/*.kr' into a file
+# name that matches nothing), and the rows' pathspecs are written for git's
+# default reading. They are a caller's preference, not where its repo is.
 KR_GIT_LOCATION_VARS="GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT_DIR
     GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE
     GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE
     GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM"
-unset $KR_GIT_LOCATION_VARS
+KR_GIT_PATHSPEC_VARS="GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS"
+unset $KR_GIT_LOCATION_VARS $KR_GIT_PATHSPEC_VARS
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
@@ -13983,7 +13991,7 @@ cp "$DIR/../scripts/gen-ir-reference-citations.py" "$CSH_D/scripts/"
 CSH_WHY=""
 # git without the repo-location variables, as the checker runs it (the suite
 # unset them at the top; this keeps the rows right if one is run on its own).
-cite_git() { ( unset $KR_GIT_LOCATION_VARS; exec git "$@" ); }
+cite_git() { ( unset $KR_GIT_LOCATION_VARS $KR_GIT_PATHSPEC_VARS; exec git "$@" ); }
 # Copy only what the checker counts as the tree. The copy is not a git repo, so
 # the checker counts every file in it; a blind `cp -R docs` carried the
 # checkout's IGNORED docs/superpowers/ notes (stale citations by design) into
@@ -13991,11 +13999,20 @@ cite_git() { ( unset $KR_GIT_LOCATION_VARS; exec git "$@" ); }
 # Like the checker: a tree with its own .git is listed by git (or the row
 # fails), one without is copied whole. -z, so no path is quoted out of reach;
 # the only listed file allowed to be missing is a tracked one deleted on disk.
+# The whole listing is filtered here, with no pathspec, so no caller setting
+# (GIT_LITERAL_PATHSPECS and friends) can change what it selects.
 csh_root=$(cd "$DIR/.." && pwd -P)
 if [ -e "$csh_root/.git" ]; then
-    cite_git -C "$csh_root" ls-files -z --cached --others --exclude-standard -- src docs ':(glob)*.md' > "$CSH_D/files.lst" \
+    cite_git -C "$csh_root" ls-files -z --cached --others --exclude-standard > "$CSH_D/files.lst" \
         || CSH_WHY="$CSH_WHY [git ls-files failed in $csh_root]"
+    csh_topmd=0
     while IFS= read -r -d '' csh_f; do
+        case "$csh_f" in
+            src/*|docs/*) ;;
+            */*) continue ;;
+            *.md) csh_topmd=$((csh_topmd + 1)) ;;
+            *) continue ;;
+        esac
         if [ ! -f "$csh_root/$csh_f" ]; then
             [ -n "$(cite_git -C "$csh_root" ls-files --deleted -- ":(literal)$csh_f")" ] \
                 || CSH_WHY="$CSH_WHY [git lists $csh_f, but it is not a file]"
@@ -14005,6 +14022,7 @@ if [ -e "$csh_root/.git" ]; then
             || CSH_WHY="$CSH_WHY [could not copy $csh_f]"
     done < "$CSH_D/files.lst"
     rm -f "$CSH_D/files.lst"
+    [ "$csh_topmd" -gt 0 ] || CSH_WHY="$CSH_WHY [git listed no top-level .md file to copy]"
 else
     cp -R "$DIR/../src" "$CSH_D/src"
     cp -R "$DIR/../docs" "$CSH_D/docs"
@@ -14111,10 +14129,10 @@ cig_run() {     # the checker in $CIG_R: no user config, a hook's GIT_* (below),
     ( for v in $(compgen -e | grep '^GIT_CONFIG'); do unset "$v"; done
       export HOME="$CIG_P/home" XDG_CONFIG_HOME="$CIG_P/home" GIT_CONFIG_GLOBAL=/dev/null \
              GIT_CONFIG_NOSYSTEM=1 GIT_OBJECT_DIRECTORY="$CIG_P/no-such-objects"
-      [ -z "$CIG_ENV" ] || export $CIG_ENV
+      [ "${#CIG_ENV[@]}" -eq 0 ] || export "${CIG_ENV[@]}"
       exec python3 "$CIG_R/scripts/gen-ir-reference-citations.py" "$@" )
 }
-CIG_ENV=""
+CIG_ENV=()
 cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on $CIG_R as it is now
     local tag="$1" want="$2" pat; shift 2
     cig_run --check > "$CIG_P/$tag.out" 2>&1
@@ -14127,6 +14145,18 @@ cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on $CIG_R as
         esac
     done
 }
+# The list of variables the checker strips must be this file's list, and must
+# hold every location variable the git here knows (a newer git may add one).
+cig_pylist=$(python3 -c 'import ast, sys
+for n in ast.parse(open(sys.argv[1]).read()).body:
+    if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "GIT_LOCATION_VARS":
+        print(" ".join(sorted(ast.literal_eval(n.value))))' "$CIG_D/scripts/gen-ir-reference-citations.py")
+cig_shlist=$(printf '%s\n' $KR_GIT_LOCATION_VARS | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
+[ -n "$cig_pylist" ] && [ "$(printf '%s\n' $cig_pylist | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" = "$cig_shlist" ] \
+    || CIG_WHY="$CIG_WHY [the script's GIT_LOCATION_VARS ($cig_pylist) is not run_tests.sh's KR_GIT_LOCATION_VARS ($cig_shlist)]"
+for v in $(cig_git rev-parse --local-env-vars 2> /dev/null | grep -v '^GIT_CONFIG'); do
+    case " $cig_shlist " in *" $v "*) ;; *) CIG_WHY="$CIG_WHY [git names $v a location variable; add it to both lists]" ;; esac
+done
 cig_snap() { ( cd "$CIG_P/decoy" && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
 if ! { cig_git -C "$CIG_D" init -q --template= && cig_git -C "$CIG_P/decoy" init -q --template=; } > /dev/null 2>&1; then
     CIG_WHY=" [git init failed: this row needs git]"
@@ -14156,9 +14186,9 @@ else
     cig_git -C "$CIG_D" rm -q --cached docs/tracked.md && rm -f "$CIG_D/docs/tracked.md"
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/excl.md"
     printf '/docs/excl.md\n' > "$CIG_P/excl"
-    CIG_ENV="GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile GIT_CONFIG_VALUE_0=$CIG_P/excl"
+    CIG_ENV=(GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.excludesFile "GIT_CONFIG_VALUE_0=$CIG_P/excl")
     cig_check envconfig 0 "-docs/excl.md"
-    CIG_ENV=""
+    CIG_ENV=()
     rm -f "$CIG_D/docs/excl.md"
     cp "$CIG_D/.git/index" "$CIG_P/index.orig"
     printf 'not an index\n' > "$CIG_D/.git/index"
