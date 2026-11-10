@@ -34,9 +34,9 @@
 # (build: <file>: rc=N; <first error: line>) and the others still run.
 # Prints "<row>: PASS|FAIL (detail)" per row and exits 0 when every row
 # passed, 1 otherwise, 2 on a transport error (ssh 255, or an ssh that timed
-# out or was killed; a PowerShell failure on the laptop is a FAIL of its row). The laptop's
-# scratch directory is removed at the end, on a transport error and on
-# INT/TERM/HUP.
+# out or was killed; a PowerShell failure on the laptop is a FAIL of its row).
+# The laptop's scratch directory is removed at the end, on a transport error
+# and on INT/TERM/HUP.
 # Time bounds, each by `timeout -k 10` (TERM at the bound, KILL 10 s later):
 # 7 compiles x (60+10) s = 490 s; the remote mkdir 300+10 s; 3 scp x (300+10)
 # s = 930 s; 3 row runs x (600+10) s = 1830 s; the cleanup 300+10 s: 3870 s at
