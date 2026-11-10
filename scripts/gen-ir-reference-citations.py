@@ -41,17 +41,57 @@ It also refuses shapes that cannot be right whatever the code says: a range
 whose end is before its start, a line number past the end of the file, a
 blank line, and a citation of a file that does not exist.
 
+ONLY FILES THAT ARE PART OF THE TREE COUNT, on both sides of a citation. When
+ROOT is the top of a git work tree, the tree is what
+`git ls-files --cached --others --exclude-standard` lists: the tracked files
+plus the untracked ones .gitignore does not exclude (a new doc a contributor
+has not `git add`ed yet is checked, and so is a file a suite row plants in a
+scratch repo), and NEVER an ignored one. docs/superpowers/ is ignored and holds
+local planning notes that cite long-gone line numbers; walking it made the
+check fail on a working checkout while passing on every fresh clone. An
+ignored file is also not a valid citation TARGET: it does not exist in a clone.
+When ROOT is not the top of a git work tree (an exported copy without .git, a
+scratch copy inside some other repo) or git is not installed, every file on
+disk counts, as before.
+
 After editing src/, the docs, or the citations, CHECK EACH CITATION AGAINST THE
 CODE, then:
     python3 scripts/gen-ir-reference-citations.py
 tests/run_tests.sh runs it with --check.
 """
-import hashlib, re, sys, os
+import hashlib, re, sys, os, subprocess
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT = "mlr" if os.path.exists(os.path.join(ROOT, "src", "main.mlr")) else "kr"
 doc = os.path.join(ROOT, "docs/IR_REFERENCE.md")
 out = os.path.join(ROOT, "tests/ir_reference_citations.txt")
+
+def tree_files():
+    """The repo-relative paths that are part of the tree (see the docstring),
+    or None when ROOT is not the top of a git work tree: then everything on
+    disk counts."""
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")}
+    def git(*args):
+        r = subprocess.run(["git", "-C", ROOT] + list(args), env=env,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return r.stdout.decode("utf-8", "surrogateescape") if r.returncode == 0 else None
+    try:
+        top = git("rev-parse", "--show-toplevel")
+        if top is None or os.path.realpath(top.strip()) != os.path.realpath(ROOT):
+            return None
+        out = git("ls-files", "-z", "--cached", "--others", "--exclude-standard")
+    except OSError:     # no git
+        return None
+    return None if out is None else set(p for p in out.split("\0") if p)
+
+TREE = tree_files()
+
+def in_tree(rel):
+    """rel exists and is part of the tree."""
+    if not os.path.isfile(os.path.join(ROOT, rel)):
+        return False
+    return TREE is None or os.path.normpath(rel).replace(os.sep, "/") in TREE
 
 MAIN = re.compile(r'src/([a-z_0-9]+\.' + EXT + r'):(\d+)')
 MD = re.compile(r'(?<![\w/.-])((?:docs/)?[A-Za-z][A-Za-z0-9_-]*\.md):(\d+)')
@@ -91,7 +131,7 @@ cache = {}
 def lines_of(rel):
     if rel not in cache:
         p = os.path.join(ROOT, rel)
-        cache[rel] = open(p, encoding="utf-8", errors="replace").read().split("\n") if os.path.isfile(p) else None
+        cache[rel] = open(p, encoding="utf-8", errors="replace").read().split("\n") if in_tree(rel) else None
     return cache[rel]
 
 spans = {}
@@ -114,24 +154,26 @@ def md_target(name):
     if name.startswith("docs/"):
         return name
     for cand in ("docs/" + name, name):
-        if os.path.isfile(os.path.join(ROOT, cand)):
+        if in_tree(cand):
             return cand
     return "docs/" + name
 
 def prose_files():
-    """Every file whose prose may cite a .md line, repo-relative, sorted."""
+    """Every file of the tree whose prose may cite a .md line, repo-relative,
+    sorted. Only files that are part of the tree (see the docstring)."""
     res = []
     for name in sorted(os.listdir(ROOT)):
-        if name.endswith(".md") and os.path.isfile(os.path.join(ROOT, name)):
+        if name.endswith(".md") and in_tree(name):
             res.append(name)
     for sub in ("docs", "src"):
         top = os.path.join(ROOT, sub)
         for dp, dns, fns in os.walk(top):
             dns.sort()
             for fn in sorted(fns):
-                if fn.endswith(".md") or (sub == "src" and fn.endswith("." + EXT)):
-                    res.append(os.path.relpath(os.path.join(dp, fn), ROOT))
-    if os.path.isfile(os.path.join(ROOT, "tests/run_tests.sh")):
+                rel = os.path.relpath(os.path.join(dp, fn), ROOT)
+                if (fn.endswith(".md") or (sub == "src" and fn.endswith("." + EXT))) and in_tree(rel):
+                    res.append(rel)
+    if in_tree("tests/run_tests.sh"):
         res.append("tests/run_tests.sh")
     return res
 

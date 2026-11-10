@@ -6,6 +6,20 @@ All notable changes to `kernriftc` are documented in this file.
 
 **CI: the macOS jobs run on `macos-26` and `macos-26-intel`.** GitHub retired the `macos-14` arm64 image. `ci.yml`'s `test-macos` and `cross-platform.yml`'s `test-macos-arm` move to `macos-26`; `cross-platform.yml`'s `test-macos-x64` moves to the native Intel `macos-26-intel`, so the x86_64 test binaries and self-compile no longer run under Rosetta there (the fat-binary job's x86_64 slice still does, on `macos-26`). README's macOS rows say so.
 
+**Fixed: the citation checker reads only files that are part of the tree.**
+`scripts/gen-ir-reference-citations.py` walked docs/ and src/ on disk, so on a
+working checkout it read the gitignored docs/superpowers/ planning notes, whose
+citations are stale by design, and `make gate` failed `ir_reference_citations`
+and `ir_reference_citations_refuses_bad_shapes` there while passing on every
+fresh clone. When the root is the top of a git work tree it now takes the files
+from `git ls-files --cached --others --exclude-standard`: tracked files, and
+untracked ones .gitignore does not exclude (a new doc not yet added is still
+checked), never an ignored one, on either side of a citation. Without git, or
+outside a work tree, every file on disk counts as before. The
+refuses-bad-shapes row copies only those files into its scratch tree, and a
+new row checks a scratch repo: a bad citation in an ignored file is not
+reported, in a tracked or untracked-not-ignored file it is.
+
 **Fixed: a comment in one source file that cites a line of another is checked
 too.** `scripts/gen-ir-reference-citations.py` fingerprinted the citations in
 docs/IR_REFERENCE.md and the `<NAME>.md:<line>` ones in the prose, but not the
