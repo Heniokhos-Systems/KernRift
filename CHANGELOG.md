@@ -17,24 +17,26 @@ and the untracked ones git's standard ignore rules (the .gitignore files,
 .git/info/exclude, the user's core.excludesFile) do not exclude, so a new doc
 not yet added is still checked. An ignored file is neither scanned nor a valid
 citation target: a citation of one says it does not exist, as it would in a
-clone. git runs without the repo-location variables (`git rev-parse
---local-env-vars` minus its config entries, plus GIT_CEILING_DIRECTORIES and
-GIT_DISCOVERY_ACROSS_FILESYSTEM), so a hook's GIT_DIR cannot point it at
-another repo, while configuration given through the environment
-(GIT_CONFIG_COUNT/KEY_n/VALUE_n and the like) still applies, as it does to git.
-tests/run_tests.sh unsets the same list once at the top, with the four
-*_PATHSPECS variables, so no row depends on the caller's repo or on how the
-caller wants pathspecs read; a row fails if the two lists drift apart or miss a
-location variable the installed git names. A root with a .git that git cannot list (dubious ownership, a
-corrupt index, a dangling gitdir, no git) stops the checker with git's message
-and exit status 2 instead of quietly walking the disk again. A root without its own
-.git, alone or inside some other repo, is walked as before. The
-refuses-bad-shapes row copies only those files (NUL-separated) into its scratch
-tree, and a new row, `ir_reference_citations_skips_ignored_files`, checks all of
-it in scratch repos: ignored, tracked and untracked-not-ignored files, an
-ignored target, an excludesFile from the environment, a corrupt index and a
-dangling gitdir, the no-.git and nested fallbacks, and a decoy GIT_DIR left
-untouched and restored.
+clone. git runs without the repo-location variables (a fixed list, the
+`git rev-parse --local-env-vars` of git 2.43/2.53 minus its config entries plus
+GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM, together with
+whatever the installed git's --local-env-vars adds), so a hook's GIT_DIR
+cannot point it at another repo, while configuration given through the
+environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n and the like) still applies, as it
+does to git. tests/run_tests.sh unsets the same variables once at the top, with
+the four *_PATHSPECS variables, so no row depends on the caller's repo or on
+how the caller wants pathspecs read. A root with a .git that git cannot list
+(dubious ownership, a corrupt index, a dangling gitdir, no git) stops the
+checker with git's message and exit status 2 instead of quietly walking the
+disk again. A root without its own .git, alone or inside some other repo, is
+walked as before. The refuses-bad-shapes row copies only those files
+(NUL-separated) into its scratch tree, and a new row,
+`ir_reference_citations_skips_ignored_files`, checks all of it in scratch
+repos: ignored, tracked and untracked-not-ignored files, an ignored target, an
+excludesFile from the environment, a corrupt index and a dangling gitdir, the
+no-.git and nested fallbacks, every location variable git names being
+stripped, the two fixed lists agreeing, and a decoy GIT_DIR left untouched and
+restored.
 
 **Fixed: a comment in one source file that cites a line of another is checked
 too.** `scripts/gen-ir-reference-citations.py` fingerprinted the citations in

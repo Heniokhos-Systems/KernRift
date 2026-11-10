@@ -4,25 +4,30 @@
 # The suite must not depend on which repo its CALLER's git points at: a hook
 # (pre-commit, pre-push) runs with GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE
 # set, and every `git -C "$DIR/.."` below would then list or stage THAT repo.
-# Unset the repo-location variables once, here, for every row: this is
-# `git rev-parse --local-env-vars` minus its GIT_CONFIG* entries, plus
-# GIT_CEILING_DIRECTORIES and GIT_DISCOVERY_ACROSS_FILESYSTEM -- the list
-# scripts/gen-ir-reference-citations.py uses (GIT_LOCATION_VARS). Config from
-# the environment (GIT_CONFIG_COUNT/KEY_n/VALUE_n, ...) is kept. No row relies
-# on an inherited GIT_* variable. (ir_reference_citations_skips_ignored_files
-# fails if this list and the script's differ, or if git names a location
-# variable missing from both.)
+# Unset the repo-location variables once, here, for every row: the fixed list
+# KR_GIT_LOCATION_FIXED (`git rev-parse --local-env-vars` of git 2.43/2.53
+# minus its GIT_CONFIG* entries, plus GIT_CEILING_DIRECTORIES and
+# GIT_DISCOVERY_ACROSS_FILESYSTEM; it must equal the script's
+# GIT_LOCATION_VARS), plus whatever the installed git's --local-env-vars names
+# minus GIT_CONFIG* -- asked from / with the fixed list already gone, as
+# scripts/gen-ir-reference-citations.py does -- so a newer git's new location
+# variable is unset too, with no tree change. Config from the environment
+# (GIT_CONFIG_COUNT/KEY_n/VALUE_n, ...) is kept. No row relies on an inherited
+# GIT_* variable. ir_reference_citations_skips_ignored_files checks the two
+# fixed lists agree and that every variable git names is stripped.
 #
 # The four *_PATHSPECS variables go too: they change what every pathspec in a
 # row means (GIT_LITERAL_PATHSPECS=1 turns 'tests/fixtures/*.kr' into a file
 # name that matches nothing), and the rows' pathspecs are written for git's
 # default reading. They are a caller's preference, not where its repo is.
-KR_GIT_LOCATION_VARS="GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT_DIR
+KR_GIT_LOCATION_FIXED="GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_OBJECT_DIRECTORY GIT_DIR
     GIT_WORK_TREE GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE
     GIT_NO_REPLACE_OBJECTS GIT_REPLACE_REF_BASE GIT_PREFIX GIT_SHALLOW_FILE
     GIT_COMMON_DIR GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM"
 KR_GIT_PATHSPEC_VARS="GIT_LITERAL_PATHSPECS GIT_GLOB_PATHSPECS GIT_NOGLOB_PATHSPECS GIT_ICASE_PATHSPECS"
-unset $KR_GIT_LOCATION_VARS $KR_GIT_PATHSPEC_VARS
+unset $KR_GIT_LOCATION_FIXED $KR_GIT_PATHSPEC_VARS
+KR_GIT_LOCATION_VARS="$KR_GIT_LOCATION_FIXED $( (cd / && git rev-parse --local-env-vars) 2> /dev/null | grep '^GIT_[A-Za-z0-9_]*$' | grep -v '^GIT_CONFIG')"
+unset $KR_GIT_LOCATION_VARS
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 KRC="${KRC:-$DIR/../build/krc3}"
@@ -14145,17 +14150,28 @@ cig_check() {   # <tag> <want rc> [+pattern | -pattern]...: --check on $CIG_R as
         esac
     done
 }
-# The list of variables the checker strips must be this file's list, and must
-# hold every location variable the git here knows (a newer git may add one).
+# The checker's fixed list must be this file's fixed list (a tree invariant).
+# And every location variable the git here names must be stripped, by the
+# suite's unset and by the checker: each is set to a path that does not exist
+# and the checker must still list the tree (that runs below, in the repo). A
+# newer git's new variable is not a failure; a git that cannot answer
+# --local-env-vars is (every git the rows need, >= 1.8.5, can).
 cig_pylist=$(python3 -c 'import ast, sys
 for n in ast.parse(open(sys.argv[1]).read()).body:
     if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "GIT_LOCATION_VARS":
         print(" ".join(sorted(ast.literal_eval(n.value))))' "$CIG_D/scripts/gen-ir-reference-citations.py")
-cig_shlist=$(printf '%s\n' $KR_GIT_LOCATION_VARS | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
+cig_shlist=$(printf '%s\n' $KR_GIT_LOCATION_FIXED | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')
 [ -n "$cig_pylist" ] && [ "$(printf '%s\n' $cig_pylist | LC_ALL=C sort | tr '\n' ' ' | sed 's/ *$//')" = "$cig_shlist" ] \
-    || CIG_WHY="$CIG_WHY [the script's GIT_LOCATION_VARS ($cig_pylist) is not run_tests.sh's KR_GIT_LOCATION_VARS ($cig_shlist)]"
-for v in $(cig_git rev-parse --local-env-vars 2> /dev/null | grep -v '^GIT_CONFIG'); do
-    case " $cig_shlist " in *" $v "*) ;; *) CIG_WHY="$CIG_WHY [git names $v a location variable; add it to both lists]" ;; esac
+    || CIG_WHY="$CIG_WHY [the script's GIT_LOCATION_VARS ($cig_pylist) is not run_tests.sh's KR_GIT_LOCATION_FIXED ($cig_shlist)]"
+cig_named=$( (cd / && cig_git rev-parse --local-env-vars) 2> "$CIG_P/lev.err")
+printf '%s\n' "$cig_named" | grep -qx 'GIT_DIR' \
+    || CIG_WHY="$CIG_WHY [git rev-parse --local-env-vars did not name GIT_DIR: $(head -1 "$CIG_P/lev.err")]"
+cig_named=$(printf '%s\n' "$cig_named" | grep '^GIT_[A-Za-z0-9_]*$' | grep -v '^GIT_CONFIG')
+for v in $cig_named; do
+    case " $(echo $KR_GIT_LOCATION_VARS) " in
+        *" $v "*) ;;
+        *) CIG_WHY="$CIG_WHY [git names $v a location variable, and the suite's unset at the top did not take it]" ;;
+    esac
 done
 cig_snap() { ( cd "$CIG_P/decoy" && find . -type f -exec cksum {} + | LC_ALL=C sort ); }
 if ! { cig_git -C "$CIG_D" init -q --template= && cig_git -C "$CIG_P/decoy" init -q --template=; } > /dev/null 2>&1; then
@@ -14171,6 +14187,11 @@ else
     cig_run > /dev/null 2>&1 || CIG_WHY="$CIG_WHY [could not write the scratch manifest]"
     cig_git -C "$CIG_D" add -A
     cig_check control 0
+    for v in $cig_named; do     # each one set to nowhere: the checker must strip it
+        CIG_ENV=("$v=$CIG_P/no-such-$v")
+        cig_check "strip_$v" 0
+    done
+    CIG_ENV=()
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/ignored/note.md"
     cig_check ignored 0 "-docs/ignored/note.md"
     printf '%s\n' "$cig_bad" > "$CIG_D/docs/tracked.md"
@@ -14215,7 +14236,7 @@ else
     [ "$(cig_snap)" = "$cig_decoy" ] || CIG_WHY="$CIG_WHY [the decoy repo named by GIT_DIR was modified]"
 fi
 if [ -z "$CIG_WHY" ]; then
-    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; a core.excludesFile from the environment is honoured; a corrupt index or a dangling gitdir stops the checker; without its own .git, alone or inside an outer repo, every file counts; a hook's GIT_DIR changes nothing and touches nothing)"
+    PASS=$((PASS + 1)); echo "  ir_reference_citations_skips_ignored_files: PASS (a bad citation in a .gitignored file is not reported; in a tracked or an untracked-not-ignored file it is; an ignored .md is not a citation target; a core.excludesFile from the environment is honoured; a corrupt index or a dangling gitdir stops the checker; without its own .git, alone or inside an outer repo, every file counts; every location variable git names is stripped; a hook's GIT_DIR changes nothing and touches nothing)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: ir_reference_citations_skips_ignored_files$CIG_WHY"
 fi
