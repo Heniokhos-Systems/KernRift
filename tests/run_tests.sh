@@ -7113,6 +7113,31 @@ rm -f /tmp/krc_or_$$.kr /tmp/krc_or_$$
 # riscv32 runs the vloads (but not vload64), vptr_load, dev_load, the asm
 # trap, dealloc and alloc; atomics, exec, set_executable and --debug bounds
 # checks are compile errors there. Core dumps are off for these runs.
+#
+# The plain reads (#199): a memory read written in the program is performed
+# even when its value is never used. Each case reads address 0 (the static
+# `zero`) or a small address next to it and wants 139; before 2.11.1 the IR
+# optimizer's DCE deleted every one of them (exit 50) on x86_64, arm64 and
+# riscv32 alike, while --legacy kept them.
+#   load8/16/32/64 30          loadN(z) as a statement (no load64 on riscv32)
+#   load_var 30                u32 lv = load32(z), lv never used
+#   load_expr 30               load32(z) + 1 as a statement
+#   load_mulzero 30            u64 lm = load32(z) * 0, lm used: const-fold
+#                              makes the product 0, so the load is unused
+#   load_overwritten 30        u32 lo = load32(z); lo = 5
+#   ptr_load 30                unsafe { *(z as u32) -> pv }, pv unused
+#   field_load 30              u64 fs = rr.s through a struct variable that
+#                              holds address 0 (reads 8; 4 on riscv32,
+#                              where the u64 -> u32 rewrite narrows RR)
+#   index_load 30              rd_idx(zero, 4): u32 ix = regs[1] on a [u32]
+#                              slice parameter -- a ONE-BYTE read at offset
+#                              1 today (#202), which faults all the same
+#   load_bis 30/147            rd_bis(zero, one): load32(b + i * 4); arm64
+#                              fuses it into IR_LOAD_BIS
+#   load_read_to_clear 30      irq_ack(zero): u32 isr = load32(base + 16),
+#                              the read-to-clear status-register idiom
+#   str_len 73, str_eq 75      str_len(z) / str_eq(z, z) as statements
+#   struct_eq 88               u64 se = sa == sb on two RR pointers (MEMCMP)
 OR2_HDR='static u64 g = 7
 static u64 one = 1
 static u64 zero = 0
@@ -7121,8 +7146,41 @@ static u64[2] arr
 static u64[2] av
 device Z at 0x0 {
     F16 at 0x00 : u16
+}
+struct RR {
+    u64 c
+    u64 s
+}
+fn rd_idx([u32] regs) {
+    u32 ix = regs[1]
+}
+fn rd_bis(u64 b, u64 i) {
+    u32 bx = load32(b + i * 4)
+}
+fn irq_ack(u64 base) {
+    u32 isr = load32(base + 16)
 }'
-OR2_CASES="vload8 vload16 vload32 vload64 vptr_load dev_load atomic_load asm_trap dealloc alloc time_ns exec exec_argv set_exec arr_check"
+# ul_stmt CASE -> main()'s statements for an unused-read case (#199), on
+# stdout. Shared by side_effect_kept_* and unused_load_kept_legacy_*.
+ul_stmt() {
+    case $1 in
+        load8|load16|load32|load64) printf '    u64 z = zero\n    %s(z)\n' "$1" ;;
+        load_var)           printf '    u64 z = zero\n    u32 lv = load32(z)\n' ;;
+        load_expr)          printf '    u64 z = zero\n    load32(z) + 1\n' ;;
+        load_mulzero)       printf '    u64 z = zero\n    u64 lm = load32(z) * 0\n    if lm != 0 { exit(1) }\n' ;;
+        load_overwritten)   printf '    u64 z = zero\n    u32 lo = load32(z)\n    lo = 5\n    if lo != 5 { exit(1) }\n' ;;
+        ptr_load)           printf '    u64 z = zero\n    u32 pv = 0\n    unsafe { *(z as u32) -> pv }\n' ;;
+        field_load)         printf '    RR rr = alloc(16)\n    rr = zero\n    u64 fs = rr.s\n' ;;
+        index_load)         printf '    rd_idx(zero, 4)\n' ;;
+        load_bis)           printf '    rd_bis(zero, one)\n' ;;
+        load_read_to_clear) printf '    irq_ack(zero)\n' ;;
+        str_len)            printf '    u64 z = zero\n    str_len(z)\n' ;;
+        str_eq)             printf '    u64 z = zero\n    str_eq(z, z)\n' ;;
+        struct_eq)          printf '    RR sa = alloc(16)\n    sa = zero\n    RR sb = alloc(16)\n    sb = zero\n    u64 se = sa == sb\n' ;;
+    esac
+}
+UL_CASES="load8 load16 load32 load64 load_var load_expr load_mulzero load_overwritten ptr_load field_load index_load load_bis load_read_to_clear str_len str_eq struct_eq"
+OR2_CASES="vload8 vload16 vload32 vload64 vptr_load dev_load atomic_load asm_trap dealloc alloc time_ns exec exec_argv set_exec arr_check $UL_CASES"
 for OR2_K in $OR2_CASES; do
     OR2_FLAGS=""
     OR2_WANT=139
@@ -7161,6 +7219,8 @@ for OR2_K in $OR2_CASES; do
         set_exec)    OR2_STMT='    set_executable("OR2_FILE")'; OR2_WANT=x ;;
         arr_check)   OR2_STMT='    u64 i = five
     arr[i] = 1'; OR2_WANT=1; OR2_FLAGS="--debug" ;;
+        load64)      OR2_STMT=$(ul_stmt $OR2_K) ;;
+        *)           OR2_STMT=$(ul_stmt $OR2_K); OR2_ARCHES="x86_64 arm64 riscv32" ;;
     esac
     for OR2_SH in S L B; do
         for OR2_ARCH in $OR2_ARCHES; do
@@ -7204,6 +7264,8 @@ for OR2_K in $OR2_CASES; do
             fi
             if [ "$OR2_GOT" = "$OR2_WANT_A" ]; then
                 PASS=$((PASS + 1))
+                # the plain-read rows (#199) name themselves, for require_rows.sh
+                case " $UL_CASES " in *" $OR2_K "*) echo "  $OR2_ROW: PASS (exit $OR2_GOT: the read was performed)" ;; esac
             else
                 echo "FAIL: $OR2_ROW (got $OR2_GOT, want $OR2_WANT_A; 50 = the op was deleted)"
                 FAIL=$((FAIL + 1))
@@ -7212,6 +7274,458 @@ for OR2_K in $OR2_CASES; do
     done
 done
 rm -f /tmp/krc_or2_$$.kr /tmp/krc_or2_$$ /tmp/krc_or2_$$.x
+
+# unused_load_kept_legacy_<case> <arch> (#199): the S programs of the plain-read
+# cases above, compiled with --legacy, want 139 too. GREEN GUARDS: the legacy
+# backends have no DCE and kept these reads before 2.11.1 as well; the rows
+# pin that they still do.
+for UL_K in load32 load_var ptr_load field_load index_load load_read_to_clear str_len struct_eq; do
+    for UL_A in x86_64 arm64; do
+        TOTAL=$((TOTAL + 1))
+        UL_ROW="unused_load_kept_legacy_$UL_K $UL_A"
+        or_runner $UL_A "$UL_ROW" || continue
+        { printf '%s\n' "$OR2_HDR"; or_main S "" "$(ul_stmt $UL_K)"; } > /tmp/krc_ull_$$.kr
+        rm -f /tmp/krc_ull_$$
+        UL_GOT="no binary"
+        if $KRC --arch=$UL_A --legacy /tmp/krc_ull_$$.kr -o /tmp/krc_ull_$$ > /dev/null 2>&1 && [ -f /tmp/krc_ull_$$ ]; then
+            chmod +x /tmp/krc_ull_$$
+            UL_GOT=$( ( ulimit -c 0; timeout "$RUN_TEST_TIMEOUT" $OR_R /tmp/krc_ull_$$ < /dev/zero > /dev/null 2>&1; echo $? ) 2>/dev/null )
+        fi
+        if [ "$UL_GOT" = 139 ]; then
+            PASS=$((PASS + 1))
+            echo "  $UL_ROW: PASS (exit 139: the read was performed)"
+        else
+            echo "FAIL: $UL_ROW (got $UL_GOT, want 139; 50 = the read was deleted)"
+            FAIL=$((FAIL + 1))
+        fi
+    done
+done
+rm -f /tmp/krc_ull_$$.kr /tmp/krc_ull_$$
+
+# Listing rows for the 32-bit targets that do not run here (#199). Each case
+# is compiled twice: as written, and as its control twin with the read
+# removed. Neither program contains any other memory read, so the row wants
+# exactly 1 real load in the case and 0 in the twin (absolute counts, not a
+# difference: a load counted in the twin means the counter is reading
+# something that is not a load). Before 2.11.1 both counts were 0.
+#   unused_load_kept_riscv32_freestanding_<case>: --arch=riscv32
+#       --freestanding --emit=asm; the listing has a mnemonic on every line
+#       and no literal pool; counted: (c.)?(lw|lbu|lhu|lb|lh) not on (sp).
+#   unused_load_kept_xtensa_<case>: --arch=xtensa --freestanding; the ELF
+#       header is stripped as xtensa_call_disasm strips it and the code blob
+#       is counted by tests/helpers/xtcount.py (segmented disassembly around
+#       the l32r literal pools and after every ret/ret.n; its own guard is
+#       xtensa_load_counter_selftest below).
+# ul_xt_blob ELF OUT: the code blob of a freestanding xtensa ELF (header
+# stripped), or return 1.
+ul_xt_blob() {
+    local eh po ps pn
+    eh=$(readelf -h "$1" 2>/dev/null) || return 1
+    po=$(echo "$eh" | sed -nE 's/.*Start of program headers: *([0-9]+).*/\1/p')
+    ps=$(echo "$eh" | sed -nE 's/.*Size of program headers: *([0-9]+).*/\1/p')
+    pn=$(echo "$eh" | sed -nE 's/.*Number of program headers: *([0-9]+).*/\1/p')
+    [ -n "$po" ] && [ -n "$ps" ] && [ -n "$pn" ] || return 1
+    tail -c "+$((po + ps * pn + 1))" "$1" > "$2"
+}
+# ul_xt_count FILE.kr [--list]: compile for xtensa --freestanding, print the
+# counter's output ("CE" when the compile failed).
+ul_xt_count() {
+    rm -f "$1.elf" "$1.code"
+    if ! $KRC --arch=xtensa --freestanding "$1" -o "$1.elf" > /dev/null 2>&1 || ! ul_xt_blob "$1.elf" "$1.code"; then
+        echo CE; return
+    fi
+    python3 -I "$DIR/helpers/xtcount.py" "$1.code" $2 2>&1
+    rm -f "$1.elf" "$1.code"
+}
+# ul_rv_listing FILE.kr [FN]: the riscv32 --freestanding --emit=asm listing,
+# or only function FN's lines.
+ul_rv_listing() {
+    rm -f "$1.s"
+    $KRC --arch=riscv32 --freestanding --emit=asm "$1" -o "$1.s" > /dev/null 2>&1 || { echo CE; return; }
+    if [ -n "$2" ]; then
+        awk -v fn="$2:" '$0 == fn { on = 1; next } /^[A-Za-z_][A-Za-z0-9_.]*:$/ { on = 0 } on' "$1.s"
+    else
+        cat "$1.s"
+    fi
+    rm -f "$1.s"
+}
+ul_rv_loads() { grep -E ': [0-9a-f]+  (c\.)?(lw|lbu|lhu|lb|lh) ' | grep -vc '(sp)'; }
+# ul_list_prog CASE 1|0: a listing-row program, the case (1) or its control
+# twin (0). u32 throughout; the address is the constant 256.
+ul_list_prog() {
+    if [ "$1" = load_read_to_clear ]; then
+        if [ "$2" = 1 ]; then UL_B='    u32 isr = load32(base + 16)'; else UL_B=''; fi
+        printf 'fn irq_ack(u32 base) {\n%s\n    return\n}\nfn main() {\n    irq_ack(256)\n    exit(0)\n}\n' "$UL_B"
+        return
+    fi
+    printf 'fn main() {\n    u32 z = 256\n'
+    [ "$2" = 1 ] && ul_stmt $1 | sed -e '/= zero$/d' -e 's/u64/u32/g'
+    printf '    exit(0)\n}\n'
+}
+UL_LIST_CASES="load8 load16 load32 load_var load_expr load_mulzero ptr_load load_read_to_clear"
+for UL_K in $UL_LIST_CASES; do
+    ul_list_prog $UL_K 1 > /tmp/krc_ulc_$$.kr
+    ul_list_prog $UL_K 0 > /tmp/krc_ulk_$$.kr
+    TOTAL=$((TOTAL + 1))
+    UL_ROW="unused_load_kept_riscv32_freestanding_$UL_K"
+    UL_C=$(ul_rv_listing /tmp/krc_ulc_$$.kr | ul_rv_loads)
+    UL_T=$(ul_rv_listing /tmp/krc_ulk_$$.kr | ul_rv_loads)
+    if [ "$UL_C/$UL_T" = "1/0" ]; then
+        PASS=$((PASS + 1))
+        echo "  $UL_ROW: PASS (real loads: case 1 / control 0)"
+    else
+        echo "FAIL: $UL_ROW (real loads: case $UL_C / control $UL_T, want 1 / 0; 0 / 0 = the read was deleted)"
+        FAIL=$((FAIL + 1))
+    fi
+    TOTAL=$((TOTAL + 1))
+    UL_ROW="unused_load_kept_xtensa_$UL_K"
+    if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then
+        skip_row "$UL_ROW" "xtensa-lx106-elf-objdump/readelf not installed"
+        continue
+    fi
+    UL_C=$(ul_xt_count /tmp/krc_ulc_$$.kr)
+    UL_T=$(ul_xt_count /tmp/krc_ulk_$$.kr)
+    if [ "$UL_C/$UL_T" = "1/0" ]; then
+        PASS=$((PASS + 1))
+        echo "  $UL_ROW: PASS (real loads: case 1 / control 0)"
+    else
+        echo "FAIL: $UL_ROW (real loads: case $UL_C / control $UL_T, want 1 / 0; 0 / 0 = the read was deleted)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_ulc_$$.kr /tmp/krc_ulk_$$.kr
+
+# xtensa_load_counter_selftest: the guard of tests/helpers/xtcount.py. Every
+# layout spells its read `vload*`, which every compiler keeps, so the
+# expected counts do not depend on the compiler under test; a change to the
+# xtensa emitter's layout (literal pools, padding, the entry/BSS stub) that
+# the counter misreads turns this row red instead of silently making the
+# xtensa rows above vacuous or wrong. 252 layouts, each a case and its
+# control twin (the read removed):
+#   write padding     6 read forms x 15 paddings of `h = k` static writes
+#                     (literal pools of growing size before the read):
+#                     control 0 / case 1
+#   static reading    the same with `h = h + k` padding, which reads the
+#                     static h once per line: control n / case n + 1
+#   multi-function    a read helper rd() after 1-3 literal-free functions
+#                     whose bodies rotate through six shapes of different
+#                     instruction length (so the padding after their
+#                     ret.n varies), with 0 or 1 literal-using function in
+#                     between and a literal-free and a literal-using one
+#                     after it; the twin's rd() is empty: control 0 / case 1
+TOTAL=$((TOTAL + 1))
+if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then
+    skip_row xtensa_load_counter_selftest "xtensa-lx106-elf-objdump/readelf not installed"
+else
+    # xs_pad FORM N 1|0 PADKIND: one write/static-reading layout
+    xs_pad() {
+        local P="" k R=""
+        for k in $(seq 1 $2); do
+            if [ "$4" = r ]; then P="$P    h = h + $k
+"; else P="$P    h = $k
+"; fi
+        done
+        case $1 in
+            stmt) R="    vload32(z)" ;;
+            var)  R="    u32 lv = vload32(z)" ;;
+            mul)  R="    u32 lm = vload32(z) * 0
+    if lm != 0 { exit(1) }" ;;
+            ld8)  R="    vload8(z)" ;;
+            ld16) R="    vload16(z)" ;;
+        esac
+        [ "$3" = 0 ] && R=""
+        if [ "$1" = rtc ]; then
+            [ "$3" = 1 ] && R="    u32 isr = vload32(base + 16)"
+            printf 'static u32 h = 3\nfn irq_ack(u32 base) {\n%s\n    return\n}\nfn main() {\n%s    irq_ack(256)\n    exit(0)\n}\n' "$R" "$P"
+        else
+            printf 'static u32 h = 3\nfn main() {\n    u32 z = 256\n%s%s\n    exit(0)\n}\n' "$P" "$R"
+        fi
+    }
+    XS_BODIES=("p + 7" "p * 3" "p & 5" "p - 1" "p ^ 9" "p << 2")
+    # xs_multi NFREE ROT NLIT WIDTH 1|0: one multi-function layout
+    xs_multi() {
+        local i off=2
+        [ "$4" = 32 ] && off=4
+        printf 'static u32 h = 3\n'
+        for i in $(seq 1 $1); do printf 'fn f%d(u32 p) { h = %s }\n' $i "${XS_BODIES[$(( ($2 + i) % 6 ))]}"; done
+        for i in $(seq 1 $3); do printf 'fn g%d(u32 p) { h = p + 0x%x }\n' $i $((0x12340 + i)); done
+        if [ "$5" = 1 ]; then
+            printf 'fn rd(u32 p) {\n    u32 v = vload%d(p + %d)\n}\n' $4 $off
+        else
+            printf 'fn rd(u32 p) {\n    return\n}\n'
+        fi
+        printf 'fn z1(u32 p) { h = p * 3 }\nfn z2(u32 p) { h = p + 0x12345 }\nfn main() {\n'
+        for i in $(seq 1 $1); do printf '    f%d(1)\n' $i; done
+        for i in $(seq 1 $3); do printf '    g%d(1)\n' $i; done
+        printf '    rd(256)\n    z1(2)\n    z2(3)\n    exit(0)\n}\n'
+    }
+    XS_N=0; XS_OK=0; XS_BAD=""
+    xs_check() {
+        local c t
+        c=$(ul_xt_count /tmp/krc_xsc_$$.kr); t=$(ul_xt_count /tmp/krc_xsk_$$.kr)
+        XS_N=$((XS_N + 1))
+        if [ "$c/$t" = "$(($2 + 1))/$2" ]; then
+            XS_OK=$((XS_OK + 1))
+        elif [ ${#XS_BAD} -lt 300 ]; then
+            XS_BAD="$XS_BAD $1: $c/$t (want $(($2 + 1))/$2);"
+        fi
+    }
+    for XS_KIND in w r; do
+        for XS_F in stmt var mul ld8 ld16 rtc; do
+            for XS_P in 0 1 2 3 4 5 6 7 8 9 11 13 17 23 31; do
+                xs_pad $XS_F $XS_P 1 $XS_KIND > /tmp/krc_xsc_$$.kr
+                xs_pad $XS_F $XS_P 0 $XS_KIND > /tmp/krc_xsk_$$.kr
+                XS_WANT=0; [ $XS_KIND = r ] && XS_WANT=$XS_P
+                xs_check "$XS_KIND/$XS_F/$XS_P" $XS_WANT
+            done
+        done
+    done
+    for XS_NF in 1 2 3; do
+        for XS_ROT in 0 1 2 3 4 5; do
+            for XS_NL in 0 1; do
+                for XS_W in 16 32; do
+                    xs_multi $XS_NF $XS_ROT $XS_NL $XS_W 1 > /tmp/krc_xsc_$$.kr
+                    xs_multi $XS_NF $XS_ROT $XS_NL $XS_W 0 > /tmp/krc_xsk_$$.kr
+                    xs_check "m/$XS_NF/$XS_ROT/$XS_NL/$XS_W" 0
+                done
+            done
+        done
+    done
+    if [ "$XS_N/$XS_OK" = "252/252" ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_load_counter_selftest: PASS (252 of 252 layouts counted exactly)"
+    else
+        echo "FAIL: xtensa_load_counter_selftest ($XS_OK of $XS_N layouts counted exactly, want 252 of 252; case/control:$XS_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+    rm -f /tmp/krc_xsc_$$.kr /tmp/krc_xsk_$$.kr
+fi
+
+# unused_load_kept_emit_obj <arch> / unused_load_kept_emit_lkm x86_64 (#199):
+# --emit=obj and --emit=lkm use the legacy code generators, which have no
+# DCE. GREEN GUARDS: `fn rd(u64 p) { u32 j = load32(p) }` must keep its read;
+# its disassembly (<rd>) has exactly one 32-bit load whose base is not the
+# stack pointer, and the control twin (rd's body empty) has none.
+# ul_objdump ARCH FILE: disassembly of FILE, or return 1 when no tool here
+# reads ARCH (x86_64: GNU objdump when it reads elf64-x86-64, else
+# llvm-objdump; arm64: llvm-objdump -- an x86_64 host's GNU objdump has no
+# aarch64).
+ul_objdump() {
+    case $1 in
+        x86_64) if objdump -i 2> /dev/null | grep -q 'elf64-x86-64'; then objdump -d "$2"; return; fi ;;
+    esac
+    if command -v llvm-objdump > /dev/null 2>&1; then llvm-objdump -d "$2"; return; fi
+    return 1
+}
+# ul_obj_loads ARCH: from a disassembly on stdin, the loads in <rd>
+ul_obj_loads() {
+    awk '/^[0-9a-f]+ <[^>]*>:$/ { on = ($2 == "<rd>:") ; next } on' \
+        | if [ "$1" = x86_64 ]; then
+              grep -E 'movl?[[:space:]]+(-?0x[0-9a-f]+)?\(%r[a-z0-9]+\),[[:space:]]*%(e[a-z]+|r[0-9]+d)[[:space:]]*$' | grep -vEc '\(%r(sp|bp)\)'
+          else
+              grep -Ec 'ldr[[:space:]]+w[0-9]+, \[x[0-9]+'
+          fi
+}
+for UL_V in "obj x86_64" "obj arm64" "lkm x86_64"; do
+    set -- $UL_V
+    TOTAL=$((TOTAL + 1))
+    UL_ROW="unused_load_kept_emit_$1 $2"
+    UL_FLAG="--emit=$1"
+    UL_PRE=""
+    [ "$1" = lkm ] && UL_PRE='@module_init
+fn init() -> u64 {
+    return 0
+}
+@module_exit
+fn fini() {
+    return
+}
+'
+    printf '%sfn rd(u64 p) {\n    u32 j = load32(p)\n}\n' "$UL_PRE" > /tmp/krc_ulo_$$.kr
+    printf '%sfn rd(u64 p) {\n    return\n}\n' "$UL_PRE" > /tmp/krc_ulp_$$.kr
+    rm -f /tmp/krc_ulo_$$.o /tmp/krc_ulp_$$.o
+    if ! $KRC --arch=$2 $UL_FLAG /tmp/krc_ulo_$$.kr -o /tmp/krc_ulo_$$.o > /dev/null 2>&1 \
+       || ! $KRC --arch=$2 $UL_FLAG /tmp/krc_ulp_$$.kr -o /tmp/krc_ulp_$$.o > /dev/null 2>&1; then
+        echo "FAIL: $UL_ROW (compilation failed)"
+        FAIL=$((FAIL + 1))
+        continue
+    fi
+    if ! UL_DC=$(ul_objdump $2 /tmp/krc_ulo_$$.o 2> /dev/null) || ! UL_DT=$(ul_objdump $2 /tmp/krc_ulp_$$.o 2> /dev/null); then
+        skip_row "$UL_ROW" "no disassembler for $2 objects (llvm-objdump, or for x86_64 an objdump that reads elf64-x86-64)"
+        continue
+    fi
+    UL_C=$(printf '%s\n' "$UL_DC" | ul_obj_loads $2)
+    UL_T=$(printf '%s\n' "$UL_DT" | ul_obj_loads $2)
+    if [ "$UL_C/$UL_T" = "1/0" ]; then
+        PASS=$((PASS + 1))
+        echo "  $UL_ROW: PASS (32-bit loads in <rd>: case 1 / control 0)"
+    else
+        echo "FAIL: $UL_ROW (32-bit loads in <rd>: case $UL_C / control $UL_T, want 1 / 0)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -f /tmp/krc_ulo_$$.kr /tmp/krc_ulp_$$.kr /tmp/krc_ulo_$$.o /tmp/krc_ulp_$$.o
+
+# Compiler program order for plain reads (#199, LANGUAGE.md §11): the
+# compiler never merges two reads of one address and never moves a read out
+# of a loop. PINS (green before and after 2.11.1: CSE's pure list and LICM's
+# hoistable list have never held a read; cse_invalidate_set_pinned checks
+# both lists in the source as well). Counted in the function f only, from
+# the --emit=asm listing (riscv32: --freestanding; xtensa: the whole code
+# blob of a --freestanding build, where nothing but f reads memory):
+#   plain_load_not_merged <arch>      f(p) = load32(p) + load32(p): want 2
+#   plain_load_not_merged_bis arm64   the same with load32(b + i * 4)
+#                                     twice: CSE shares the address and the
+#                                     two loads stay (want 2)
+#   plain_load_not_hoisted <arch>     s = s + load32(p) in a while loop:
+#                                     want exactly 1 load, inside the span
+#                                     of a backward branch (target..branch)
+# x86_64 decodes f's bytes with objdump -b binary (the listing has no
+# mnemonic on some lines, e.g. `8b 1b`) and counts 32-bit loads whose base
+# is not rsp/rbp; arm64 classifies the raw words (LDR W, unsigned offset:
+# (w & 0xFFC00000) == 0xB9400000; LDR W, register offset LSL #2:
+# (w & 0xFFE0FC00) == 0xB8607800, printed with no mnemonic; base not sp;
+# backward B: (w & 0xFC000000) == 0x14000000 with a negative imm26, or a
+# backward B.cond); riscv32 and xtensa use the listing rows' counters above.
+PL_T=$(mktemp -d)
+printf 'fn f(u64 p) -> u64 {\n    u32 a = load32(p)\n    u32 b = load32(p)\n    return a + b\n}\nfn main() { exit(f(alloc(16))) }\n' > $PL_T/nm.kr
+printf 'fn f(u64 b, u64 i) -> u64 {\n    u32 x = load32(b + i * 4)\n    u32 y = load32(b + i * 4)\n    return x + y\n}\nfn main() { exit(f(alloc(16), 1)) }\n' > $PL_T/nmb.kr
+printf 'fn f(u64 p, u64 n) -> u64 {\n    u64 s = 0\n    u64 i = 0\n    while i < n {\n        s = s + load32(p)\n        i = i + 1\n    }\n    return s\n}\nfn main() { exit(f(alloc(16), 3)) }\n' > $PL_T/nh.kr
+sed -e 's/u64/u32/g' -e 's/exit(f(alloc(16)))/f(256)/' -e 's/exit(f(alloc(16), 3))/f(256, 3)/' $PL_T/nm.kr > $PL_T/xnm.kr
+sed -e 's/u64/u32/g' -e 's/exit(f(alloc(16), 3))/f(256, 3)/' $PL_T/nh.kr > $PL_T/xnh.kr
+# pl_fn_listing ARCH FILE: f's lines of the --emit=asm listing
+pl_fn_listing() {
+    rm -f $PL_T/l.s
+    $KRC --arch=$1 --emit=asm "$2" -o $PL_T/l.s > /dev/null 2>&1 || return 1
+    awk '$0 == "f:" { on = 1; next } /^[A-Za-z_][A-Za-z0-9_.]*:$/ { on = 0 } on' $PL_T/l.s
+}
+# pl_x86 FILE: "<loads> <load addresses...> | <backward spans...>" for f, or
+# CE / NOTOOL
+pl_x86() {
+    local L
+    if ! objdump --help 2> /dev/null | grep -q 'architectures:.*i386:x86-64'; then echo NOTOOL; return; fi
+    L=$(pl_fn_listing x86_64 "$1") || { echo CE; return; }
+    printf '%s\n' "$L" | awk '/^  [0-9a-f]+: / { for (i = 2; i <= NF; i++) { if ($i ~ /^[0-9a-f][0-9a-f]$/) printf "%s", $i; else break } }' \
+        | xxd -r -p > $PL_T/f.bin
+    objdump -D -b binary -m i386:x86-64 $PL_T/f.bin | python3 -I -c '
+import re, sys
+loads, spans = [], []
+for ln in sys.stdin:
+    f = ln.rstrip("\n").split("\t")
+    if len(f) < 3 or not re.fullmatch(r"\s*[0-9a-f]+:", f[0]): continue
+    ins = f[2].split(None, 1)
+    a, mn, ops = int(f[0].strip()[:-1], 16), ins[0], (ins[1].strip() if len(ins) > 1 else "")
+    if mn == "mov" and re.fullmatch(r"(-?0x[0-9a-f]+)?\(%r(?!sp\b|bp\b)[a-z0-9]+(,[^)]*)?\),%(e[a-z]+|r\d+d)", ops):
+        loads.append(a)
+    t = re.fullmatch(r"0x([0-9a-f]+)", ops)
+    if mn.startswith("j") and t and int(t.group(1), 16) < a:
+        spans.append((int(t.group(1), 16), a))
+print(len(loads), " ".join(map(str, loads)), "|", " ".join("%d-%d" % s for s in spans))'
+}
+# pl_a64 FILE: the same for arm64, from the raw words
+pl_a64() {
+    local L
+    L=$(pl_fn_listing arm64 "$1") || { echo CE; return; }
+    printf '%s\n' "$L" | python3 -I -c '
+import re, sys
+loads, spans = [], []
+for ln in sys.stdin:
+    m = re.match(r"\s*([0-9a-f]+):\s+([0-9a-f]{8})\b", ln)
+    if not m: continue
+    a, w = int(m.group(1), 16), int(m.group(2), 16)
+    if ((w & 0xFFC00000) == 0xB9400000 or (w & 0xFFE0FC00) == 0xB8607800) and (w >> 5) & 31 != 31:
+        loads.append(a)
+    if (w & 0xFC000000) == 0x14000000:
+        off = w & 0x3FFFFFF
+        if off & 0x2000000: spans.append((a + (off - 0x4000000) * 4, a))
+    if (w & 0xFF000010) == 0x54000000:
+        off = (w >> 5) & 0x7FFFF
+        if off & 0x40000: spans.append((a + (off - 0x80000) * 4, a))
+print(len(loads), " ".join(map(str, loads)), "|", " ".join("%d-%d" % s for s in spans))'
+}
+# pl_rv FILE: the same for riscv32 --freestanding
+pl_rv() {
+    local L
+    L=$(ul_rv_listing "$1" f)
+    [ "$L" = CE ] && { echo CE; return; }
+    printf '%s\n' "$L" | python3 -I -c '
+import re, sys
+loads, spans = [], []
+for ln in sys.stdin:
+    m = re.match(r"\s*([0-9a-f]+):\s+[0-9a-f]+\s+(\S+)\s*(.*)", ln)
+    if not m: continue
+    a, mn, ops = int(m.group(1), 16), m.group(2), m.group(3).strip()
+    if re.fullmatch(r"(c\.)?(lw|lbu|lhu|lb|lh)", mn) and "(sp)" not in ops:
+        loads.append(a)
+    if re.fullmatch(r"jal|j|c\.j|c\.beqz|c\.bnez|b(eq|ne|lt|ge|ltu|geu|eqz|nez)", mn):
+        if mn == "jal" and not ops.startswith("zero,"): continue
+        t = re.search(r"(?:^|,)([0-9a-f]+)$", ops)
+        if t and int(t.group(1), 16) < a: spans.append((int(t.group(1), 16), a))
+print(len(loads), " ".join(map(str, loads)), "|", " ".join("%d-%d" % s for s in spans))'
+}
+# pl_xt FILE: the same for xtensa, from tests/helpers/xtcount.py --list
+pl_xt() {
+    if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then echo NOTOOL; return; fi
+    ul_xt_count "$1" --list | python3 -I -c '
+import sys
+loads, spans, n = [], [], None
+for ln in sys.stdin:
+    p = ln.split()
+    if p and p[0] == "L": loads.append(int(p[1]))
+    elif p and p[0] == "B": spans.append((int(p[2]), int(p[1])))
+    elif len(p) == 1 and p[0].isdigit(): n = int(p[0])
+    else:
+        print("CE"); sys.exit()
+print(n, " ".join(map(str, loads)), "|", " ".join("%d-%d" % s for s in spans))'
+}
+# pl_judge KIND RESULT: 0 when RESULT ("<n> <addrs> | <spans>") meets KIND
+pl_judge() {
+    python3 -I -c '
+import sys
+kind, res = sys.argv[1], sys.argv[2]
+if "|" not in res: sys.exit(1)
+head, spans = res.split("|")
+h = head.split()
+n, loads = int(h[0]), [int(x) for x in h[1:]]
+sp = [tuple(map(int, s.split("-"))) for s in spans.split()]
+if kind == "merged": sys.exit(0 if n == 2 else 1)
+sys.exit(0 if n == 1 and any(t <= loads[0] < b for t, b in sp) else 1)' "$1" "$2"
+}
+for PL_V in "merged x86_64 nm" "merged arm64 nm" "merged riscv32 xnm" "merged xtensa xnm" \
+            "merged_bis arm64 nmb" \
+            "hoisted x86_64 nh" "hoisted arm64 nh" "hoisted riscv32 xnh" "hoisted xtensa xnh"; do
+    set -- $PL_V
+    TOTAL=$((TOTAL + 1))
+    case $1 in
+        merged)     PL_ROW="plain_load_not_merged $2"; PL_K=merged ;;
+        merged_bis) PL_ROW="plain_load_not_merged_bis $2"; PL_K=merged ;;
+        hoisted)    PL_ROW="plain_load_not_hoisted $2"; PL_K=hoisted ;;
+    esac
+    case $2 in
+        x86_64)  PL_R=$(pl_x86 $PL_T/$3.kr) ;;
+        arm64)   PL_R=$(pl_a64 $PL_T/$3.kr) ;;
+        riscv32) PL_R=$(pl_rv $PL_T/$3.kr) ;;
+        xtensa)  PL_R=$(pl_xt $PL_T/$3.kr) ;;
+    esac
+    if [ "$PL_R" = NOTOOL ]; then
+        case $2 in
+            x86_64) skip_row "$PL_ROW" "objdump without i386:x86-64" ;;
+            *)      skip_row "$PL_ROW" "xtensa-lx106-elf-objdump/readelf not installed" ;;
+        esac
+        continue
+    fi
+    if pl_judge $PL_K "$PL_R"; then
+        PASS=$((PASS + 1))
+        echo "  $PL_ROW: PASS ($PL_R [loads, their offsets | backward-branch spans])"
+    elif [ $PL_K = merged ]; then
+        echo "FAIL: $PL_ROW (got: $PL_R [loads, their offsets | backward-branch spans]; want 2 loads -- 1 = the two reads were merged)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "FAIL: $PL_ROW (got: $PL_R [loads, their offsets | backward-branch spans]; want 1 load inside a loop span -- outside = hoisted)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+rm -rf "$PL_T"
 
 # CSE across the ops above is not observable by a single-threaded run: they
 # write no memory the program reads back, and the second agent that a real
@@ -7778,7 +8292,12 @@ rm -rf "$VX_T"
 # exemption set (WANT_EX), the derivation, every place either predicate is
 # named, and four windows pinned token for token -- the whole DCE mark loop,
 # the whole DCE sweep loop, the CSE loop from its `while` through the
-# invalidation block, and the whole ir_optimize body (the pass list). A source
+# invalidation block, and the whole ir_optimize body (the pass list). It also
+# reads ir_opt_cse_is_pure and ir_licm_is_hoistable (same grammar, but their
+# blocks may return 0 or 1, first match deciding) and requires the plain
+# reads READS (#199: 30 LOAD, 73 STRLEN, 75 STR_EQ, 88 MEMCMP, 147 LOAD_BIS)
+# to be in neither -- a read is never merged or hoisted; the run rows
+# plain_load_not_merged/_hoisted are that guard. A source
 # pin can always be bypassed by an edit it does not read: a new pass called
 # from somewhere else, a pre-pass in front of a pinned loop, a call through a
 # computed pointer. The run rows above (side_effect_runs_*,
@@ -7822,6 +8341,9 @@ WANT_SE = {31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 74, 76, 78, 80, 81, 82, 8
           90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
           124, 125, 126, 127, 128, 129, 130, 131, 146, 148}
 WANT_EX = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
+# The plain memory reads (#199): IR_LOAD 30, IR_STRLEN 73, IR_STR_EQ 75,
+# IR_MEMCMP 88 and IR_LOAD_BIS 147. Neither CSE-pure nor LICM-hoistable.
+READS = {30, 73, 75, 88, 147}
 # Windows pinned token for token. Each starts at the `while` of its loop, so
 # a statement inserted at the top of the loop body is inside it: the whole
 # DCE mark loop, the whole DCE sweep loop, the CSE loop from its `while` to
@@ -8131,6 +8653,48 @@ def parse_fn(name, ret_case, ret_tail, first=None):
         except Refused as e:
             raise Refused("%s: statement of a refused shape (%s): %s" % (name, e, shown(tk, st)))
         s |= ops
+def parse_first_match(name):
+    # A predicate whose `if` blocks return 0 or 1 (ir_opt_cse_is_pure,
+    # ir_licm_is_hoistable), same accepted grammar as parse_fn otherwise.
+    # -> the set of opcodes below 65536 it returns 1 for, the first matching
+    # `if` deciding, as the code does.
+    b = body(name)
+    if isinstance(b, str): raise Refused(b)
+    f, start, tk, param = b
+    tk = tk + ["<END>"] * 6
+    vs, i, rules = {param}, 0, []
+    while tk[i] == ";": i += 1
+    if tk[i] == "uint64" and tk[i + 2] == "=" and tk[i + 3] == param and tk[i + 4] in ("if", "return", ";"):
+        vs.add(tk[i + 1]); i += 4
+    while True:
+        while tk[i] == ";": i += 1
+        st = i
+        if tk[i] == "return":
+            v, j = ret_val(tk, i + 1)
+            if v not in (0, 1):
+                raise Refused("%s ends in `return %s`, want 0 or 1" % (name, " ".join(tk[i + 1:max(j, i + 2)])))
+            while tk[j] == ";": j += 1
+            if tk[j] != "<END>":
+                raise Refused("%s: statement after the final `return`" % name)
+            out, decided = set(), set()
+            for ops, r in rules:
+                if r: out |= ops - decided
+                decided |= ops
+            if v: out |= set(range(65536)) - decided
+            return out
+        try:
+            if tk[i] != "if": raise Refused("not an `if`")
+            ops, i = parse_cond(tk, i + 1, vs)
+            if tk[i:i + 2] != ["{", "return"]: raise Refused("the block is not `{ return 0 }` or `{ return 1 }`")
+            v, i = ret_val(tk, i + 2)
+            if v not in (0, 1): raise Refused("the block is not `{ return 0 }` or `{ return 1 }`")
+            while tk[i] == ";": i += 1
+            if tk[i] != "}": raise Refused("the block has more than a `return`")
+            i += 1
+            if tk[i] == "else": raise Refused("an `else`")
+        except Refused as e:
+            raise Refused("%s: statement of a refused shape (%s): %s" % (name, e, shown(tk, st)))
+        rules.append((ops, v))
 def window(label, fn, text):
     b = body_any(fn)
     if isinstance(b, str): raise Refused(b)
@@ -8172,6 +8736,14 @@ def check():
         return "exemptions: missing %s, extra %s" % (sorted(WANT_EX - ex), sorted(ex - WANT_EX))
     if ex - se:
         return "exempt but not side-effecting: %s" % sorted(ex - se)
+    # The plain reads (#199) must stay out of CSE's pure list and LICM's
+    # hoistable list: the compiler never merges two reads of one address and
+    # never moves one out of a loop (LANGUAGE.md section 11). The run rows
+    # plain_load_not_merged/_hoisted are the guard; this is the tripwire.
+    for name in ("ir_opt_cse_is_pure", "ir_licm_is_hoistable"):
+        bad = parse_first_match(name) & READS
+        if bad:
+            return "%s returns 1 for the plain reads %s" % (name, sorted(bad))
     for name, want in (("ir_opt_is_side_effect", ["ir_opt_cse_invalidates", "ir_opt_dce", "ir_opt_dce"]),
                        ("ir_opt_cse_invalidates", ["ir_opt_cse"])):
         got = refs(name)
