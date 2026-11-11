@@ -17189,8 +17189,6 @@ fn emit_elf_debug_footer(uint64 text_start, uint64 input_path) {
     fi = 0
     while fi < fn_count {
         uint64 fe = fn_table + fi * 8
-        uint32 fn_tok = 0
-        unsafe { *(fe as uint32) -> fn_tok }
         uint64 fe4 = fe + 4
         uint32 fn_off = 0
         unsafe { *(fe4 as uint32) -> fn_off }
