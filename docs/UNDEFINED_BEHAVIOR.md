@@ -168,15 +168,19 @@ their own documented failure modes.
 The IR optimizer (`--O1`, default) performs:
 
 - **Constant folding** — pure arithmetic on compile-time constants.
-- **DCE** — dead store and dead value elimination, but only for ops in the
-  pure set (see `docs/IR_REFERENCE.md`).
+- **DCE** — dead value elimination for pure ops. A memory read (`load*`, a
+  pointer, field or index read, `str_len`, `str_eq`, struct `==`) is never
+  deleted except with an unreachable region; a read of a scalar `static` by
+  name is the one pure read.
 - **CSE** — common subexpression elimination for pure ops within a block.
 - **Copy propagation / value numbering** within a basic block.
 
-The optimizer is **conservative about side-effects**: any op whose
-side-effect flag is set (loads, stores, calls, atomics, volatile, asm,
-barriers) is never moved, merged, or deleted. Reordering of two side-effect
-ops relative to each other is not performed.
+The optimizer is **conservative about side effects**: any op whose
+side-effect flag is set (memory reads except scalar statics, stores, calls,
+atomics, volatile, asm, barriers) is never moved, merged or deleted, and two
+such ops are never reordered relative to each other — this is the
+**compiler's** program order. The hardware may still reorder plain accesses;
+`vload*`/`vstore*`, atomics and `dmb/dsb/isb` give hardware ordering.
 
 What the optimizer does **not** do:
 

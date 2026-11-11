@@ -2190,7 +2190,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_ROR (137): dst = right-rotate(src1, src2) mod imm(=32) -----
     // RV32IM has NO rotate instruction (Zbb's ror/rori is not in the
     // accepted ISA), so synthesize per audit §7. Produced ONLY by the shared
-    // optimizer's ir_opt_recognize_rotate (ir.kr:14839) from the canonical
+    // optimizer's ir_opt_recognize_rotate (ir.kr:14850) from the canonical
     // `OR(AND(SHR(x,n),0xFFFFFFFF), AND(SHL(x,32-n),0xFFFFFFFF))` idiom; imm
     // is always 32 today, so no 64-bit case. Contract (ir.kr:159):
     //   dst = ((x >> n) | (x << (W - n))) & ((1<<W)-1),  W = 32.

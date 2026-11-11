@@ -8337,10 +8337,10 @@ IR_FILE = "ir.kr"
 # computed call) is not read here. The run rows above are the guard for
 # every op reachable from source; this row only says loudly that the code it
 # reads has moved.
-WANT_SE = {31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 74, 76, 78, 80, 81, 82, 83, 85, 87,
-          90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
-          124, 125, 126, 127, 128, 129, 130, 131, 146, 148}
-WANT_EX = {40, 41, 42, 43, 51, 70, 71, 80, 81, 82, 83, 119, 131}
+WANT_SE = {30, 31, 40, 41, 42, 43, 50, 51, 52, 70, 71, 72, 73, 74, 75, 76, 78, 80, 81, 82, 83, 85, 87,
+          88, 90, 91, 92, 93, 94, 95, 96, 109, 110, 111, 112, 113, 114, 115, 119,
+          124, 125, 126, 127, 128, 129, 130, 131, 146, 147, 148}
+WANT_EX = {30, 40, 41, 42, 43, 51, 70, 71, 73, 75, 80, 81, 82, 83, 88, 119, 131, 147}
 # The plain memory reads (#199): IR_LOAD 30, IR_STRLEN 73, IR_STR_EQ 75,
 # IR_MEMCMP 88 and IR_LOAD_BIS 147. Neither CSE-pure nor LICM-hoistable.
 READS = {30, 73, 75, 88, 147}
@@ -26047,7 +26047,12 @@ rm -rf "$LKM_DIR"
 # CHANGELOG heading without bumping them, and this fails.
 echo ""
 echo "--- version consistency ---"
-VER_CHANGELOG=$(grep -m1 -oE "^## v[0-9]+\.[0-9]+\.[0-9]+" "$DIR/../CHANGELOG.md" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
+# A heading that ends in ` (unreleased)` is the next release being written
+# (`## v2.11.1 (unreleased)`): it names no version yet, so the first heading
+# WITHOUT that suffix is the one the binaries must match. The release commit
+# drops the suffix and bumps the strings in one go, and from then on this
+# binds to it again.
+VER_CHANGELOG=$(grep -E "^## v[0-9]+\.[0-9]+\.[0-9]+" "$DIR/../CHANGELOG.md" | grep -vE "^## v[0-9]+\.[0-9]+\.[0-9]+ \(unreleased\)$" | head -1 | grep -oE "^## v[0-9]+\.[0-9]+\.[0-9]+" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
 
 TOTAL=$((TOTAL + 1))
 VER_KRC=$($KRC --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
