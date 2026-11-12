@@ -1020,6 +1020,23 @@ store8(addr, 0xAA)            // write 1 byte
 The load builtins zero-extend the read into a full `u64`. The store
 builtins write exactly the specified width.
 
+**A read is always performed.** Every read you write — `load8`..`load64`,
+`unsafe { *(p as T) -> v }`, a struct field read through a pointer, an array
+or slice index read, `str_len`, `str_eq`, and struct `==` — is executed even
+when its value is never used, so a read done only for its effect (a status
+register that clears on read, a FIFO pop) or a read meant to fault still
+happens. The compiler drops it only with the whole region around it, when that
+region can never run (a compile-time-false `get_target_os()` arm, an
+unreachable function). The compiler also keeps plain reads in program order
+with every other memory access and side effect: it never merges two reads of
+one address and never moves a read out of a loop. What a plain read does
+**not** carry is a hardware barrier — the CPU may still reorder it — so for
+device registers use `vload*`/`vstore*` or a `device` block (§12, §13). The one
+exception is reading a scalar `static` by name (`x = g`): it cannot fault, and
+the compiler may remove or reuse it. (Before 2.11.1 the default IR backend
+deleted any unused plain read on every architecture; `--legacy`, `--emit=obj`
+and `--emit=lkm` never did.)
+
 ### The verbose way (unsafe blocks)
 
 You can also write the raw pointer syntax:
@@ -1046,8 +1063,10 @@ prefer them unless you have a reason to use `unsafe` blocks.
 
 ### Volatile: MMIO-safe loads and stores
 
-For memory-mapped I/O, the compiler must not reorder, elide, or cache the
-access. How strongly the access is ordered against its neighbours, and
+A plain `load*` is never elided, merged or moved by the compiler either (§11);
+what `vload*` and `vstore*` add is **hardware ordering**: the barriers below, so
+the access is also ordered by the CPU and the memory system against its
+neighbours. How strongly the access is ordered against its neighbours, and
 whether it is waited for, depends on the architecture and the backend (the
 list below).
 
@@ -1671,7 +1690,7 @@ manually-built buffer — reach for `print_str` / `println_str`.
 
 | Function | Description |
 |---|---|
-| `load8/16/32/64(addr)` | Read a value of the given width, zero-extended to `u64`. |
+| `load8/16/32/64(addr)` | Read a value of the given width, zero-extended to `u64`. Always performed, even if the result is unused; kept in program order by the compiler but no hardware barrier (use `vload*` for MMIO). |
 | `store8/16/32/64(addr, val)` | Write a value of the given width. |
 | `vload8/16/32/64(addr)` | Volatile load for MMIO — `mfence` on x86_64, `LDAR*` acquire on arm64 IR (§12). |
 | `vstore8/16/32/64(addr, val)` | Volatile store for MMIO — `mfence` on x86_64, `STLR*` release on arm64 IR (§12). |

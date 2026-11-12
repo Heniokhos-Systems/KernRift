@@ -2,6 +2,22 @@
 
 All notable changes to `kernriftc` are documented in this file.
 
+## v2.11.1 (unreleased)
+
+### Fixed — correctness
+
+**Fixed: an unused memory read was silently deleted (#199).** On every architecture the default IR
+backend removed a `load8`..`load64`, an `unsafe { *(p as T) -> v }` read, a struct-field or
+array/slice read through a pointer, a `str_len`/`str_eq` or a struct `==` whenever its value was not
+used — including when it was used only through `* 0` or `& 0`. A read done for its effect (a
+read-to-clear status register, a FIFO pop) did not happen, and a read of a bad pointer did not
+fault. Such reads are now always performed and kept in program order (LANGUAGE.md §11); a read of a
+scalar `static` by name is the one exception. `vload*` is still what gives hardware ordering.
+`--legacy`, `--emit=obj` and `--emit=lkm` were never affected. Rebuild freestanding images, ARX
+programs and modules after upgrading. Code without unused reads compiles to the same bytes (the
+compiler itself, the benchmarks and every ApexRift image are byte-identical).
+Bootstrap fixed point 1501560 bytes.
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF

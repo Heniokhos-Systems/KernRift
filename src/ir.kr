@@ -13699,9 +13699,18 @@ fn ir_opt_const_fold() {
 static uint64 ir_dce_live = 0
 
 // Returns 1 if the instruction must be kept regardless of whether its dest is
-// live — side effects, control flow, memory writes, volatile/atomic reads, and
-// anything externally observable.
+// live — side effects, control flow, memory writes, every memory read (plain,
+// volatile and atomic) except a scalar static read by name (IR_STATIC_LOAD 77,
+// which cannot fault), and anything externally observable.
 fn ir_opt_is_side_effect(uint64 op) -> uint64 {
+    // Reads memory: may fault or have a device effect (a read-to-clear
+    // register, a FIFO pop); deleted only with its unreachable region
+    // (LANGUAGE.md §11). Before 2.11.1 DCE deleted an unused one (#199).
+    if op == 30 { return 1 }   // LOAD
+    if op == 147 { return 1 }  // LOAD_BIS
+    if op == 73 { return 1 }   // STRLEN
+    if op == 75 { return 1 }   // STR_EQ
+    if op == 88 { return 1 }   // MEMCMP
     if op == 31 { return 1 }   // STORE
     if op == 148 { return 1 }  // STORE_BIS (memory write, same as STORE)
     if op == 40 { return 1 }   // BR
@@ -13917,6 +13926,8 @@ fn ir_opt_cse_invalidates(uint64 op) -> uint64 {
     if op >= 80 && op <= 83 { return 0 }  // EXTRACT_RDX/R8, RET2/RET3: register moves
     if op == 119 { return 0 }             // TIME_NS: writes only a stack timespec
     if op == 131 { return 0 }             // ARR_CHECK: traps or falls through, writes nothing
+    if op == 30 || op == 147 { return 0 } // LOAD/LOAD_BIS: read only
+    if op == 73 || op == 75 || op == 88 { return 0 } // STRLEN/STR_EQ/MEMCMP: read only
     return 1
 }
 

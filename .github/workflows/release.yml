@@ -45,6 +45,31 @@ jobs:
           mv build/krc2.stable build/krc2
           chmod +x build/krc2
 
+      # The release guard (v2.11.1, #199 review). During a release train the
+      # CHANGELOG opens with `## vX.Y.Z (unreleased)` and the suite's
+      # version_*_matches_changelog rows accept that while the binaries still
+      # report the previous version. A tag must not ship in that state: no
+      # `unreleased` heading may remain, the first version heading must be the
+      # tag's, and the krc just built from the tagged source must report the
+      # tag's version. Before any asset is built or uploaded.
+      - name: Release guard (CHANGELOG released, krc --version == tag)
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          # Only the train's own heading shape (the suite's version rows read
+          # the same one), in any letter case: `## Unreleased` further down is
+          # an old historical heading, not a pending release.
+          if grep -niE '^## v[0-9]+\.[0-9]+\.[0-9]+ \(unreleased\)' CHANGELOG.md; then
+            echo "FAIL: CHANGELOG.md still has an (unreleased) heading (above); the release commit drops the suffix"
+            exit 1
+          fi
+          TOP=$(grep -m1 -oE '^## v[0-9]+\.[0-9]+\.[0-9]+' CHANGELOG.md | cut -c5-)
+          KRCV=$(./build/krc2 --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          if [ "$TOP" != "$TAG" ] || [ "$KRCV" != "$TAG" ]; then
+            echo "FAIL: tag $TAG, first CHANGELOG heading '$TOP', krc --version '$KRCV' -- all three must agree"
+            exit 1
+          fi
+          echo "release guard: tag, CHANGELOG and krc --version all say $TAG"
+
       - name: Create distribution
         run: make dist
 
