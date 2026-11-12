@@ -2712,6 +2712,43 @@ fn static_decl_at(uint64 idx) -> uint64 {
     return v
 }
 
+// #206 / #207: a store BY NAME into a `const`, or a scalar store into a whole
+// static array or struct, is refused at the name. Called only once the name
+// has resolved to a static (no local or parameter of that name in scope), by
+// every by-name write: `x = v` / `x OP= v`, `*(p as T) -> x`, asm `out(r -> x)`,
+// on the IR and both legacy backends.
+fn static_write_check(uint64 name_tok) {
+    uint64 idx = static_index_of(name_tok)
+    if idx == 0xFFFFFFFF { return }
+    uint64 d = static_decl_at(idx)
+    uint64 is_const = (d >> 32) & 1
+    uint64 is_agg = static_array_size_at(idx)
+    if is_const == 0 && is_agg == 0 { return }
+    uint64 ts = tok_text_start(name_tok)
+    uint64 tl = tok_text_len(name_tok)
+    diag_loc_head(name_tok, 0)
+    if is_const != 0 {
+        write(2, "cannot assign to const '", 24)
+        write(2, cg_source + ts, tl)
+        write(2, "' (a const is a compile-time constant; declare it `static` to change it)", 72)
+    } else if static_struct_lookup(name_tok) != 0xFFFFFFFF && ((d >> 34) & 1) == 0 {
+        write(2, "cannot assign to the whole static struct '", 42)
+        write(2, cg_source + ts, tl)
+        write(2, "' (not supported yet; assign a field: ", 38)
+        write(2, cg_source + ts, tl)
+        write(2, ".field = v)", 11)
+    } else {
+        write(2, "cannot assign to the whole static array '", 41)
+        write(2, cg_source + ts, tl)
+        write(2, "' (not supported yet; assign an element: ", 41)
+        write(2, cg_source + ts, tl)
+        write(2, "[i] = v)", 8)
+    }
+    write(2, "\n", 1)
+    diag_span_of(name_tok)
+    exit(1)
+}
+
 @export
 fn static_name_tok_at(uint64 idx) -> uint64 {
     uint64 entry = static_table + idx * 8
@@ -13746,6 +13783,9 @@ fn gen_stmt(uint64 node) {
     // Assignment: name = expr
     if kind == 11 {
         uint32 name_tok = ast_data1(node)
+        // A store by name into a const or a whole static array/struct is
+        // refused here, before the value or the struct-copy path (#206/#207).
+        if var_lookup(name_tok) == 0xFFFFFFFF && static_lookup(name_tok) != 0xFFFFFFFF { static_write_check(name_tok) }
         uint32 val_child = ast_child(node)
         uint64 wvc = val_child
         gen_expr(wvc)
@@ -14490,6 +14530,8 @@ fn gen_stmt(uint64 node) {
         if doff == 0xFFFFFFFF {
             uint64 soff = static_lookup(dest_tok)
             if soff != 0xFFFFFFFF {
+                // A static: refused if it is a const or a whole array/struct (#206/#207).
+                static_write_check(dest_tok)
                 emit_static_store(soff)
                 return
             }
@@ -14673,6 +14715,9 @@ fn gen_stmt(uint64 node) {
                 uint64 wvtok2 = vtok2
                 uint64 rcode2 = x86_reg_code(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
+                // A const or a whole static array/struct gets its own message
+                // before asm_require_local's (#206/#207).
+                if voff2 == 0xFFFFFFFF && static_lookup(wvtok2) != 0xFFFFFFFF { static_write_check(wvtok2) }
                 asm_require_local(wvtok2, voff2)
                 if rcode2 != 0xFFFF {
                     emit_mov_reg_to_stack(rcode2, voff2)
