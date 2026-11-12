@@ -125,24 +125,25 @@ fn halt_forever() {
 
 // --- identification and timing ---------------------------------------------
 
-// CPUID leaf `leaf` -> EAX. Clobbers rbx/rcx/rdx as the instruction requires.
+// CPUID leaf `leaf` -> EAX. cpuid writes rax, rbx, rcx and rdx; the ones not
+// returned are listed in clobbers() so no live value is kept in them (#214).
 fn cpuid_eax(uint64 leaf) -> uint64 {
     uint64 v = 0
-    asm { "cpuid" } in(leaf -> rax) out(rax -> v)
+    asm { "cpuid" } in(leaf -> rax) out(rax -> v) clobbers(rbx, rcx, rdx)
     return v & 0xFFFFFFFF
 }
 
 // CPUID leaf `leaf` -> EDX. The common feature-bit word.
 fn cpuid_edx(uint64 leaf) -> uint64 {
     uint64 v = 0
-    asm { "cpuid" } in(leaf -> rax) out(rdx -> v)
+    asm { "cpuid" } in(leaf -> rax) out(rdx -> v) clobbers(rbx, rcx)
     return v & 0xFFFFFFFF
 }
 
 // CPUID leaf `leaf` -> ECX.
 fn cpuid_ecx(uint64 leaf) -> uint64 {
     uint64 v = 0
-    asm { "cpuid" } in(leaf -> rax) out(rcx -> v)
+    asm { "cpuid" } in(leaf -> rax) out(rcx -> v) clobbers(rbx, rdx)
     return v & 0xFFFFFFFF
 }
 

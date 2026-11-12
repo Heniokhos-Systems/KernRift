@@ -9,10 +9,10 @@
 // backend, so the test asserts a `nop` is present — an elided/dropped block would
 // leave zero nops and fail. The block also exercises the multi-line StrLit walk.
 //
-// Scope note: the IR inline-asm constraint binding hardcodes x86 register codes
-// (a known upstream all-arch limitation), so this block is deliberately
-// operand-less — no in()/out() clauses. The handler is a pure passthrough that
-// assembles the block's nullary Xtensa mnemonics into the code stream.
+// Scope note: this block is deliberately operand-less — no in()/out()
+// clauses (they name a0, a2-a15 since #215; until then xtensa took the x86_64
+// names). The handler is a pure passthrough that assembles the block's nullary
+// Xtensa mnemonics into the code stream.
 
 device Uart at 0xfd050020 {
     thr at 0x00 : u32

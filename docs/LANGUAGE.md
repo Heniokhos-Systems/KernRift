@@ -1324,41 +1324,86 @@ fn cpuid_signature() -> u64 {
 ```
 
 **Clause semantics**:
-- `in(<var> -> <reg>, ...)` — before the block runs, KernRift emits a
-  `mov <reg>, <local_slot>` for each pair. Inputs are load-only; the
-  named variable is not updated after the block. `<var>` must be a local
-  variable — a `static` is rejected on every backend (arm64 `--legacy` and
-  `-c`/`--emit=obj` used to drop it silently, #204).
-- `out(<reg> -> <var>, ...)` — after the block runs, KernRift emits a
-  `mov <local_slot>, <reg>` for each pair. Outputs are store-only — a
-  `static` or `const` is rejected on every backend (arm64 `--legacy` and
-  `-c`/`--emit=obj` used to drop it silently, #204).
-- `clobbers(<reg>, ...)` — accepted syntactically but currently
-  **advisory**. You still must list every register your block writes
-  under `out(...)` if you need its value, and every register whose
-  prior contents you don't care about should not be relied on after
-  the block. The compiler does not yet save/restore clobbered
-  callee-saved registers.
+- `in(<var> -> <reg>, ...)` — before the block runs, KernRift moves each
+  variable's value into its register. The variable keeps its value: the
+  block may overwrite the register, the variable is not affected. `<var>`
+  must be a local variable — a `static` is rejected on every backend (arm64
+  `--legacy` and `-c`/`--emit=obj` used to drop it silently, #204).
+- `out(<reg> -> <var>, ...)` — after the block runs, KernRift stores each
+  register into its variable. Outputs are store-only — a `static` or `const`
+  is rejected on every backend (arm64 `--legacy` and `-c`/`--emit=obj` used
+  to drop it silently, #204). The same variable may be an input and an
+  output (`in(a -> rbx) out(rbx -> a)`).
+- `clobbers(<reg>, ...)` — registers the block overwrites without returning
+  a value. No variable is kept in one across the block. Names are checked
+  like `in()`/`out()` names.
 
-**Register names**:
-- **x86_64**: `rax` `rcx` `rdx` `rbx` `rsp` `rbp` `rsi` `rdi` `r8` …
-  `r15`. No 32-bit or 8-bit aliases yet — use the 64-bit form even if
-  the instruction operates on a sub-register.
-- **ARM64**: `x0` … `x30`. No `w` (32-bit) aliases. Any other name is
-  an error on every arm64 backend (`--legacy` and `-c`/`--emit=obj` used to
-  drop it silently, #204).
+**The contract** (#214). A variable keeps its value across an asm block
+unless it is named in that block's `out()`. So **every integer register the
+block writes must be listed** in `out()` or `clobbers()`, or be one of its
+`in()` registers; a write to any other register is undefined behaviour — the
+compiler may be keeping a live value there. KernRift keeps every variable
+that is live across the block out of all the registers it names (a value
+that cannot fit elsewhere moves to the stack). The block must also leave as
+it found them:
+- the stack pointer (which no clause may name, #218);
+- the frame pointer where the target uses one: Windows x86_64 `rbp` and
+  arm64 `x29`, and Windows arm64 `x18` (the TEB) — a block that writes them
+  is refused on Windows (#143). On Linux, `rbp` and arm64 `x29` are ordinary
+  registers for this rule;
+- the callee-saved SIMD registers: arm64 `d8`–`d15` (`v8`–`v15`), and on
+  Windows x64 `xmm6`–`xmm15`. The constraint language names integer
+  registers only, so `clobbers(v8)` is an error and cannot ask for a save;
+- on Windows x64 also `rsi` and `rdi`. KernRift's own code does not preserve
+  them for a C caller either (#160); a block that writes them changes them
+  for its caller too.
+
+In an `@naked` function nothing is saved at all: a block that writes the
+return-address register (arm64 `x30`, xtensa `a0`) loses the return address,
+as does any other write the naked body does not undo.
+
+There is no `memory` or `cc` clobber, and none is needed: an asm block is
+already ordered with the memory accesses around it (a value read before the
+block is read again after it), and flags are never live across one. Writing
+`clobbers(memory)` is an error that says so.
+
+**Register names** (an unknown name, in any clause, is an error at the name):
+- **x86_64**: `rax` `rcx` `rdx` `rbx` `rbp` `rsi` `rdi` `r8` … `r15`. No
+  32-bit or 8-bit aliases yet — use the 64-bit form even if the
+  instruction operates on a sub-register.
+- **ARM64**: `x0` … `x30`. No `w` (32-bit) aliases, no `lr`/`fp` (write
+  `x30`/`x29`). Any other name is an error on every arm64 backend
+  (`--legacy` and `-c`/`--emit=obj` used to drop it silently, #204).
+- **riscv32**: `x0` … `x31` and the ABI names `zero` `ra` `gp` `tp`
+  `t0`–`t6` `s0`–`s11` `a0`–`a7` `fp`.
+- **xtensa**: `a0`, `a2` … `a15` (#215; until 2.11.1 xtensa took the x86_64
+  names, so `in(x -> rcx)` wrote `a1`, the stack pointer).
+- **The stack pointer** — `rsp`, arm64 `sp`, riscv32 `sp`/`x2`, xtensa `a1`
+  — cannot be an `in()`, `out()` or `clobbers()` register (#218).
 
 **Limitations** (V1):
 - Clauses must come immediately after the closing `)` or `}` of the
   asm form, before any other statement.
-- Clobbers list is parsed but emits no save/restore code — list an
-  output or pick non-conflicting registers.
+- `clobbers()` adds no save/restore code. On the IR backends (the
+  default, `--O0` included) a function that contains asm already saves the
+  whole callee-saved integer file in its prologue, so naming one costs
+  nothing but the variable that had to move. **On x86_64 `--legacy`, `-c`/
+  `--emit=obj` and `--emit=lkm` it does not** — the prologue saves only
+  `rbx` and `r12` — and arm64 `--legacy`/`-c` saves none of `x21`–`x28` (a
+  leaf function saves nothing at all):
+  there a block that writes another callee-saved register (`rbp`,
+  `r13`–`r15`; arm64 `x19`–`x28`) changes it for the caller, even when it is
+  listed in `clobbers()` (#235). Use the IR backend, or save and restore
+  the register in the block.
 - Only integer GPRs are accepted; no SSE/NEON register constraints.
 - No memory-operand constraints (Rust's `in("rax") [ptr]` — not yet).
-- Pinned-parameter inputs (rbx/r12 on x86_64, picked by the compiler
-  for parameter slots 0 and 1) are handled correctly — KernRift
-  emits a reg-reg move instead of a stack reload so pinning stays
-  transparent.
+- On x86_64 `--legacy`, `--emit=obj` and `--emit=lkm`, parameter 0 is kept
+  in `rbx` when the function never assigns it — but not when an asm block
+  names `rbx` or writes the parameter with `out()` (#214: a block naming
+  `rbx` used to destroy it). No other parameter is ever kept in a register.
+- arm64 `--legacy`: a block that writes `x30` crashes the function's return
+  (#226: a legacy leaf function does not save `x30`). Use the default IR
+  backend, or another register.
 
 ---
 
@@ -1840,7 +1885,8 @@ fn my_entry() { }
 **Calling KernRift from C on Windows** (a COFF object linked into a C
 program, Appendix C; there `@export` does not make a function global, only
 `main` is): KernRift code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15`,
-which Win64 makes nonvolatile (#160). The C caller must treat every call into
+which Win64 makes nonvolatile (#160) — nor does an asm block that writes
+them (§14). The C caller must treat every call into
 KernRift as clobbering them (for example, call through a small wrapper that
 saves them) — see the
 [Windows notes](#windows-unwind-tables-frames-and-what-they-require-of-you).
@@ -3477,7 +3523,8 @@ reason about register allocation, interoperate with C, or write
 | Windows | `rcx rdx r8 r9` (then stack, +32 shadow) | `rax` | `rbx rbp rdi rsi rsp r12..r15 xmm6..xmm15` | 16 |
 
 - The table gives each platform's ABI. KernRift's own code does **not**
-  preserve `rsi`, `rdi` or `xmm6`–`xmm15` on Windows (#160): a C caller must
+  preserve `rsi`, `rdi` or `xmm6`–`xmm15` on Windows (#160), and an inline-asm
+  block that writes them is not undone either (§14): a C caller must
   treat them as clobbered by any KernRift function — see
   [Windows: unwind tables, frames and what they require of you](#windows-unwind-tables-frames-and-what-they-require-of-you).
 - On Windows, the first 32 bytes of the stack below `rsp` at call time
@@ -3527,7 +3574,8 @@ silently vanishing.
 - **Registers the tables do not describe: rsi, rdi and xmm6–xmm15 (#160).**
   Win64 makes them nonvolatile (the table above), but KernRift code uses them as
   scratch: the IR backend's register file includes `rsi`/`rdi` and `xmm2`–`xmm15`,
-  and `--legacy` built-ins (f-strings, for one) use `rsi`/`rdi`. Calls
+  and `--legacy` built-ins (f-strings, for one) use `rsi`/`rdi`; an inline-asm
+  block that writes them, or `xmm6`–`xmm15`, is not undone either (§14). Calls
   between KernRift functions are unaffected. **A C or other foreign caller must
   treat every KernRift function as clobbering rsi, rdi and xmm6–xmm15**, and a
   debugger shows stale values for them in callers' frames. The walk itself
@@ -3717,7 +3765,8 @@ No underscore prefix on x86_64. `extern fn` call sites use relocations
 `IMAGE_REL_AMD64_REL32` (x86_64) and `IMAGE_REL_ARM64_BRANCH26` (arm64).
 
 **Linking into a C program:** only `main` is a global symbol. The object's
-code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15` (#160): the C side must
+code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15` (#160), nor does an
+inline-asm block that writes them (§14): the C side must
 treat a call into it as clobbering them — see the
 [Windows notes](#windows-unwind-tables-frames-and-what-they-require-of-you).
 
