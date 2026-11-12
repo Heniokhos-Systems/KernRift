@@ -9822,6 +9822,118 @@ print("OK %s %s / %s %s" % (pre + post) if ok else "BAD %s %s / %s %s" % (pre + 
         *)   echo "FAIL: asm_xtensa_a_names_bind (want a write of a6 right before the block and a read of a6 right after: $ALR_J)"; FAIL=$((FAIL + 1)) ;;
     esac
 fi
+# Windows (--target=windows --emit=pe): the same programs, x86_64 run under
+# Wine (natively on the laptop in a native batch, tests/windows/native_suite.sh
+# via KR_WINE), arm64 built only. A program whose block writes the frame
+# pointer -- x86_64 rbp, arm64 x29, and arm64 x18 (the TEB) -- must be refused
+# by the #143 frame-pointer refusal instead, before any of #214's checks.
+#   asm_live_across_windows_wine: the x86_64 matrix, IR, --O0 and --legacy.
+#     Red on 2.11.0 and main: the same rbx/r12-r15 rows as on Linux (the
+#     legacy rbx rows are green: Windows never pins parameter 0).
+#   asm_named_windows_wine: the x86_64 named rows, IR, --O0 and --legacy
+#     (asm_perm writes rbp: refused).
+#   asm_live_across_windows_arm64_build: the arm64 matrix and named rows, IR
+#     and --legacy, build (x18/x29 refused). Green on 2.11.0 (a guard).
+ALR_WIN_RBP="on Windows rbp is the frame pointer every unwind record relies on (#143)"
+ALR_WIN_X29="on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143)"
+mkdir -p $ALR_T/w
+# alr_pe_one ARCH CONFIG SRC REFUSE RUN -> "" when SRC behaves: REFUSE=1:
+# refused (exit 1, no output, the #143 text); else builds, and RUN=1: exits 7
+# under Wine. Else " <what>;".
+alr_pe_one() {
+    local f=$2 rc want
+    [ $2 = IR ] && f=""
+    rm -f $ALR_T/w/p.exe
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$1 --target=windows --emit=pe $f "$3" -o $ALR_T/w/p.exe > /dev/null 2> $ALR_T/werr
+    rc=$?
+    if [ "$4" = 1 ]; then
+        want=$ALR_WIN_RBP; [ $1 = arm64 ] && want=$ALR_WIN_X29
+        if [ $rc = 1 ] && [ ! -e $ALR_T/w/p.exe ] && grep -qF -- "$want" $ALR_T/werr; then return; fi
+        printf ' %s %s: want the #143 refusal, got exit %s, %s;' "$6" $2 $rc "$(head -1 $ALR_T/werr | cut -c1-120)"
+        return
+    fi
+    if [ $rc != 0 ] || [ ! -f $ALR_T/w/p.exe ]; then
+        printf ' %s %s: CE(%s);' "$6" $2 "$(grep -m1 error $ALR_T/werr | cut -c1-120)"
+        return
+    fi
+    [ "$5" = 1 ] || return
+    rc=$( ( cd $ALR_T/w && ulimit -c 0 && timeout -k 5 "$RUN_TEST_TIMEOUT" $ALR_WINE ./p.exe < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    [ "$rc" = 7 ] || printf ' %s %s: exit %s;' "$6" $2 "$rc"
+    rm -f $ALR_T/w/p.exe
+}
+ALR_WINE=$(wine_path)
+TOTAL=$((TOTAL + 1))
+if [ -z "$ALR_WINE" ]; then
+    wine_na asm_live_across_windows_wine
+else
+    ALR_BAD=""; ALR_N=0
+    for ALR_S in out inw clob; do
+        for ALR_G in $ALR_REGS_x86_64; do
+            if [ $ALR_S = inw ] && [ $ALR_G = rax ]; then continue; fi
+            alr_gen x86_64 $ALR_S $ALR_G > $ALR_T/m.kr
+            ALR_RF=0; [ $ALR_G = rbp ] && ALR_RF=1
+            for ALR_C in IR --O0 --legacy; do
+                ALR_N=$((ALR_N + 1))
+                ALR_BAD="$ALR_BAD$(alr_pe_one x86_64 $ALR_C $ALR_T/m.kr $ALR_RF 1 ${ALR_S}_$ALR_G)"
+            done
+        done
+    done
+    if [ -z "$ALR_BAD" ]; then
+        PASS=$((PASS + 1))
+        echo "  asm_live_across_windows_wine: PASS ($ALR_N builds: every rbp program refused by #143, every other one exits 7)"
+    else
+        echo "FAIL: asm_live_across_windows_wine (want 7, or the #143 refusal for rbp:$ALR_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+TOTAL=$((TOTAL + 1))
+if [ -z "$ALR_WINE" ]; then
+    wine_na asm_named_windows_wine
+else
+    ALR_BAD=""; ALR_N=0
+    for ALR_P in x_outorder x_spillout x_spillin x_loop x_perm x_chain x_branch x_inout x_inshuf x_outparam c1 c2 x_static; do
+        alr_src $ALR_P > $ALR_T/n.kr
+        ALR_RF=0; [ $ALR_P = x_perm ] && ALR_RF=1
+        for ALR_C in IR --O0 --legacy; do
+            ALR_N=$((ALR_N + 1))
+            ALR_BAD="$ALR_BAD$(alr_pe_one x86_64 $ALR_C $ALR_T/n.kr $ALR_RF 1 $ALR_P)"
+        done
+    done
+    if [ -z "$ALR_BAD" ]; then
+        PASS=$((PASS + 1))
+        echo "  asm_named_windows_wine: PASS ($ALR_N builds: x_perm (rbp) refused by #143, every other one exits 7)"
+    else
+        echo "FAIL: asm_named_windows_wine (want 7, or the #143 refusal for rbp:$ALR_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+TOTAL=$((TOTAL + 1))
+ALR_BAD=""; ALR_N=0
+for ALR_S in out inw clob; do
+    for ALR_G in $ALR_REGS_arm64; do
+        if [ $ALR_S = inw ] && [ $ALR_G = x9 ]; then continue; fi
+        alr_gen arm64 $ALR_S $ALR_G > $ALR_T/m.kr
+        ALR_RF=0; { [ $ALR_G = x18 ] || [ $ALR_G = x29 ]; } && ALR_RF=1
+        for ALR_C in IR --legacy; do
+            ALR_N=$((ALR_N + 1))
+            ALR_BAD="$ALR_BAD$(alr_pe_one arm64 $ALR_C $ALR_T/m.kr $ALR_RF 0 ${ALR_S}_$ALR_G)"
+        done
+    done
+done
+for ALR_P in a_outorder a_spillin a_loop a_inout a_dhome a_static; do
+    alr_src $ALR_P > $ALR_T/n.kr
+    for ALR_C in IR --legacy; do
+        ALR_N=$((ALR_N + 1))
+        ALR_BAD="$ALR_BAD$(alr_pe_one arm64 $ALR_C $ALR_T/n.kr 0 0 $ALR_P)"
+    done
+done
+if [ -z "$ALR_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_live_across_windows_arm64_build: PASS ($ALR_N builds: x18/x29 programs refused by #143, every other one builds a PE)"
+else
+    echo "FAIL: asm_live_across_windows_arm64_build (want a PE, or the #143 refusal for x18/x29:$ALR_BAD)"
+    FAIL=$((FAIL + 1))
+fi
 rm -rf "$ALR_T"
 
 # CSE across the ops above is not observable by a single-threaded run: they
