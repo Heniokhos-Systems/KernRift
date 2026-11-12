@@ -6219,7 +6219,16 @@ fn gen_stmt_a64(uint64 node) {
                 uint64 voff  = var_lookup(wvtok)
                 asm_require_local(wvtok, voff)
                 if rcode != 0xFFFF && voff != 0xFFFFFFFF {
-                    emit_a64_ldr(rcode, 31, a64_var_base + voff)
+                    uint64 ioff = a64_var_base + voff
+                    if ioff > 32760 {
+                        // Far slot (#219): address through the target itself.
+                        // emit_a64_ldr's far form uses x16 as its scratch,
+                        // which an earlier in(.. -> x16) may already hold.
+                        emit_a64_mov_imm(rcode, ioff)
+                        emit_a64(0xF8606800 | (rcode << 16) | (31 << 5) | rcode)   // ldr xR, [sp, xR]
+                    } else {
+                        emit_a64_ldr(rcode, 31, ioff)
+                    }
                 }
             }
             uint32 nxti = ast_next(wci)
@@ -6245,6 +6254,7 @@ fn gen_stmt_a64(uint64 node) {
         }
 
         // Outputs: `str xN, [sp, #slot]`
+        ir_asm_note_block(node)    // its registers, for a far slot's scratch (#219)
         uint64 wco = wch_a
         while wco != 0 {
             uint32 ck2 = ast_data1(wco)
@@ -6260,7 +6270,17 @@ fn gen_stmt_a64(uint64 node) {
                 if voff2 == 0xFFFFFFFF && static_lookup(wvtok2) != 0xFFFFFFFF { static_write_check(wvtok2) }
                 asm_require_local(wvtok2, voff2)
                 if rcode2 != 0xFFFF && voff2 != 0xFFFFFFFF {
-                    emit_a64_str(rcode2, 31, a64_var_base + voff2)
+                    uint64 ooff = a64_var_base + voff2
+                    if ooff > 32760 {
+                        // Far slot (#219): emit_a64_str's far form uses x16
+                        // (x17), which a later out(x16 -> v) still has to
+                        // read. Use a scratch the block does not name.
+                        uint64 os = ir_asm_far_scratch(9, 17, rcode2, "no scratch register left to store this out() value to its stack slot: the asm block names every one of x9-x17; leave one of them out of its in()/out()/clobbers()")
+                        emit_a64_mov_imm(os, ooff)
+                        emit_a64(0xF8206800 | (os << 16) | (31 << 5) | rcode2)   // str xR, [sp, xS]
+                    } else {
+                        emit_a64_str(rcode2, 31, ooff)
+                    }
                 }
             }
             uint32 nxto = ast_next(wco)

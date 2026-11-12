@@ -1773,7 +1773,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_ARG (51): move value to CALL0 arg register a2..a7 -----
-    // Mirror of ir_riscv.kr:1545. imm is the 0-based arg index (ir.kr:3783):
+    // Mirror of ir_riscv.kr:1547. imm is the 0-based arg index (ir.kr:3783):
     // < 6 = register arg in a2..a7 (CALL0 ABI — six arg registers, vs
     // riscv's eight a0-a7); >= 100 = direct physical AR target (ASM I/O
     // constraints); 6..99 = overflow arg (the 7th+), stored to the pre-
@@ -1789,8 +1789,11 @@ fn ir_emit_xtensa_insn(uint64 ii) {
             uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
             xt_mv(target, src_reg)
         } else if imm >= 100 {
+            // asm in(): a spilled source reloads straight into the target
+            // (#214: through a8 it destroyed an earlier in(.. -> a8)); the
+            // far form addresses through the target itself (xt_l32i_sp).
             uint64 phys_target = imm - 100
-            uint64 src_reg = xt_resolve_src(s1_v, XT_A8)
+            uint64 src_reg = xt_resolve_src(s1_v, phys_target)
             xt_mv(phys_target, src_reg)
         } else {
             // Overflow arg: the frame reserves XT_OVERFLOW_RESERVE bytes at
@@ -1816,7 +1819,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_CALL (50): call0 <target> with a callee-name fixup -----
-    // Mirror of ir_riscv.kr:1579, but xtensa reaches the callee in a single
+    // Mirror of ir_riscv.kr:1583, but xtensa reaches the callee in a single
     // `call0` (24-bit, PC-relative ±512 KiB) rather than an auipc+jalr pair.
     // src1 is the ARG COUNT (ir.kr:3787), NOT a vreg — never resolve it. imm
     // is the callee's name token. Emit a placeholder call0 (imm18=0) and
@@ -1850,7 +1853,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_CALL_IND (87): callx0 <reg> — indirect through a pointer ----
-    // Mirror of ir_riscv.kr:1633 (jalr through a vreg). fn-pointer vreg in
+    // Mirror of ir_riscv.kr:1637 (jalr through a vreg). fn-pointer vreg in
     // src1, result in a2. callx0 reads the target register before writing a0
     // (return addr), so the pointer may live in the a8 scratch. imm==1 flags
     // an f64 return on other arches; floats are rejected on xtensa by sema,
@@ -2185,9 +2188,21 @@ fn ir_emit_xtensa_insn(uint64 ii) {
             uint64 phys_src = imm - 100
             if dst_r != 0xFFFFFFFF {
                 xt_mv(dst_r, phys_src)
+            } else if xt_spill_offset(dest_v) <= 1020 {
+                // Straight from the asm register (#214): staging it through
+                // a8 destroyed a8 before a later out(a8 -> v).
+                xt_store_spill(phys_src, dest_v)
             } else {
-                xt_mv(XT_A8, phys_src)
-                xt_store_spill(XT_A8, dest_v)
+                // Far slot (#219): xt_s32i_sp addresses through a10 and
+                // refuses to store a10, so `out(a10 -> v)` with a far `v` did
+                // not compile. Use a scratch from a8-a11 the block does not
+                // name and that is not the source.
+                uint64 xo_off = xt_spill_offset(dest_v)
+                xt_check_sp_off(xo_off)
+                uint64 xo_s = ir_asm_far_scratch(8, 11, phys_src, "no scratch register left to store this out() value to its stack slot: the asm block names every one of a8-a11; leave one of them out of its in()/out()/clobbers()")
+                uint64 xo_lo = xo_off & 0xFF
+                xt_addmi(xo_s, XT_SP, xo_off - xo_lo)
+                xt_s32i(phys_src, xo_s, xo_lo)
             }
         } else {
             // Overflow param: load from the caller's frame at
@@ -2209,7 +2224,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // set instruction on core LX6 — the only compare is the fused compare-
     // and-branch — so materialise a 0/1 boolean via a local branch. The IR
     // feeds the boolean vreg into IR_BR_COND (src1) exactly as riscv does
-    // (rv_resolve_src at ir_riscv.kr:2627), so this backend mirrors riscv's
+    // (rv_resolve_src at ir_riscv.kr:2631), so this backend mirrors riscv's
     // "materialise 0/1, then branch on it" shape rather than fusing.
     //
     // Sequence (all displacements tiny + fixed, never relaxed):
@@ -2265,7 +2280,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // imm = byte offset into the string-literal blob. Materialize the address
     // via the PIC sequence (table_sel 0 = strings), resolved against str_start
     // once the string data is laid out (resolve_addr_fixups_xtensa). Mirror of
-    // ir_riscv.kr:1648, adapted to the xtensa PC-anchor addressing model.
+    // ir_riscv.kr:1652, adapted to the xtensa PC-anchor addressing model.
     if op == 79 {
         uint64 rd = dst_r
         if rd == 0xFFFFFFFF { rd = XT_A8 }
@@ -2347,7 +2362,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // through xt_movi_frame — plain movi inside signed-12 (byte-identity with
     // the old path for every pre-existing frame), movi+addmi past it, NEVER
     // the literal pool (nothing here can drift from the pre-scan), loud-fail
-    // past the ADDMI range. Mirror of ir_riscv.kr:2038-2057 (rv_addi_sp_big),
+    // past the ADDMI range. Mirror of ir_riscv.kr:2042-2061 (rv_addi_sp_big),
     // adapted to Xtensa's addi imm8 range via xt_fits_addi / xt_movi_frame +
     // xt_add. STACK_ADDR has no source operands, so a8/a9 are both free
     // scratch here.
@@ -2366,7 +2381,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11308, mirror of ir_riscv.kr:1796-1847): dest =
+    // Semantics (ir.kr:95/11681, mirror of ir_riscv.kr:1800-1851): dest =
     // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
     // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
     // the one emit site, ir.kr:2148). Assume-equal result preset AFTER the
@@ -2431,7 +2446,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCPY (72): byte copy loop -----
-    // Semantics (ir.kr:79, mirror of ir_riscv.kr:1849-1907): dest = returned
+    // Semantics (ir.kr:79, mirror of ir_riscv.kr:1853-1911): dest = returned
     // dst pointer, src1 = dst ptr, src2 = src ptr, imm = the COUNT VREG'S ID
     // (not a literal — same "len vreg in imm" convention riscv/arm64 use).
     // End-pointer loop (cur < end via bltu) rather than riscv's decrement
@@ -2485,13 +2500,13 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         if od != d { xt_mv(d, od) }
         // dest_v==0 for the statement-form lowering (return value discarded) —
         // nothing to spill-store in that case; storing anyway would be a dead
-        // write into the overflow-reserve slot. Mirror of ir_riscv.kr:1905.
+        // write into the overflow-reserve slot. Mirror of ir_riscv.kr:1909.
         if dst_r == 0xFFFFFFFF && dest_v != 0 { xt_store_spill(XT_A8, dest_v) }
         return
     }
 
     // ----- IR_MEMSET (76): byte fill loop -----
-    // Semantics (ir.kr:83, mirror of ir_riscv.kr:1909-1960): dest = returned
+    // Semantics (ir.kr:83, mirror of ir_riscv.kr:1913-1964): dest = returned
     // dst pointer, src1 = dst ptr, src2 = fill-byte VALUE, imm = the COUNT
     // VREG'S ID (same convention as MEMCPY above). End-pointer loop like
     // MEMCPY: cur=a8, end=a10; the fill value never mutates so it stays in
@@ -2534,13 +2549,13 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         uint64 od = xt_resolve_src(s1_v, d)
         if od != d { xt_mv(d, od) }
         // dest_v==0 for the statement-form lowering (return value discarded) —
-        // nothing to spill-store in that case. Mirror of ir_riscv.kr:1958.
+        // nothing to spill-store in that case. Mirror of ir_riscv.kr:1962.
         if dst_r == 0xFFFFFFFF && dest_v != 0 { xt_store_spill(XT_A8, dest_v) }
         return
     }
 
     // ----- IR_STRLEN (73): byte scan loop -----
-    // Semantics (ir.kr:80/2928, mirror of ir_riscv.kr:1703-1738): dest =
+    // Semantics (ir.kr:80/2928, mirror of ir_riscv.kr:1707-1742): dest =
     // length, src1 = NUL-terminated string pointer. cur=a8 (walking ptr),
     // start=a9 (fixed at the original ptr), byte tmp=a10. Loop scans cur
     // forward until a NUL byte (forward beqz -> END, placeholder + patch,
@@ -2573,7 +2588,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_STR_EQ (75): byte-by-byte string compare, no flags -----
-    // Semantics (ir.kr:82/2946, mirror of ir_riscv.kr:1740-1794): dest = 1
+    // Semantics (ir.kr:82/2946, mirror of ir_riscv.kr:1744-1798): dest = 1
     // if equal else 0, src1/src2 = pointers. Mirrors this file's IR_MEMCMP
     // (88) shape but with no length bound: loop body loads both bytes, a
     // mismatch (bne) jumps to NE, a shared NUL (beqz on byteA once bytes
@@ -2626,7 +2641,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // ----- IR_FMT_UINT (74): format uint to buffer -----
     // Semantics (ir.kr:2936-2945, "fmt_uint(buf, val) -> IR_FMT_UINT"): dest
     // = digit count, src1 = output buffer pointer, src2 = value. Mirror of
-    // ir_riscv.kr:1962-2036's two-pass shape, but re-budgeted for Xtensa's
+    // ir_riscv.kr:1966-2040's two-pass shape, but re-budgeted for Xtensa's
     // narrower free-scratch set (a5,a8-a11 = 5 regs vs riscv's a0-a7 = 8):
     // digit loop divides by 10 (native xt_quou/xt_remu, no msub synthesis
     // needed) writing ASCII digits LEAST-significant-first into the frame
@@ -2720,7 +2735,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_ASM_BLOCK (96): inline asm passthrough -----
-    // Mirror of ir_riscv.kr:2237 / ir_aarch64.kr:2717: walk the AsmBlock node's
+    // Mirror of ir_riscv.kr:2241 / ir_aarch64.kr:2744: walk the AsmBlock node's
     // string children (data1 = single-line `asm("...")` form; child list =
     // multi-line `asm { "..."; ... }` form) and hand each to asm_emit_xt. I/O
     // constraints are NOT handled here: their moves are the IR_ARG / IR_COPY
@@ -2730,6 +2745,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // rewritten after the fact — unlike riscv's rv_compress_function).
     if op == 96 {
         uint64 asm_node = s1_v
+        ir_asm_note_block(asm_node)   // for its out() copies (#219)
         uint32 single_tok = ast_data1(asm_node)
         uint64 ws = single_tok
         if ws != 0 {
@@ -2799,7 +2815,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
 }
 
 // --- Codegen driver ------------------------------------------------------
-// Mirror of ir_riscv_gen (ir_riscv.kr:2381), minus the C-compression pass
+// Mirror of ir_riscv_gen (ir_riscv.kr:2385), minus the C-compression pass
 // (there is no compressed relayout on xtensa) and plus the literal-pool
 // emission + self-registration described above.
 fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
@@ -2858,7 +2874,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     }
 
     // 4a. Outgoing-argument overflow reserve — sized to THIS function.
-    //     Port of ir_aarch64.kr:3702-3765 (a64_ovf_slots). Scan the lowered +
+    //     Port of ir_aarch64.kr:3730-3793 (a64_ovf_slots). Scan the lowered +
     //     optimised IR for IR_ARG(51) whose imm selects the overflow path:
     //     imm < XT_NUM_ARG_REGS is a register arg (a2..a7) and imm >= 100 is a
     //     direct physical AR (ASM I/O constraints) — only 6..99 reaches the
@@ -2866,7 +2882,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     //     A function with no such arg (every leaf, and every caller passing
     //     <= 6 args) now reserves ZERO bytes instead of the historical 64.
     //
-    //     ASM ESCAPE HATCH, mirroring ir_aarch64.kr:3763: an IR_ASM_BLOCK body
+    //     ASM ESCAPE HATCH, mirroring ir_aarch64.kr:3791: an IR_ASM_BLOCK body
     //     is opaque to this scan and can store outgoing stack args itself, so
     //     an asm-containing function keeps at least the full historical 64-byte
     //     reserve. (aarch64 assigns its 128 flat; here it is a floor, so an asm
@@ -2937,7 +2953,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
         mc = mc + 1
     }
     // Scratchpad sits between the stack-array region and the callee-saved
-    // block, exactly mirroring ir_riscv.kr:2472-2479 — every downstream
+    // block, exactly mirroring ir_riscv.kr:2476-2483 — every downstream
     // offset (cs_base, saved-reg loops, a0 slot, total_frame) is derived
     // FROM ir_xt_scratch_off, so it shifts automatically with the frame.
     // XT_SCRATCH_SIZE=32 is a multiple of 4, so 16-byte alignment of
@@ -3186,7 +3202,7 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
 
     // 9. Emit basic blocks. IR_RET/IR_RET_VOID are non-terminators here (like
     //    riscv) — emitted in the insn loop. IR_BR/IR_BR_COND terminators emit
-    //    a placeholder branch + a fixup record (mirror of ir_riscv.kr:2597);
+    //    a placeholder branch + a fixup record (mirror of ir_riscv.kr:2601);
     //    displacements are resolved after relaxation (step 9a) so the layout
     //    is final. Conditional branches are BNEZ on the compare's 0/1 boolean
     //    (src1) — the non-fused shape riscv uses.
@@ -3411,7 +3427,7 @@ fn resolve_fixups_xtensa() {
             xt_patch24(wpo, w)
         } else {
             // Undefined function — mirror resolve_fixups_riscv
-            // (ir_riscv.kr:2797): without this the placeholder call0 would
+            // (ir_riscv.kr:2801): without this the placeholder call0 would
             // reach its own (rounded) PC at runtime.
             diag_loc_head(wtt, 0)
             write(2, "undefined function '", 20)
@@ -3471,7 +3487,7 @@ fn resolve_addr_fixups_xtensa(uint64 str_start, uint64 data_start) {
 // bytes), so fn_lookup — which byte-compares via tok_text_eq (length-first)
 // against the bare fn identifier ("dbl" = 3 bytes) — NEVER matches. Strip
 // the quotes and byte-scan fn_table directly. Ported from
-// resolve_fnaddr_fixups_riscv (ir_riscv.kr:2934). NO xt_remap: fn_table code
+// resolve_fnaddr_fixups_riscv (ir_riscv.kr:2938). NO xt_remap: fn_table code
 // offsets are final (code_start never moves — H1). Returns the named
 // function's code offset; loud-fails if undefined. Shared by the lx60
 // resolver above and the esp32 resolver below (pure extraction — the math

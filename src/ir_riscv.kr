@@ -181,7 +181,7 @@ fn rv_vreg_is_float(uint64 vreg) -> uint64 {
 static uint64 RV_OVERFLOW_RESERVE = 64
 
 // Fixed scratchpad slice in every non-@naked frame, mirroring arm64's
-// 32-byte scratchpad (ir_a64_scratch_off, ir_aarch64.kr:18/3851). Ops that
+// 32-byte scratchpad (ir_a64_scratch_off, ir_aarch64.kr:18/3879). Ops that
 // need a small hand-addressed byte buffer (e.g. FMT_UINT's reversed-digit
 // staging area — a 32-bit uint is at most 10 decimal digits) use this
 // instead of stealing a stack-array slot. 32 bytes comfortably covers 10
@@ -228,7 +228,7 @@ fn rv_load_spill(uint64 scratch, uint64 vreg) {
     rv_i(rv_spill_offset(vreg), RV_SP, 2, scratch, 0x03)  // lw scratch, off(sp)
 }
 
-// Mirror of ir_a64_resolve_src (ir_aarch64.kr:878): coloured vregs resolve
+// Mirror of ir_a64_resolve_src (ir_aarch64.kr:883): coloured vregs resolve
 // through the shared ir_get_phys_reg() (colour -> ir_phys_regs[], which
 // ir_regalloc_init_riscv filled via rv_reg_for_color); spilled vregs are
 // reloaded into the caller-provided scratch (t5 or t6).
@@ -1180,7 +1180,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- R-type ALU group: IR_ADD(2) IR_SUB(3) IR_AND(7) IR_OR(8)
     // ----- IR_XOR(9) IR_SHL(10) IR_SHR(11) IR_SAR(134), all reg-reg.
-    // Mirrors the arm64 handlers (ir_aarch64.kr:1323-1534): resolve src1
+    // Mirrors the arm64 handlers (ir_aarch64.kr:1328-1539): resolve src1
     // into t5 / src2 into t6 when spilled, dest falls back to t5 + spill
     // store. In the IR these ops NEVER carry an immediate operand — a
     // constant src2 arrives either as a separate IR_CONST def (reg-reg
@@ -1211,9 +1211,9 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- RV32M group: IR_MUL(4) IR_DIV(5) IR_MOD(6) IR_SDIV(132)
     // ----- IR_SMOD(133), all reg-reg R-type (op=0x33, funct7=0x01).
-    // IR_DIV/IR_MOD are UNSIGNED (mirrors arm64's udiv, ir_aarch64.kr:1362
+    // IR_DIV/IR_MOD are UNSIGNED (mirrors arm64's udiv, ir_aarch64.kr:1367
     // and its udiv+msub synthesis at :1071); IR_SDIV/IR_SMOD are SIGNED
-    // (arm64 sdiv, ir_aarch64.kr:1413/:1118). A signed/unsigned mixup here
+    // (arm64 sdiv, ir_aarch64.kr:1418/:1123). A signed/unsigned mixup here
     // silently corrupts negative-number division/remainder, so keep this
     // mapping in lockstep with the arm64 handlers if either changes.
     // RISC-V has native rem/remu (f3=6/7) — unlike arm64, there is no
@@ -1240,7 +1240,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_ADD_IMM (135) / IR_SUB_IMM (136): dst = src1 ± imm -----
     // Fused by ir_optimize when src2 was a known constant (src2 field is
     // 0; the constant lives in imm — same contract as the x86 LEA path,
-    // ir.kr:9513). There is no `subi` in RV32I: SUB_IMM negates and uses
+    // ir.kr:9884). There is no `subi` in RV32I: SUB_IMM negates and uses
     // addi. An immediate outside −2048..2047 (or a SUB_IMM of −2048,
     // whose negation +2048 doesn't fit) is materialized into t5 with
     // rv_li and emitted as the R-type — never truncated. The li masks to
@@ -1310,7 +1310,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- Compares: unsigned IR_CMP_EQ(14)..IR_CMP_GE(19), signed
     // ----- IR_SCMP_LT(120)..IR_SCMP_GE(123). dest = (src1 OP src2) → 0/1.
-    // Mirrors arm64's cmp+cset pairs (ir_aarch64.kr:1659-1688), but RV32I has
+    // Mirrors arm64's cmp+cset pairs (ir_aarch64.kr:1664-1693), but RV32I has
     // no flags register — lower to slt/sltu plus fixups:
     //   EQ (14):        sub d,a,b ; sltiu d,d,1     (seqz — sign-agnostic)
     //   NE (15):        sub d,a,b ; sltu  d,x0,d    (snez — sign-agnostic)
@@ -1369,11 +1369,11 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_LOAD (30): dest = *(src1), width in imm -----
-    // Mirror of ir_aarch64.kr:1690. Offset is always 0 — struct/array
+    // Mirror of ir_aarch64.kr:1695. Offset is always 0 — struct/array
     // offsets are folded into a prior ADD by the IR lowering, so the
     // address is entirely in src1. Width can arrive in imm OR src2 (struct
     // field loads reuse the src2 slot the same way the x86/arm64 backends
-    // read it — ir_aarch64.kr:1693, ir.kr:10074); the float-backstop block
+    // read it — ir_aarch64.kr:1698, ir.kr:10445); the float-backstop block
     // above already skips the s2 fkind probe for this op for the same
     // reason. IR has no signed-load marking anywhere in ir.kr — x86 uses
     // movzx and arm64 uses ldrb/ldrh (never a sign-extending load) for
@@ -1397,7 +1397,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_STORE (31): *(src1) = src2, width in dest_v -----
-    // Mirror of ir_aarch64.kr:1719. dest_v here is a WIDTH (1/2/4/8), not a
+    // Mirror of ir_aarch64.kr:1724. dest_v here is a WIDTH (1/2/4/8), not a
     // vreg — dst_r above was deliberately left at the sentinel for this op
     // (see the narrowed dst_r assignment / T1.2-review Minor) and MUST NOT
     // be used below. Offset is always 0, address entirely in src1 (same as
@@ -1463,7 +1463,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_COPY (61): dst = src1, or param/phys-reg init -----
-    // Mirror of ir_aarch64.kr:1833. src1 != 0: plain mv. src1 == 0 selects
+    // Mirror of ir_aarch64.kr:1838. src1 != 0: plain mv. src1 == 0 selects
     // on imm: < 8 = incoming param in a0..a7 (RV32 psABI, x10+i, same
     // slot discipline as AAPCS64's x0-x7); >= 100 = ASM-block output read
     // from physical register imm-100; 8..99 = overflow param loaded from
@@ -1492,8 +1492,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
             if dst_r != 0xFFFFFFFF {
                 rv_mv(dst_r, phys_src)
             } else {
-                rv_mv(RV_T5, phys_src)
-                rv_store_spill(RV_T5, dest_v)
+                // Straight from the asm register (#214): staging it through
+                // t5 destroyed t5 before a later out(t5 -> v). riscv32 has
+                // no far-slot path (an offset past 12 bits fails loudly).
+                rv_store_spill(phys_src, dest_v)
             }
         } else {
             // Load from the CALLER's frame at [SP + ir_frame_size +
@@ -1526,7 +1528,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_RET_VOID (43): a0 = 0, branch to epilogue -----
     if op == 43 {
         // Default a0 to 0 so void main() exits with status 0 once the
-        // auto-exit lands (mirrors ir_aarch64.kr:1930's x0 = 0).
+        // auto-exit lands (mirrors ir_aarch64.kr:1946's x0 = 0).
         rv_li(RV_A0, 0)
         uint64 rfp = ir_ret_fixups + ir_ret_fixup_count * 4
         uint32 rpo = out_len
@@ -1537,7 +1539,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_ARG (51): move value to argument register a0-a7 -----
-    // Mirror of ir_aarch64.kr:1939. imm is the 0-based arg index
+    // Mirror of ir_aarch64.kr:1955. imm is the 0-based arg index
     // (ir.kr:3783 is the site): < 8 = register arg in a0-a7 (RV32 psABI,
     // x10+i — same slot discipline as AAPCS64's x0-x7); >= 100 = direct
     // physical register target (ASM I/O constraints); 8..99 = overflow
@@ -1548,9 +1550,11 @@ fn ir_emit_riscv_insn(uint64 ii) {
             uint64 src_reg = rv_resolve_src(s1_v, RV_T5)
             rv_mv(target, src_reg)
         } else if imm >= 100 {
+            // A spilled source reloads straight into the target (#214:
+            // through t5 it destroyed an earlier in(.. -> t5)).
             uint64 phys_target = imm - 100
-            uint64 src_reg = rv_resolve_src(s1_v, RV_T5)
-            rv_mv(phys_target, src_reg)
+            uint64 src_reg = rv_resolve_src(s1_v, phys_target)
+            if src_reg != phys_target || ir_get_phys_reg(s1_v) != 0xFFFFFFFF { rv_mv(phys_target, src_reg) }
         } else {
             // Overflow arg: the frame already reserves RV_OVERFLOW_RESERVE
             // bytes at [SP+0), so SP at the upcoming call sits exactly on
@@ -1568,7 +1572,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_CALL (50): auipc+jalr pair with callee fixup -----
-    // Mirror of ir_aarch64.kr:1988 (BL #0 + fixup). src1 is the ARG COUNT
+    // Mirror of ir_aarch64.kr:2015 (BL #0 + fixup). src1 is the ARG COUNT
     // (ir.kr:3787), NOT a vreg — never resolve it. imm is the callee's
     // name token. The pair
     //     auipc ra, 0        (placeholder, patched to %hi)
@@ -1622,7 +1626,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_CALL_IND (87): indirect call through function pointer -----
-    // Mirror of ir_aarch64.kr:2518 (blr): fn-pointer vreg in src1, result
+    // Mirror of ir_aarch64.kr:2545 (blr): fn-pointer vreg in src1, result
     // in a0. jalr ra, 0(ptr) — reads ptr before writing ra, so ptr may
     // even be ra-adjacent scratch. imm==1 flags an f64 return
     // (call_ptr_f64); floats are rejected on riscv32 by sema and the
@@ -1702,7 +1706,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- IR_STRLEN (73): byte scan loop -----
     // Semantics (ir.kr:80/2928): dest = length, src1 = NUL-terminated string
-    // pointer. Mirrors ir_aarch64.kr:2211-2233: a0 = cur ptr, a1 = start ptr
+    // pointer. Mirrors ir_aarch64.kr:2238-2260: a0 = cur ptr, a1 = start ptr
     // (both from src1), loop scans a0 forward until a NUL byte, then
     // dest = a0 - a1. a0-a2 are free scratch (never colour-mapped, audit
     // §4). Branch targets are resolved by emit-placeholder-then-patch_u32
@@ -1739,7 +1743,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
 
     // ----- IR_STR_EQ (75): byte-by-byte string compare, no flags -----
     // Semantics (ir.kr:82/2946): dest = 1 if equal else 0, src1/src2 =
-    // pointers. Mirrors ir_aarch64.kr:2295-2341 but riscv has no condition
+    // pointers. Mirrors ir_aarch64.kr:2322-2368 but riscv has no condition
     // flags, so the CMP+B.NE pair becomes a direct `bne`. Loop body:
     // lbu both bytes, bne -> NE (mismatch), beqz -> EQ (both hit NUL
     // together = equal), else advance both pointers and loop. a0-a3 free
@@ -1794,10 +1798,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11308): dest = (memcmp(src1, src2, imm) == 0) ? 1
+    // Semantics (ir.kr:95/11681): dest = (memcmp(src1, src2, imm) == 0) ? 1
     // : 0. src1/src2 = pointers, imm = a COMPILE-TIME byte count (not a
     // vreg — struct_total_size() folded in at the one emit site,
-    // ir.kr:2148). Mirrors ir_aarch64.kr:2536-2574: assume-equal result
+    // ir.kr:2148). Mirrors ir_aarch64.kr:2563-2601: assume-equal result
     // pre-set, loop counts down a byte counter, any mismatch jumps to a
     // tail that clears the result; loop-exhaustion (len==0) falls straight
     // through to DONE, leaving the assumed-equal result untouched. No
@@ -1849,10 +1853,10 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_MEMCPY (72): byte copy loop -----
     // Semantics (ir.kr:79, emit sites e.g. ir.kr:2913): dest = returned dst
     // pointer, src1 = dst ptr, src2 = src ptr, imm = the COUNT VREG'S ID
-    // (not a literal — confirmed against both x86 (ir.kr:10425-10426) and
-    // arm64 (ir_aarch64.kr:2172-2181) twins' identical comment/resolution:
+    // (not a literal — confirmed against both x86 (ir.kr:10796-10797) and
+    // arm64 (ir_aarch64.kr:2199-2208) twins' identical comment/resolution:
     // "len vreg in imm" / "Resolve len from imm (stored as vreg index)").
-    // Mirrors ir_aarch64.kr:2173-2209: a0=dst(cur), a1=src(cur), a2=len,
+    // Mirrors ir_aarch64.kr:2200-2236: a0=dst(cur), a1=src(cur), a2=len,
     // count-tested at the TOP of the loop (arm64's CBZ x2,done before the
     // first LDRB) so a zero-length call falls straight through without
     // underflowing the decrement — same shape MEMCMP already uses on this
@@ -1910,8 +1914,8 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // Semantics (ir.kr:83, emit sites e.g. ir.kr:2925): dest = returned dst
     // pointer, src1 = dst ptr, src2 = fill-byte VALUE, imm = the COUNT
     // VREG'S ID (same "len vreg in imm" convention as MEMCPY above —
-    // confirmed against x86 ir.kr:10669-10674 and the arm64 twin's identical
-    // ir_aarch64.kr:2344-2351 resolution). Mirrors ir_aarch64.kr:2344-2373:
+    // confirmed against x86 ir.kr:11040-11045 and the arm64 twin's identical
+    // ir_aarch64.kr:2371-2378 resolution). Mirrors ir_aarch64.kr:2371-2400:
     // a0=dst(cur), a1=val, a2=len, count-tested at the TOP of the loop
     // (CBZ x2,done before the first STRB) so a zero-length call is a
     // no-op. a3 saves the original dst for the return value. a0-a3 are
@@ -1962,9 +1966,9 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_FMT_UINT (74): format uint to buffer -----
     // Semantics (ir.kr:2936-2945, "fmt_uint(buf, val) -> IR_FMT_UINT"):
     // dest = digit count, src1 = output buffer pointer, src2 = value.
-    // Confirmed identical on both existing twins: x86 ir.kr:10505-10583
+    // Confirmed identical on both existing twins: x86 ir.kr:10876-10954
     // ("IR_FMT_UINT: buf in src1, val in src2" ... "rax = digit count
-    // (return value)") and arm64 ir_aarch64.kr:2235-2293 ("format uint to
+    // (return value)") and arm64 ir_aarch64.kr:2262-2320 ("format uint to
     // buffer" ... "Return digit count (x6)"). Mirrors arm64's two-pass
     // shape: digit-extraction loop divides by 10, writing ASCII digits
     // LEAST-significant-first into the frame scratchpad (RV32M has native
@@ -2140,7 +2144,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // handling for op 71 before this — it fell through to the generic
     // rv_nyi_op catch-all at the bottom of this dispatch, so `dealloc()`
     // could never compile on riscv at all. Mirrors arm64's Linux path
-    // (ir_aarch64.kr:2142-2167) with no OS branch: riscv hosted targets are
+    // (ir_aarch64.kr:2169-2194) with no OS branch: riscv hosted targets are
     // Linux-only ELF (Tasks 1-3), there is no Windows/macOS riscv backend.
     // Gated on `freestanding` exactly like op 70 above — a freestanding
     // rv32 image has no OS to service munmap either.
@@ -2174,7 +2178,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // interned name id and NOT the callee-name token IR_CALL's fixups use,
     // so it can't be resolved via fn_lookup(); resolve_fnaddr_fixups_riscv()
     // below strips the quotes and byte-scans fn_table, exactly like
-    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7019-7118). Lower to the
+    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7039-7138). Lower to the
     // same pcrel auipc+addi pair as STR_CONST/STATIC_ADDR (table_sel=2 =
     // fnaddr_fixup_table) — full auipc+addi, NOT arm64's ADR+NOP shortcut:
     // riscv has no single-instruction ±1 MiB pcrel-address op, and jal is a
@@ -2190,7 +2194,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_ROR (137): dst = right-rotate(src1, src2) mod imm(=32) -----
     // RV32IM has NO rotate instruction (Zbb's ror/rori is not in the
     // accepted ISA), so synthesize per audit §7. Produced ONLY by the shared
-    // optimizer's ir_opt_recognize_rotate (ir.kr:14865) from the canonical
+    // optimizer's ir_opt_recognize_rotate (ir.kr:15238) from the canonical
     // `OR(AND(SHR(x,n),0xFFFFFFFF), AND(SHL(x,32-n),0xFFFFFFFF))` idiom; imm
     // is always 32 today, so no 64-bit case. Contract (ir.kr:159):
     //   dst = ((x >> n) | (x << (W - n))) & ((1<<W)-1),  W = 32.
@@ -2235,7 +2239,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_ASM_BLOCK (96): inline asm passthrough -----
-    // Mirror of ir_aarch64.kr:2717-2734: walk the AsmBlock node's string
+    // Mirror of ir_aarch64.kr:2744-2762: walk the AsmBlock node's string
     // children (data1 = single-line form; child list = multi-line form) and
     // hand each to asm_emit_rv. I/O constraints are NOT handled here — they
     // were already lowered to IR_ARG(imm=regcode+100) before this block and
@@ -2286,7 +2290,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
             //
             // The code is NOT in `imm` — `imm` is 231, the exit_group syscall
             // number (ir.kr:2284). The code arrives in a0 via IR_ARG (op 51,
-            // ir_riscv.kr:1547 places arg i at RV_A0 + i), so the magic word
+            // ir_riscv.kr:1549 places arg i at RV_A0 + i), so the magic word
             // must be built at RUNTIME from a0.
             //
             // Only the fail encoding is used: 0x3333 | (0 << 16) exits qemu
@@ -2334,7 +2338,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
             return
         }
         // Args already placed in a0-a5 by IR_ARG. open(2) -> openat(56)
-        // needs the AT_FDCWD arg shift (mirror ir_aarch64.kr:2040-2045).
+        // needs the AT_FDCWD arg shift (mirror ir_aarch64.kr:2067-2072).
         if imm == 2 {
             rv_mv(13, 12)                  // a3 = mode (was a2)
             rv_mv(12, 11)                  // a2 = flags (was a1)
@@ -2375,7 +2379,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
 // Function-level emitter
 // ---------------------------------------------------------------------------
 
-// Mirrors ir_emit_arm64_function(uint64 fn_node) (ir_aarch64.kr:3642), so
+// Mirrors ir_emit_arm64_function(uint64 fn_node) (ir_aarch64.kr:3670), so
 // the arch==2 branch in main.kr's codegen dispatch loop can call this the
 // same way arch==1 calls ir_emit_arm64_function.
 fn ir_riscv_gen(uint64 fn_node) {
@@ -2439,7 +2443,7 @@ fn ir_riscv_gen(uint64 fn_node) {
 
     // 5. Compute frame size — 4-byte slots (RV32), 16-byte aligned SP
     //    (RISC-V psABI). Layout from SP upward (mirror of arm64's
-    //    ir_aarch64.kr:3809-3818 with 4-byte slots):
+    //    ir_aarch64.kr:3837-3846 with 4-byte slots):
     //      [SP + 0 .. RV_OVERFLOW_RESERVE) — outgoing calls' args 9+
     //      [spill slots ...]               — spilled vregs (4 bytes each)
     //      [stack arrays ...]              — compile-time-sized local arrays
@@ -2516,8 +2520,8 @@ fn ir_riscv_gen(uint64 fn_node) {
         // [sp+4]=&argv[0] (ILP32, 4-byte slots). The prologue already lowered sp
         // by total_frame, so argc/argv live at sp+total_frame+{0,4}. Stores go to
         // the data-segment statics via the pcrel pair (table_sel 1 = statics),
-        // exactly like IR_STATIC_STORE (ir_riscv.kr:1696-1701) — NOT sp-relative.
-        // Mirror of codegen_aarch64.kr:6452-6505 (Linux branch), 4-byte words.
+        // exactly like IR_STATIC_STORE (ir_riscv.kr:1700-1705) — NOT sp-relative.
+        // Mirror of codegen_aarch64.kr:6472-6525 (Linux branch), 4-byte words.
         uint32 fn_name_tok_tr = ast_data1(fn_node)
         uint64 wnt_tr = fn_name_tok_tr
         if tok_matches(wnt_tr, "main", 4) != 0 && freestanding == 0 {
@@ -2617,7 +2621,7 @@ fn ir_riscv_gen(uint64 fn_node) {
                 // IR_BR_COND: cond boolean vreg in src1, TRUE-target block
                 // id in imm, FALSE target = this block's succ0 (fall-through
                 // elided when == bi+1). Exact mirror of arm64's CBNZ scheme
-                // (ir_aarch64.kr:4080-4157): branch-if-true via
+                // (ir_aarch64.kr:4108-4185): branch-if-true via
                 // `bne cond, x0, true_target`, then an unconditional
                 // `jal x0, false_target` only when the false edge doesn't
                 // fall through. Fixup kind is encoded in bit 31 of the
@@ -2665,7 +2669,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     }
 
     // 9. Patch branch fixups. Bit 31 of the recorded target field selects
-    //    the patch kind (mirror of arm64's CBNZ bit, ir_aarch64.kr:4173):
+    //    the patch kind (mirror of arm64's CBNZ bit, ir_aarch64.kr:4201):
     //    1 = conditional `bne rs1, x0, disp` (B-type, ±4 KiB via
     //    rv_b_checked — rs1 recovered from the placeholder's bits [19:15]),
     //    0 = unconditional `jal x0, disp` (J-type, ±1 MiB via rv_check_j21).
@@ -2716,7 +2720,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     // 11. Epilogue. Auto-exit for hosted main(): a0 already holds the
     //     return value (IR_RET / IR_RET_VOID set it before jumping here).
     //     exit(93) so main does not `ret` into an undefined ra. Mirrors
-    //     codegen_aarch64.kr:6832-6838. Freestanding keeps the bare ret.
+    //     codegen_aarch64.kr:6852-6858. Freestanding keeps the bare ret.
     uint32 fn_name_tok_rv = ast_data1(fn_node)
     uint64 wnt_rv_ep = fn_name_tok_rv
     if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
@@ -2772,7 +2776,7 @@ fn ir_riscv_gen(uint64 fn_node) {
 // |disp| > 2 GiB - 2 KiB, is unreachable).
 //
 // Both words are fully re-encoded (not read-modify-OR) — the arm64
-// resolver does the same for its BL (codegen_aarch64.kr:6996).
+// resolver does the same for its BL (codegen_aarch64.kr:7016).
 fn resolve_fixups_riscv() {
     uint64 i = 0
     while i < fixup_count {
@@ -2796,7 +2800,7 @@ fn resolve_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | ((RV_RA & 0x1F) << 15) | ((RV_RA & 0x1F) << 7) | 0x67)
         } else {
             // Undefined function — mirror resolve_fixups_a64
-            // (codegen_aarch64.kr:6992): without this the placeholder
+            // (codegen_aarch64.kr:7012): without this the placeholder
             // pair would jump to its own auipc at runtime.
             diag_loc_head(wtt, 0)
             write(2, "undefined function '", 20)
@@ -2828,7 +2832,7 @@ fn resolve_fixups_riscv() {
 //     addi  rd, rd, %lo(disp)  @ site + 4
 // with disp = (str_start + str_offset) - site, pc-relative from the auipc.
 // The +0x800 hi-rounding compensates addi's sign-extension exactly as the
-// call resolver's jalr does (ir_riscv.kr:2791-2796). Pure file-offset math —
+// call resolver's jalr does (ir_riscv.kr:2795-2800). Pure file-offset math —
 // the flat raw image maps file offset 0 to VA 0x8000_0000, so no VA needed.
 // rd is recovered from the placeholder auipc word (the resolver is handed the
 // site, not rd). Both words are fully re-encoded, never read-modify-OR.
@@ -2929,7 +2933,7 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // fn_lookup compares token IDENTITY against that table, not raw source
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
-// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7019-7118), identical to
+// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7039-7138), identical to
 // the x86 resolver (codegen.kr:16027-16091).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
@@ -2942,7 +2946,7 @@ fn resolve_fnaddr_fixups_riscv() {
         unsafe { *(fe4 as uint32) -> str_tok }
 
         // str_tok's text includes the surrounding quotes; strip them to
-        // get the bare function name (mirrors codegen_aarch64.kr:7032-7033).
+        // get the bare function name (mirrors codegen_aarch64.kr:7052-7053).
         uint64 wst = str_tok
         uint64 sstart = tok_text_start(wst)
         uint64 slen = tok_text_len(wst)
@@ -2996,7 +3000,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:16086-16087, codegen_aarch64.kr:7113-7114): without
+            // (codegen.kr:16086-16087, codegen_aarch64.kr:7133-7134): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)
