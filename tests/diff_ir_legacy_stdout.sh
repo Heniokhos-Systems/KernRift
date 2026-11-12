@@ -4,7 +4,9 @@
 # diverge: printing, float formatting, signed-negative arithmetic, struct
 # return-by-value, nested structs, defer, fstrings.
 KRC="${KRC:-./build/krc3}"
-QEMU="$(command -v qemu-aarch64-static || true)"
+. "$(dirname "$0")/helpers/qemu_bin.sh"
+# arm64 natively on an aarch64 host ("env" is a no-op prefix), else qemu (#227).
+if [ "$(uname -m)" = aarch64 ]; then QEMU=env; else QEMU="$(qemu_bin aarch64)"; fi
 TMP=/tmp/diffo_$$
 DIV=0; TOTAL=0
 out_one() {

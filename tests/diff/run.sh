@@ -15,7 +15,7 @@
 #   KRC=<path>      compiler under test (default: ../build/krc2)
 #   KRC_ARCH=...    host arch flag (backend mode only)
 #   DIFF_RUNNER=... binary wrapper for host-arch runs
-#   QEMU_RUNNER=... arm64 runner (crossarch mode; default qemu-aarch64-static)
+#   QEMU_RUNNER=... arm64 runner (crossarch mode; default: tests/helpers/qemu_bin.sh's qemu-aarch64)
 #
 # Exits non-zero on any mismatch. SKIPs don't count as failures.
 
@@ -35,7 +35,8 @@ if [ -z "${KRC_ARCH:-}" ]; then
     esac
 fi
 RUNNER="${DIFF_RUNNER:-}"
-QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64-static}"
+. "$DIR/../helpers/qemu_bin.sh"
+QEMU_RUNNER="${QEMU_RUNNER:-$(qemu_bin aarch64)}"
 
 PASS=0
 FAIL=0
@@ -97,8 +98,8 @@ if [ "$MODE" = "backend" ]; then
     echo ""
     echo "=== diff (backend): $PASS passed, $FAIL failed, $SKIP skipped ($KRC_ARCH) ==="
 elif [ "$MODE" = "crossarch" ]; then
-    if ! command -v "$QEMU_RUNNER" > /dev/null 2>&1; then
-        echo "diff: $QEMU_RUNNER not found; install qemu-user-static" >&2
+    if [ -z "$QEMU_RUNNER" ] || ! command -v "$QEMU_RUNNER" > /dev/null 2>&1; then
+        echo "diff: no qemu-aarch64 runner ('$QEMU_RUNNER'); install qemu-user (or qemu-user-static)" >&2
         exit 2
     fi
     # crossarch walks BOTH corpus/ (legacy-compatible) and ir-only/

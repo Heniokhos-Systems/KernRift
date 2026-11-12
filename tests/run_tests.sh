@@ -86,8 +86,11 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 # row that executes an x86_64 or arm64 artifact should come through here (or
 # or_runner / t10_runner, which do): a row that runs the artifact directly
 # fails with "Exec format error" (rc 2/126/127) on the other arch's host.
-ARCH_QEMU_X86="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
-ARCH_QEMU_A64="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+# qemu_bin (tests/helpers/qemu_bin.sh) is the one qemu-user resolver (#227).
+. "$DIR/helpers/qemu_bin.sh"
+ARCH_QEMU_X86="$(qemu_bin x86_64)"
+ARCH_QEMU_A64="$(qemu_bin aarch64)"
+ARCH_QEMU_RV32="$(qemu_bin riscv32)"
 arch_runner() {
     ARCH_RUNNER=""; ARCH_NORUN=""
     [ "$1" = "$RUN_ARCH" ] && return 0
@@ -1553,7 +1556,7 @@ VBIND_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then VBIND_OTHER="x86_64"; fi
 VBIND_QEMU=""
 if [ "$VBIND_OTHER" = "arm64" ]; then
-    VBIND_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    VBIND_QEMU="$(qemu_bin aarch64)"
 fi
 printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  volatile { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_v_$$.kr"
 printf 'fn main() { u64 p = alloc(64)  store32(p, 4)  unsafe { *(p as u32) -> v }  exit(v / 2) }\n' > "$DIR/../vbind_u_$$.kr"
@@ -1614,7 +1617,7 @@ CEVAL_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then CEVAL_OTHER="x86_64"; fi
 CEVAL_QEMU=""
 if [ "$CEVAL_OTHER" = "arm64" ]; then
-    CEVAL_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    CEVAL_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. arr[i()] OP= v() -- index once, then value => seq 12, and arr[3] == 5+7.
@@ -1727,7 +1730,7 @@ SHA_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then SHA_OTHER="x86_64"; fi
 SHA_QEMU=""
 if [ "$SHA_OTHER" = "arm64" ]; then
-    SHA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    SHA_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. arr[i()] <<= v() -- index once, then value => seq 12, and arr[3] == 5<<3.
@@ -1845,7 +1848,7 @@ FEVAL_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then FEVAL_OTHER="x86_64"; fi
 FEVAL_QEMU=""
 if [ "$FEVAL_OTHER" = "arm64" ]; then
-    FEVAL_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    FEVAL_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. Both bounds evaluated once, in source order, and the loop still runs the
@@ -2031,7 +2034,7 @@ TSLOT_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then TSLOT_OTHER="x86_64"; fi
 TSLOT_QEMU=""
 if [ "$TSLOT_OTHER" = "arm64" ]; then
-    TSLOT_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    TSLOT_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. Indexed store into a static array; the SUBSCRIPT clobbers the slot.
@@ -2160,7 +2163,7 @@ EORD_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then EORD_OTHER="x86_64"; fi
 EORD_QEMU=""
 if [ "$EORD_OTHER" = "arm64" ]; then
-    EORD_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    EORD_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. Deref store: address expression, then value.
@@ -2550,7 +2553,7 @@ ASLOT_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then ASLOT_OTHER="x86_64"; fi
 ASLOT_QEMU=""
 if [ "$ASLOT_OTHER" = "arm64" ]; then
-    ASLOT_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    ASLOT_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. The repro: a builtin call nested in another builtin's argument list.
@@ -2741,7 +2744,7 @@ DMA_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then DMA_OTHER="x86_64"; fi
 DMA_QEMU=""
 if [ "$DMA_OTHER" = "arm64" ]; then
-    DMA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    DMA_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. arr[i()] /= v() -- index once, then value => seq 12, and arr[3] == 30/4.
@@ -3383,7 +3386,7 @@ SSTR_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then SSTR_OTHER="x86_64"; fi
 SSTR_QEMU=""
 if [ "$SSTR_OTHER" = "arm64" ]; then
-    SSTR_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    SSTR_QEMU="$(qemu_bin aarch64)"
 fi
 SSTR_HDR='struct Point { u64 x  u64 y }
 static Point[10] pts
@@ -3543,7 +3546,7 @@ fnfar_gen() { # <fwd|back> <nfuncs> <out>
 FNFAR_RUN=""
 if [ "$RUN_ARCH" = "arm64" ]; then FNFAR_RUN="native"
 else
-    FNFAR_RUN="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    FNFAR_RUN="$(qemu_bin aarch64)"
 fi
 if [ -n "$FNFAR_RUN" ]; then
     TOTAL=$((TOTAL + 1))
@@ -4698,7 +4701,7 @@ rm -f /tmp/krc_chktc_$$.kr
 # first. A signed `let` mis-resolved on a non-first slice flips the comparison.
 # We build a fat (.krbo) binary, then run its ARM64 slice (the 2nd slice — the
 # one the bug skipped) via an arm64 runner under qemu.
-QEMU_A64="$(command -v qemu-aarch64-static || true)"
+QEMU_A64="$(qemu_bin aarch64)"
 if [ -n "$QEMU_A64" ]; then
     TOTAL=$((TOTAL + 1))
     printf 'fn main() { i64 a = 0 - 5\n let r = a\n if r < 0 { exit(9) }\n exit(0) }\n' > /tmp/krc_c2_$$.kr
@@ -5681,13 +5684,38 @@ rm -f /tmp/krc_asm_err_$$.kr /tmp/krc_asm_err_$$
 run_test_output "str_escape_newline" 'fn main() { print("a\nb"); exit(0) }' "a
 b"
 
+# --- qemu_resolver_single_site (#227) ---
+# qemu_bin (tests/helpers/qemu_bin.sh) is the only place a test script turns
+# an arch into a qemu-user binary. Sites used to probe the "-static" name
+# alone, so on a host whose qemu-user ships only plain names (Ubuntu 26.04)
+# their rows skipped -- or, behind a silent `continue`, passed on one leg. The
+# row fails on any literal qemu-<name>-static left in a tests/**/*.sh script
+# (the Debian package name qemu-user-static is not a binary and is allowed),
+# on a diff script that does not source the resolver, and on a resolver that
+# does not prefer "-static", fall back to the plain name, and print nothing
+# (status 1) when neither exists -- checked against fake binaries on a
+# private PATH.
+TOTAL=$((TOTAL + 1))
+QRS_BAD=""
+QRS_HITS=$(find "$DIR" -type f -name '*.sh' | LC_ALL=C sort | xargs grep -nHE 'qemu-[a-z0-9_]+-static' 2> /dev/null | grep -v 'qemu-user-static' | sed "s|^$DIR/|tests/|" | cut -c1-120 | tr '\n' '|')
+[ -z "$QRS_HITS" ] || QRS_BAD="$QRS_BAD literal sites: $QRS_HITS;"
+for QRS_F in diff_ir_legacy.sh diff_ir_legacy_stdout.sh diff/run.sh; do
+    grep -q 'helpers/qemu_bin\.sh"' "$DIR/$QRS_F" || QRS_BAD="$QRS_BAD tests/$QRS_F does not source the resolver;"
+done
+QRS_P=$(mktemp -d "${TMPDIR:-/tmp}/qrs.XXXXXX")
+mkdir -p "$QRS_P/both" "$QRS_P/plain" "$QRS_P/none"
+QRS_S=-static   # spelled apart so this row does not match its own pattern
+for QRS_N in both/qemu-zz9$QRS_S both/qemu-zz9 plain/qemu-zz9; do printf '#!/bin/sh\nexit 0\n' > "$QRS_P/$QRS_N"; chmod +x "$QRS_P/$QRS_N"; done
+QRS_G=$(PATH="$QRS_P/both" qemu_bin zz9); [ "$QRS_G" = "$QRS_P/both/qemu-zz9$QRS_S" ] || QRS_BAD="$QRS_BAD both names: got '$QRS_G' (want the -static one);"
+QRS_G=$(PATH="$QRS_P/plain" qemu_bin zz9); [ "$QRS_G" = "$QRS_P/plain/qemu-zz9" ] || QRS_BAD="$QRS_BAD plain name only: got '$QRS_G';"
+QRS_G=$(PATH="$QRS_P/none" qemu_bin zz9); QRS_RC=$?
+[ -z "$QRS_G" ] && [ "$QRS_RC" = 1 ] || QRS_BAD="$QRS_BAD neither: got '$QRS_G' rc $QRS_RC (want nothing, rc 1);"
+rm -rf "$QRS_P"
+if [ -z "$QRS_BAD" ]; then PASS=$((PASS + 1)); echo "  qemu_resolver_single_site: PASS (no literal -static site in tests/**/*.sh, the diff scripts source qemu_bin, which prefers -static, falls back to the plain name and reports neither)"
+else FAIL=$((FAIL + 1)); echo "FAIL: qemu_resolver_single_site ($QRS_BAD)"; fi
+
 # --- ARM64 cross-compilation tests via QEMU ---
-QEMU_A64=""
-if command -v qemu-aarch64-static > /dev/null 2>&1; then
-    QEMU_A64="qemu-aarch64-static"
-elif command -v qemu-aarch64 > /dev/null 2>&1; then
-    QEMU_A64="qemu-aarch64"
-fi
+QEMU_A64="$ARCH_QEMU_A64"
 
 if [ -n "$QEMU_A64" ] && [ "$ARCH" = "x86_64" ]; then
     echo ""
@@ -6941,9 +6969,7 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 #                        fmt_uint_stops_static_cse above.
 # riscv32 has no atomics, no vstore64 and no asm bindings in this compiler
 # (each is a compile error there), so those rows are x86_64 and arm64 only.
-QEMU_RV32=""
-if command -v qemu-riscv32-static > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32-static"
-elif command -v qemu-riscv32 > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32"; fi
+QEMU_RV32="$ARCH_QEMU_RV32"
 # x86_64 and arm64 binaries run natively on their own host arch; elsewhere
 # through qemu-user (arch_runner), named rather than left to binfmt, so a row
 # knows it is emulated (the time_ns row checks a trace instead).
@@ -10441,8 +10467,8 @@ fn main() -> uint64 {
 KREOF
 nakedalt_err=""
 if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf >/dev/null 2>&1; then
-    if command -v qemu-aarch64-static >/dev/null 2>&1; then
-        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-aarch64-static /tmp/krc_nakedalt_$$; nart=$?
+    if [ -n "$ARCH_QEMU_A64" ]; then
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_A64" /tmp/krc_nakedalt_$$; nart=$?
         [ "$nart" = "7" ] || nakedalt_err="ran-and-gave-$nart-want-7"
         if [ -z "$nakedalt_err" ]; then
             PASS=$((PASS + 1)); echo "  naked_alternative_out_constraint_works: PASS (read cntvct_el0 into a variable)"
@@ -10450,7 +10476,7 @@ if $KRC --arch=arm64 /tmp/krc_nakedalt_$$.kr -o /tmp/krc_nakedalt_$$ --emit=elf 
             FAIL=$((FAIL + 1)); echo "FAIL: naked_alternative_out_constraint_works ($nakedalt_err)"
         fi
     else
-        skip_row naked_alternative_out_constraint_works "compiles; no qemu-aarch64-static to run it"
+        skip_row naked_alternative_out_constraint_works "compiles; no qemu-aarch64 to run it"
     fi
 else
     FAIL=$((FAIL + 1))
@@ -12205,8 +12231,8 @@ fi
 # the other arch, under an emulator when one is present
 if [ "$RUN_ARCH" = "x86_64" ]; then va_other=arm64; else va_other=x86_64; fi
 va_emu=""
-[ "$va_other" = "arm64" ] && va_emu="$(command -v qemu-aarch64-static || true)"
-[ "$va_other" = "x86_64" ] && va_emu="$(command -v qemu-x86_64-static || true)"
+[ "$va_other" = "arm64" ] && va_emu="$(qemu_bin aarch64)"
+[ "$va_other" = "x86_64" ] && va_emu="$(qemu_bin x86_64)"
 if [ -n "$va_emu" ]; then
     if $KRC --arch=$va_other "$DIR/../vattr_tmp_$$.kr" -o /tmp/vattr2_$$ >/dev/null 2>&1; then
         chmod +x /tmp/vattr2_$$
@@ -14053,8 +14079,8 @@ fi
 #     silently dropped; at least one leg runs on every host this suite
 #     supports (x86_64 or arm64), and a host where none can is a FAIL.
 TOTAL=$((TOTAL + 1))
-OSPA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
-OSPA_QEMU_X86="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+OSPA_QEMU="$(qemu_bin aarch64)"
+OSPA_QEMU_X86="$(qemu_bin x86_64)"
 OSPA_WHY=""
 OSPA_RAN=""
 for ospa in "x86_64 1" "arm64 2"; do
@@ -16923,7 +16949,7 @@ IARG_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then IARG_OTHER="x86_64"; fi
 IARG_QEMU=""
 if [ "$IARG_OTHER" = "arm64" ]; then
-    IARG_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    IARG_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1a. A parameter used ZERO times must not delete its argument.
@@ -19248,7 +19274,7 @@ fi
 # Compiles examples/riscv-hosted/exit_code.kr, which is the Task 1
 # hosted-emission smoke test: `fn main() -> uint32 { return 42 }` compiled
 # WITHOUT --freestanding must produce a real Elf32 ET_EXEC (e_machine=243)
-# that runs directly under qemu-riscv32-static (the user-mode emulator, as
+# that runs directly under qemu-riscv32 (the user-mode emulator, as
 # opposed to qemu-system-riscv32 -bios used by the freestanding checks
 # above) and exits with the returned value. Distinct from the freestanding
 # suite: no UART, no -bios boot -- this exercises emit_elf_header_rv32() /
@@ -19256,18 +19282,18 @@ fi
 # auto-exit ecall main() gets in ir_riscv.kr's epilogue.
 echo ""
 echo "--- riscv32 hosted ELF (exit code) test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ]; then
     TOTAL=$((TOTAL + 1))
     RV_BIN="/tmp/krc_rv_exit_$$.bin"
     if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/exit_code.kr" -o "$RV_BIN" >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_exit_code (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_hosted_exit_code: PASS (qemu-riscv32-static exited 42)"
+            echo "  riscv_hosted_exit_code: PASS (qemu-riscv32 exited 42)"
         else
             echo "FAIL: riscv_hosted_exit_code (got exit $rc, want 42)"
             FAIL=$((FAIL + 1))
@@ -19275,7 +19301,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_exit_code "qemu-riscv32-static not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_exit_code "no qemu-riscv32"
 fi
 
 # riscv32 allocation-failure contract. The only asserting coverage the rv32
@@ -19288,7 +19314,7 @@ fi
 # asserted alongside the OOM leg.
 echo ""
 echo "--- riscv32 alloc failure contract ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ]; then
     TOTAL=$((TOTAL + 1))
     RV_A_SRC="/tmp/krc_rv_alloc_$$.kr"
     RV_A_BIN="/tmp/krc_rv_alloc_$$.bin"
@@ -19310,7 +19336,7 @@ RVEOF
         echo "FAIL: riscv_alloc_oom_returns_zero (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_A_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_A_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "44" ]; then
             PASS=$((PASS + 1))
@@ -19322,29 +19348,29 @@ RVEOF
     fi
     rm -f "$RV_A_SRC" "$RV_A_BIN"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_alloc_oom_returns_zero "qemu-riscv32-static not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_alloc_oom_returns_zero "no qemu-riscv32"
 fi
 
 # Compiles examples/riscv-hosted/hello.kr, which is the Task 2 hosted-syscall
 # smoke test: `write(1, "hello riscv\n", 12)` followed by `return 0` compiled
 # WITHOUT --freestanding must produce a hosted Elf32 ET_EXEC that, when run
-# under qemu-riscv32-static, actually invokes the Linux write(2) syscall
+# under qemu-riscv32, actually invokes the Linux write(2) syscall
 # (a7=64 ecall) and prints the string to stdout. Distinct from
 # riscv_hosted_exit_code above: that test only exercises the auto-exit path;
 # this one exercises IR_SYSCALL (op 52) lowering in ir_riscv.kr.
 echo ""
 echo "--- riscv32 hosted syscall (write) test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ]; then
     TOTAL=$((TOTAL + 1))
     RV_BIN="/tmp/krc_rv_hello_$$.bin"
     if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/hello.kr" -o "$RV_BIN" >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_hello (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_BIN" 2>/dev/null)
         if [ "$RV_OUT" = "hello riscv" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_hosted_hello: PASS (qemu-riscv32-static printed 'hello riscv')"
+            echo "  riscv_hosted_hello: PASS (qemu-riscv32 printed 'hello riscv')"
         else
             echo "FAIL: riscv_hosted_hello (got '$RV_OUT', want 'hello riscv')"
             FAIL=$((FAIL + 1))
@@ -19352,7 +19378,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_hello "qemu-riscv32-static not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_hello "no qemu-riscv32"
 fi
 
 # --- riscv32 hosted struct-arg by-value + by-reference method self ---
@@ -19363,7 +19389,7 @@ fi
 # Exit code packs the checks: each adds a distinct value, total 42.
 echo ""
 echo "--- riscv32 hosted struct-param semantics test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ]; then
     TOTAL=$((TOTAL + 1))
     RV_SP_KR="/tmp/krc_rv_structparam_$$.kr"
     RV_SP_BIN="/tmp/krc_rv_structparam_$$.bin"
@@ -19396,7 +19422,7 @@ RVSP
         echo "FAIL: riscv_hosted_struct_param (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_SP_BIN" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_SP_BIN" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
@@ -19408,7 +19434,7 @@ RVSP
     fi
     rm -f "$RV_SP_KR" "$RV_SP_BIN"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_struct_param "qemu-riscv32-static not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_struct_param "no qemu-riscv32"
 fi
 
 # Same hello.kr as riscv_hosted_hello above, but WITH --freestanding: a
@@ -19437,17 +19463,17 @@ rm -f /tmp/krc_rv_fs_syscall_$$.bin
 # main prologue, not just a bare write().
 echo ""
 echo "--- riscv32 hosted main entry trampoline (argv) test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ]; then
     TOTAL=$((TOTAL + 1))
     RV_BIN="/tmp/krc_rv_echo_$$.bin"
     if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/echo_argv.kr" -o "$RV_BIN" >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_argv (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" HELLO 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_BIN" HELLO 2>/dev/null)
         if [ "$RV_OUT" = "HELLO" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_hosted_argv: PASS (qemu-riscv32-static echoed 'HELLO')"
+            echo "  riscv_hosted_argv: PASS (qemu-riscv32 echoed 'HELLO')"
         else
             echo "FAIL: riscv_hosted_argv (got '$RV_OUT', want 'HELLO')"
             FAIL=$((FAIL + 1))
@@ -19455,7 +19481,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_argv "qemu-riscv32-static not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_argv "no qemu-riscv32"
 fi
 
 # Compiles examples/riscv-hosted/heap.kr, the Task 4 hosted-heap test:
@@ -19468,17 +19494,17 @@ fi
 # IR_ALLOC as a loud NYI (see ir_riscv.kr op 70 gate on `freestanding`).
 echo ""
 echo "--- riscv32 hosted heap (mmap2) test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ]; then
     TOTAL=$((TOTAL + 1))
     RV_BIN="/tmp/krc_rv_heap_$$.bin"
     if ! $KRC --arch=riscv32 "$DIR/../examples/riscv-hosted/heap.kr" -o "$RV_BIN" >/dev/null 2>&1; then
         echo "FAIL: riscv_hosted_heap (compilation failed)"
         FAIL=$((FAIL + 1))
     else
-        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_BIN" 2>/dev/null)
+        RV_OUT=$(timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_BIN" 2>/dev/null)
         if [ "$RV_OUT" = "ok" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_hosted_heap: PASS (qemu-riscv32-static printed 'ok')"
+            echo "  riscv_hosted_heap: PASS (qemu-riscv32 printed 'ok')"
         else
             echo "FAIL: riscv_hosted_heap (got '$RV_OUT', want 'ok')"
             FAIL=$((FAIL + 1))
@@ -19486,7 +19512,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1; then
     fi
     rm -f "$RV_BIN"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_heap "qemu-riscv32-static not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_heap "no qemu-riscv32"
 fi
 
 # Compiles examples/riscv-hosted/obj_single.kr with --emit=obj (equiv `-c`),
@@ -19496,13 +19522,13 @@ fi
 # this proves the Elf32 container/symtab/shdr layout in isolation before
 # Task 6 adds cross-object extern-call relocations. Needs both
 # riscv64-linux-gnu-ld (to link the freestanding .o into a runnable image)
-# and qemu-riscv32-static. Distinct from riscv_hosted_exit_code/hello/argv/
+# and qemu-riscv32. Distinct from riscv_hosted_exit_code/hello/argv/
 # heap above: those compile straight to a hosted ET_EXEC; this one goes
 # through emit_elf_relocatable_rv32()'s ET_REL container and a real link
 # step.
 echo ""
 echo "--- riscv32 hosted Elf32 relocatable (.o) test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ] && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
     TOTAL=$((TOTAL + 1))
     RV_OBJ="/tmp/krc_rv_obj_$$.o"
     RV_LINKED="/tmp/krc_rv_obj_$$"
@@ -19513,11 +19539,11 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
         echo "FAIL: riscv_hosted_obj_single (link failed)"
         FAIL=$((FAIL + 1))
     else
-        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_LINKED" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_hosted_obj_single: PASS (qemu-riscv32-static exited 42)"
+            echo "  riscv_hosted_obj_single: PASS (qemu-riscv32 exited 42)"
         else
             echo "FAIL: riscv_hosted_obj_single (got exit $rc, want 42)"
             FAIL=$((FAIL + 1))
@@ -19525,7 +19551,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
     fi
     rm -f "$RV_OBJ" "$RV_LINKED"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_obj_single "qemu-riscv32-static or riscv64-linux-gnu-ld not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_obj_single "no qemu-riscv32 or no riscv64-linux-gnu-ld"
 fi
 
 # Compiles examples/riscv-hosted/link_a.kr and link_b.kr as SEPARATE
@@ -19537,13 +19563,13 @@ fi
 # emit_elf_relocatable_rv32 emits one R_RISCV_CALL_PLT (type 19) against
 # symbol `addfive` at the auipc call site (has_relocs flips to 1, .rela.text
 # is emitted). Linking both objects with `riscv64-linux-gnu-ld -m elf32lriscv
-# -e main` and running under qemu-riscv32-static must exit 42 (addfive(37) ==
+# -e main` and running under qemu-riscv32 must exit 42 (addfive(37) ==
 # 42). Distinct from riscv_hosted_obj_single: that object has no extern calls
 # and skips .rela.text entirely; this pair proves the relocation is recorded,
 # emitted, and honored by a real cross-object link.
 echo ""
 echo "--- riscv32 hosted cross-object extern-call link test ---"
-if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
+if [ -n "$ARCH_QEMU_RV32" ] && command -v riscv64-linux-gnu-ld >/dev/null 2>&1; then
     TOTAL=$((TOTAL + 1))
     RV_LA="/tmp/krc_rv_la_$$.o"
     RV_LB="/tmp/krc_rv_lb_$$.o"
@@ -19558,11 +19584,11 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
         echo "FAIL: riscv_hosted_link (link failed)"
         FAIL=$((FAIL + 1))
     else
-        timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-riscv32-static "$RV_LINKED" >/dev/null 2>&1
+        timeout -k 5 "$RUN_TEST_TIMEOUT" "$ARCH_QEMU_RV32" "$RV_LINKED" >/dev/null 2>&1
         rc=$?
         if [ "$rc" = "42" ]; then
             PASS=$((PASS + 1))
-            echo "  riscv_hosted_link: PASS (qemu-riscv32-static exited 42)"
+            echo "  riscv_hosted_link: PASS (qemu-riscv32 exited 42)"
         else
             echo "FAIL: riscv_hosted_link (got exit $rc, want 42)"
             FAIL=$((FAIL + 1))
@@ -19570,7 +19596,7 @@ if command -v qemu-riscv32-static >/dev/null 2>&1 && command -v riscv64-linux-gn
     fi
     rm -f "$RV_LA" "$RV_LB" "$RV_LINKED"
 else
-    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_link "qemu-riscv32-static or riscv64-linux-gnu-ld not installed"
+    TOTAL=$((TOTAL + 1)); skip_row riscv_hosted_link "no qemu-riscv32 or no riscv64-linux-gnu-ld"
 fi
 
 # --- RISC-V RV32IMC --emit=asm disassembler golden-parity test (Task 7) ---
@@ -20727,7 +20753,7 @@ fi
 printf 'fn main() {\n    uint64[4] a\n    uint64 v = a[99]\n    println(v)\n    exit(0)\n}\n' > "$T6_D/oob.kr"
 
 # arm64 IR: this row EXECUTES its artifact, so it is built for arm64
-# deliberately and run under qemu-aarch64-static rather than natively --
+# deliberately and run under qemu-aarch64 rather than natively --
 # never native-executed on a mismatched host.
 if [ -n "$QEMU_A64" ]; then
     TOTAL=$((TOTAL + 1))
@@ -20745,7 +20771,7 @@ if [ -n "$QEMU_A64" ]; then
     fi
     rm -f "$T6_D/oob_ir_a64"
 else
-    TOTAL=$((TOTAL + 1)); skip_row t6_debug_arm64_ir_still_traps "no qemu-aarch64-static"
+    TOTAL=$((TOTAL + 1)); skip_row t6_debug_arm64_ir_still_traps "no qemu-aarch64"
 fi
 
 # x86_64 legacy and x86_64 obj: these rows EXECUTE their artifact natively
@@ -27820,7 +27846,7 @@ if [ "$CA_A64_ST" = "0" ] && [ -s "$CA_BIN" ]; then
 else
     echo "FAIL: call_args_64_accepted_arm64 (exit $CA_A64_ST: '$CA_A64_ERR')"; FAIL=$((FAIL + 1))
 fi
-CA_QEMU="$(command -v qemu-aarch64-static || true)"
+CA_QEMU="$(qemu_bin aarch64)"
 if [ -n "$CA_QEMU" ] && [ -s "$CA_BIN" ]; then
     TOTAL=$((TOTAL + 1))
     chmod +x "$CA_BIN"; RT_T0=$SECONDS; timeout -k 5 "$RUN_TEST_TIMEOUT" "$CA_QEMU" "$CA_BIN" >/dev/null 2>&1; CA_RUN=$?
@@ -27963,7 +27989,7 @@ fi
 # PINNED TO x86_64, AND NOT BECAUSE OF THE HOST. The 6-argument cap is a
 # property of the x86 lowering ONLY. codegen_aarch64.kr's own call_ptr
 # lowering loads x0-x7 and spills the rest to the stack, so arm64 legacy has
-# NO 6-arg defect -- measured under qemu-aarch64-static: 7 args -> 28, 8 -> 36,
+# NO 6-arg defect -- measured under qemu-aarch64: 7 args -> 28, 8 -> 36,
 # both correct. Running this row at $RUN_ARCH would therefore FAIL on an
 # aarch64 host (RUN_ARCH becomes arm64, the build succeeds at rc 0, the row
 # expects a refusal) -- and this project has a native ARM64 CI job, so that is
@@ -28689,7 +28715,7 @@ fi
 # Cross-compile the same program to arm64 and run it under qemu. Without this
 # the whole defect is invisible to an x86_64 runner -- the host check above
 # only ever exercises one backend.
-FCO_QEMU="$(command -v qemu-aarch64-static || true)"
+FCO_QEMU="$(qemu_bin aarch64)"
 if [ -n "$FCO_QEMU" ]; then
     TOTAL=$((TOTAL + 1))
     rm -f "$FCO_BIN"
@@ -29759,7 +29785,7 @@ PDRF_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then PDRF_OTHER="x86_64"; fi
 PDRF_QEMU=""
 if [ "$PDRF_OTHER" = "arm64" ]; then
-    PDRF_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    PDRF_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. Store: the poison must be replaced by the EXACT bits of 2.5, all 64 of
@@ -29946,7 +29972,7 @@ SFFA_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then SFFA_OTHER="x86_64"; fi
 SFFA_QEMU=""
 if [ "$SFFA_OTHER" = "arm64" ]; then
-    SFFA_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    SFFA_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. The minimal shape: a string-literal argument 0 after a float statement.
@@ -30088,7 +30114,7 @@ FNSO_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then FNSO_OTHER="x86_64"; fi
 FNSO_QEMU=""
 if [ "$FNSO_OTHER" = "arm64" ]; then
-    FNSO_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    FNSO_QEMU="$(qemu_bin aarch64)"
 fi
 FNSO_WANT=$(cat <<'FNSO_EXPECT'
 nan_f32=NaN
@@ -30164,7 +30190,7 @@ FKN_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then FKN_OTHER="x86_64"; fi
 FKN_QEMU=""
 if [ "$FKN_OTHER" = "arm64" ]; then
-    FKN_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    FKN_QEMU="$(qemu_bin aarch64)"
 fi
 
 # 1. bool and char through every arithmetic op. Was exit 1 on both IR
@@ -30264,7 +30290,7 @@ F16RT_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then F16RT_OTHER="x86_64"; fi
 F16RT_QEMU=""
 if [ "$F16RT_OTHER" = "arm64" ]; then
-    F16RT_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    F16RT_QEMU="$(qemu_bin aarch64)"
 fi
 cat > "$DIR/../f16rt_$$.kr" <<'F16RT_SRC'
 import "std/io.kr"
@@ -30381,7 +30407,7 @@ FSE_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then FSE_OTHER="x86_64"; fi
 FSE_QEMU=""
 if [ "$FSE_OTHER" = "arm64" ]; then
-    FSE_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    FSE_QEMU="$(qemu_bin aarch64)"
 fi
 FSE_EXP_RUNS=2
 if [ -n "$FSE_QEMU" ]; then FSE_EXP_RUNS=4; fi
@@ -30582,7 +30608,7 @@ MRC_OTHER="arm64"
 if [ "$RUN_ARCH" = "arm64" ]; then MRC_OTHER="x86_64"; fi
 MRC_QEMU=""
 if [ "$MRC_OTHER" = "arm64" ]; then
-    MRC_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    MRC_QEMU="$(qemu_bin aarch64)"
 fi
 MRC_EXP_RUNS=2
 if [ -n "$MRC_QEMU" ]; then MRC_EXP_RUNS=4; fi
@@ -30792,11 +30818,9 @@ fi
 bcb_runner() {
     if [ "$1" = "$RUN_ARCH" ]; then echo ""; return 0; fi
     if [ "$1" = "arm64" ]; then
-        if command -v qemu-aarch64-static > /dev/null 2>&1; then echo "qemu-aarch64-static"; return 0; fi
-        if command -v qemu-aarch64 > /dev/null 2>&1; then echo "qemu-aarch64"; return 0; fi
+        qemu_bin aarch64 && return 0
     else
-        if command -v qemu-x86_64-static > /dev/null 2>&1; then echo "qemu-x86_64-static"; return 0; fi
-        if command -v qemu-x86_64 > /dev/null 2>&1; then echo "qemu-x86_64"; return 0; fi
+        qemu_bin x86_64 && return 0
     fi
     echo "SKIP"   # tripwire: not a skip -- bcb_runner's sentinel value, read by its callers
 }
@@ -32750,9 +32774,9 @@ rm -rf "$DUP_D"
 ALI_D=$(mktemp -d /tmp/kralias_XXXXXX)
 ALI_FX="$DIR/fixtures/alias_byte_addr.kr"
 if [ "$RUN_ARCH" = "arm64" ]; then
-    ALI_OTHER=x86_64; ALI_QEMU="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+    ALI_OTHER=x86_64; ALI_QEMU="$(qemu_bin x86_64)"
 else
-    ALI_OTHER=arm64; ALI_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+    ALI_OTHER=arm64; ALI_QEMU="$(qemu_bin aarch64)"
 fi
 ALI_WINE="$(wine_path)"
 ali_check() {   # <row> <rc> <stdout file>
@@ -32804,7 +32828,7 @@ WFE_D=$(mktemp -d /tmp/krwfe_XXXXXX)
 WFE_FX="$DIR/fixtures"
 WFE_KRC="$DIR/../build/krc2"
 WFE_WINE="$(wine_path)"
-WFE_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+WFE_QEMU="$(qemu_bin aarch64)"
 WFE_SHAPE="$DIR/helpers/win_file_err_shape.py"
 # Lines the Windows rows do not compare (none: every probe is compared).
 WFE_SKIP=''
@@ -33167,14 +33191,14 @@ rm -rf "$ALI_D"
 # argv it got plus the untouched GetCommandLineA line. arm64 has no Windows
 # runner: the hidden --dump-argv-parser= / --dump-argv-quoter= flags write the
 # two leaves, rows prove those bytes are the ones a PE embeds, and
-# argv_leafrun.kr runs the SAME tables on them under qemu-aarch64-static. The
+# argv_leafrun.kr runs the SAME tables on them under qemu-aarch64. The
 # expected files are hand-written (UCRT rules), shared by both arches.
 C7_D=/tmp/krc_c7_$$
 mkdir -p "$C7_D/run" "$C7_D/pfx" "$C7_D/pfxja"
 C7_FX="$DIR/fixtures"
 C7_KRC="$DIR/../build/krc2"
 C7_WINE="$(wine_path)"
-C7_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+C7_QEMU="$(qemu_bin aarch64)"
 c7_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 c7_bad() { FAIL=$((FAIL + 1)); echo "  $1: FAIL ($2 )"; }
 c7_skip() { skip_row "$1" "$2"; }
@@ -34741,7 +34765,7 @@ fi
 # win_abi_frames (#143 A6a, spec 8.5; the RSP alignment probe and the real-call
 # check after the phase-2 review, M2 and Minor 6): the Windows-ABI frame shapes RUN. The
 # std-free corpus is built --freestanding --target=windows (Windows code, ELF
-# container) and executed natively and under qemu-x86_64-static: ten-parameter
+# container) and executed natively and under qemu-x86_64: ten-parameter
 # calls, frames over a page and over 64 KiB, leaf and non-leaf, recursion. The
 # program checks its own results (exit N = check N failed).
 PEU_FR="$DIR/fixtures/win_abi_frames/frames_x86_64.kr"
@@ -34753,7 +34777,7 @@ peu_both_kinds() {
     PEU_KINDS="$(grep -c ' SP-fixed ' <<< "$o") SP-fixed, $(grep -c ' SP-moving ' <<< "$o") SP-moving"
     grep -q ' SP-fixed ' <<< "$o" && grep -q ' SP-moving ' <<< "$o"
 }
-PEU_QX="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+PEU_QX="$(qemu_bin x86_64)"
 # peu_f10_calls <listing>: the number of `call rel32` instructions whose target
 # is f10's first byte (phase-2 review Minor 6: the AST inliner once removed
 # every ten-parameter call without any row noticing; the rows now require
@@ -34795,7 +34819,7 @@ elif PEU_C=$(peu_f10_calls "$T10_D/peu_fr.s"); [ "$PEU_C" != 4 ]; then
 elif ! peu_both_kinds x86_64 "$T10_D/peu_fr.s"; then
     pe_row_bad win_abi_frames_exec_x86_64_ir "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QX" ]; then
-    pe_row_skip win_abi_frames_exec_x86_64_ir "no qemu-x86_64-static"
+    pe_row_skip win_abi_frames_exec_x86_64_ir "no qemu-x86_64"
 else
     chmod +x "$T10_D/peu_fr"
     PEU_N=x
@@ -34822,7 +34846,7 @@ elif PEU_C=$(peu_f10_calls "$T10_D/peu_frl.s"); [ "$PEU_C" != 4 ]; then
 elif ! peu_both_kinds x86_64 "$T10_D/peu_frl.s"; then
     pe_row_bad win_abi_frames_exec_x86_64_legacy "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QX" ]; then
-    pe_row_skip win_abi_frames_exec_x86_64_legacy "no qemu-x86_64-static"
+    pe_row_skip win_abi_frames_exec_x86_64_legacy "no qemu-x86_64"
 else
     chmod +x "$T10_D/peu_frl"
     PEU_N=x
@@ -34836,12 +34860,12 @@ else
 fi
 # The arm64 corpus (#143 A9a, spec 5.1 / 8.5): the same compute corpus plus
 # d8-d15 saves, high register pressure and the SP alignment probe, built
-# --freestanding --target=windows --arch=arm64 and run under qemu-aarch64-static
+# --freestanding --target=windows --arch=arm64 and run under qemu-aarch64
 # (an arm64 ELF is entered with SP 16-aligned, as a Windows thread is, so no
 # trampoline). Like the x86_64 rows it requires real calls to f10 in the
 # listing (`bl` targets decoded from the byte column).
 PEU_FRA="$DIR/fixtures/win_abi_frames/frames_arm64.kr"
-PEU_QA="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+PEU_QA="$(qemu_bin aarch64)"
 peu_f10_bl() {
     python3 -B - "$1" <<'PEUF10AEOF' 2>&1
 import re, sys
@@ -34881,7 +34905,7 @@ elif PEU_C=$(peu_f10_bl "$T10_D/peu_fra.s"); [ "$PEU_C" != 4 ]; then
 elif ! peu_both_kinds arm64 "$T10_D/peu_fra.s"; then
     pe_row_bad win_abi_frames_exec_arm64_ir "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QA" ]; then
-    pe_row_skip win_abi_frames_exec_arm64_ir "no qemu-aarch64-static"
+    pe_row_skip win_abi_frames_exec_arm64_ir "no qemu-aarch64"
 else
     chmod +x "$T10_D/peu_fra"
     timeout 120 "$PEU_QA" "$T10_D/peu_fra" > /dev/null 2>&1; PEU_Q=$?
@@ -34899,7 +34923,7 @@ elif PEU_C=$(peu_f10_bl "$T10_D/peu_fral.s"); [ "$PEU_C" != 4 ]; then
 elif ! peu_both_kinds arm64 "$T10_D/peu_fral.s"; then
     pe_row_bad win_abi_frames_exec_arm64_legacy "the listing lacks an SP-fixed or an SP-moving function ($PEU_KINDS)"
 elif [ -z "$PEU_QA" ]; then
-    pe_row_skip win_abi_frames_exec_arm64_legacy "no qemu-aarch64-static"
+    pe_row_skip win_abi_frames_exec_arm64_legacy "no qemu-aarch64"
 else
     chmod +x "$T10_D/peu_fral"
     timeout 120 "$PEU_QA" "$T10_D/peu_fral" > /dev/null 2>&1; PEU_Q=$?
@@ -35546,8 +35570,8 @@ done
 # differ by exactly 1000 x its loop body's disassembled length, on x86_64 and
 # arm64 -- the counting method the perf gate (tests/gates/pe_unwind_perf.sh)
 # relies on.
-if ! command -v qemu-x86_64-static > /dev/null 2>&1 || ! command -v qemu-aarch64-static > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
-    pe_row_skip perf_insn_count_calibration "needs qemu-x86_64-static, qemu-aarch64-static and llvm-objdump"
+if [ -z "$ARCH_QEMU_X86" ] || [ -z "$ARCH_QEMU_A64" ] || ! command -v llvm-objdump > /dev/null 2>&1; then
+    pe_row_skip perf_insn_count_calibration "needs qemu-x86_64, qemu-aarch64 and llvm-objdump"
 else
     PEU_O=$(PEU_PERF_TMP="$T10_D" bash "$DIR/gates/pe_unwind_perf.sh" --calibration-only "$T10_KRC" "$T10_D/peu_perf" 2>&1); PEU_RC=$?
     if [ "$PEU_RC" = 0 ]; then pe_row_ok perf_insn_count_calibration "$(grep '^calibration' <<< "$PEU_O" | sed 's/^calibration //' | tr '\n' ';')"
@@ -35680,11 +35704,11 @@ fi
 # read path: the KRBOFAT v2 container, the LZ4 frames with LZ-Rift blocks, the
 # inverse BCJ filters. Self-check: the linux slices it extracts from a fat
 # binary must behave exactly as the runner itself executing that .krbo --
-# natively on x86_64 and, for arm64, the arm64 runner under qemu-aarch64-static
+# natively on x86_64 and, for arm64, the arm64 runner under qemu-aarch64
 # (the fat_slice_let_arm64 pattern) -- same stdout, same exit status.
-PEU_QA2="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+PEU_QA2="$(qemu_bin aarch64)"
 if ! command -v python3 > /dev/null 2>&1; then pe_row_skip krbo_slices_selftest "no python3"
-elif [ -z "$PEU_QA2" ]; then pe_row_skip krbo_slices_selftest "no qemu-aarch64-static"
+elif [ -z "$PEU_QA2" ]; then pe_row_skip krbo_slices_selftest "no qemu-aarch64"
 else
     PEU_WHY=""
     printf 'fn main() -> uint32 {\n    uint64 s = 0\n    uint64 i = 0\n    while i < 10 { s = s + i * i  i = i + 1 }\n    println(s)\n    println("slices")\n    return 23\n}\n' > "$T10_D/peu_fat.kr"
@@ -36994,10 +37018,8 @@ lip_run lip_fstr_escapes "$(printf 't\tn\\5q"zA{}')" 0 --legacy
 LIP_A64_RUN=""
 if [ "$(uname -m)" = "aarch64" ]; then
     LIP_A64_RUN="direct"
-elif command -v qemu-aarch64-static > /dev/null 2>&1; then
-    LIP_A64_RUN="qemu-aarch64-static"
-elif command -v qemu-aarch64 > /dev/null 2>&1; then
-    LIP_A64_RUN="qemu-aarch64"
+else
+    LIP_A64_RUN="$(qemu_bin aarch64)"
 fi
 if [ -n "$LIP_A64_RUN" ]; then
     for lip_mode in ir legacy; do

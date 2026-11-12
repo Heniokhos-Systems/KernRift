@@ -166,10 +166,16 @@ lip_run lip_fstr_escapes "$(printf 't\tn\\5q"zA{}')" 0 --legacy
 LIP_A64_RUN=""
 if [ "$(uname -m)" = "aarch64" ]; then
     LIP_A64_RUN="direct"
+#@kr{
+else
+    LIP_A64_RUN="$(qemu_bin aarch64)"
+#@}
+#@mlr{
 elif command -v qemu-aarch64-static > /dev/null 2>&1; then
     LIP_A64_RUN="qemu-aarch64-static"
 elif command -v qemu-aarch64 > /dev/null 2>&1; then
     LIP_A64_RUN="qemu-aarch64"
+#@}
 fi
 if [ -n "$LIP_A64_RUN" ]; then
     for lip_mode in ir legacy; do

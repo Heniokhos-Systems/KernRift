@@ -203,14 +203,14 @@ fi
 #   compilers -- base ab51c92, the guard commit daf57b7, and HEAD -- and run
 #   on every target among these 12 rows that can be executed here:
 #
-#     --arch=riscv32 {IR, --legacy, --O0}, qemu-riscv32-static
+#     --arch=riscv32 {IR, --legacy, --O0}, qemu-riscv32
 #         rc=209 from all three compilers in all three configs (9 runs)
 #     --arch=riscv32 --freestanding, qemu-system-riscv32 -machine virt -bios
 #         status=209 from all three compilers
 #     --arch=xtensa --freestanding, qemu-system-xtensa -M lx60 -semihosting
 #         status=209 from all three compilers
 #     --arch=x86_64 and --arch=arm64, {IR, --O0}
-#         rc=209 from all three compilers (arm64 under qemu-aarch64-static)
+#         rc=209 from all three compilers (arm64 under qemu-aarch64)
 #
 #   and the declined inline is visible in the artifact: `call @` in main for
 #   --emit=ir --arch=riscv32 goes 1 (base) -> 2 (HEAD), the second being add3.

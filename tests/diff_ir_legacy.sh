@@ -1,7 +1,7 @@
 #!/bin/bash
 # Differential test: IR vs legacy backends, x86_64 + arm64.
 # For each program, compile+run through all four backends and compare exit codes.
-# Any disagreement is a parity bug. arm64 runs under qemu-aarch64-static if present.
+# Any disagreement is a parity bug. arm64 runs natively on an aarch64 host, else under qemu-aarch64 if present.
 KRC="${KRC:-./build/krc3}"
 # A stale $KRC silently invalidates every row here. It bit us once as a false
 # RED (a Jun-10 krc3 still refused `continue` in a `for` loop, which the
@@ -19,7 +19,9 @@ else
     echo "ERROR: $KRC does not exist. Set KRC= or run 'make build'." >&2
     exit 2
 fi
-QEMU="$(command -v qemu-aarch64-static || true)"
+. "$(dirname "$0")/helpers/qemu_bin.sh"
+# arm64 natively on an aarch64 host ("env" is a no-op prefix), else qemu (#227).
+if [ "$(uname -m)" = aarch64 ]; then QEMU=env; else QEMU="$(qemu_bin aarch64)"; fi
 TMP=/tmp/difftest_$$
 DIV=0; TOTAL=0; KNOWN=0
 run_one() { # arch flags -> echoes exit code or "CERR"

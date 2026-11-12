@@ -10,7 +10,7 @@
 #                    cross-compile + host-run, or "--arch=arm64 --emit=android"
 #                    for Android)
 #   SMOKE_RUNNER=<cmd>  — wrapper to invoke binaries under (e.g.
-#                         "qemu-aarch64-static" for ARM64 via emulation).
+#                         "qemu-aarch64" for ARM64 via emulation).
 #
 # Expected exit code for each test is encoded in a single-line comment at
 # the top of each .kr as "// expected: <N>". Defaults to 0.

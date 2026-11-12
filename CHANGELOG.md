@@ -64,6 +64,14 @@ by design. They are now `sys_net_ifaces_*_broadcast_is_the_kernels` and check ag
 `ip -4 -o addr`; three new rows pin the no-`brd` case without depending on the host. No compiler
 or library change.
 
+**Every test script finds qemu under either name (#227).** `tests/helpers/qemu_bin.sh` is now
+the one place a test script turns an arch into a qemu-user binary: `qemu-<arch>-static` if
+present, else plain `qemu-<arch>` (all Ubuntu 26.04's `qemu-user` ships). Some 50 sites in
+`tests/run_tests.sh` and the IR-vs-legacy diff scripts probed the `-static` name alone, so on such
+a host their rows skipped or quietly ran one leg. Row `qemu_resolver_single_site` keeps it that
+way.
+
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF
