@@ -974,7 +974,7 @@ to fixpoint, then a forward **NOP-out** sweep that sets `opcode = 0`
 lists; terminators survive via `ir_opt_is_side_effect`. It crosses blocks.
 *Breaking invariant:* the operand-shape exclusion list in `ir_opt_dce` (which
 opcodes really read `src2`, and the imm-as-vreg set `{72, 76, 83, 93, 98,
-148}`) is **duplicated verbatim in seven other places — eight copies in total**.
+148}`) is **duplicated verbatim in eight other places — nine copies in total**.
 See §14 for the full list; any divergence between them miscompiles.
 
 **`ir_opt_cse` (`src/ir.kr:14340`)** — strictly **intra-block**. Hashes
@@ -1666,8 +1666,8 @@ removed; do not re-add them without re-verifying.
     the side-effect set minus a pinned exemption list. §10.
 14. **Duplicated operand-shape tables.** The "which opcodes really read
     `src2`" exclusion list and the imm-is-a-vreg set `{72, 76, 83, 93, 98,
-    148}` are written out **EIGHT separate times**, all in `src/ir.kr`. Adding
-    an opcode with an unusual operand shape means editing **all eight**; any
+    148}` are written out **NINE separate times**, all in `src/ir.kr`. Adding
+    an opcode with an unusual operand shape means editing **all nine**; any
     divergence miscompiles.
 
     | enclosing function |
@@ -1677,6 +1677,7 @@ removed; do not re-add them without re-verifying.
     | `ir_seed_wide_ceilings_generic` |
     | `ir_naked_diagnose_generic` |
     | `ir_graph_color` |
+    | `ir_seed_asm_bans` |
     | `ir_x86_xmm_mark_unsafe` |
     | `ir_opt_dce` |
     | `ir_lea_mem_reads` |
@@ -1697,7 +1698,10 @@ removed; do not re-add them without re-verifying.
     The eighth copy, `ir_naked_diagnose_generic`, arrived with the `@naked`
     callee-saved fix: it walks liveness backwards per instruction to find
     values a naked body keeps across a call, and under-approximating that
-    walk turns a warning the implementer needs into silence.
+    walk turns a warning the implementer needs into silence. The ninth,
+    `ir_seed_asm_bans`, arrived with #214: it walks liveness backwards to
+    find the values live after each instruction of an asm window, and
+    under-approximating that walk drops a ban -- a silent miscompile.
 
 **Stale comments that have already misled this document**
 

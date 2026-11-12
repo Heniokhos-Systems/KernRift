@@ -13851,12 +13851,12 @@ rm -f "$PCI_SRC" "$PCI_IMG"
 TOTAL=$((TOTAL + 1))
 opshape_pat='^[[:space:]]*if op == 72 \|\| op == 76 \|\| op == 83 \|\| op == 93 \|\| op == 98 \|\| op == 148 \{[[:space:]]*$'
 opshape_src=$(grep -cE "$opshape_pat" "$DIR/../src/ir.kr")
-opshape_doc=$(grep -c 'EIGHT separate times' "$DIR/../docs/IR_REFERENCE.md")
-if [ "$opshape_src" = "8" ] && [ "$opshape_doc" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (8 verbatim copies, doc agrees)"
+opshape_doc=$(grep -c 'NINE separate times' "$DIR/../docs/IR_REFERENCE.md")
+if [ "$opshape_src" = "9" ] && [ "$opshape_doc" = "1" ]; then
+    PASS=$((PASS + 1)); echo "  ir_operand_shape_copies_pinned: PASS (9 verbatim copies, doc agrees)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src verbatim copies, want 8; docs/IR_REFERENCE.md §14 says EIGHT: $opshape_doc match)"
+    echo "FAIL: ir_operand_shape_copies_pinned (src has $opshape_src verbatim copies, want 9; docs/IR_REFERENCE.md §14 says NINE: $opshape_doc match)"
     echo "  if a copy no longer matches verbatim, the copies have diverged (that miscompiles);"
     echo "  if you changed the number of copies, update docs/IR_REFERENCE.md §14 in the same commit"
 fi
