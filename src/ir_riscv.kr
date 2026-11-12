@@ -2934,7 +2934,7 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
 // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7039-7138), identical to
-// the x86 resolver (codegen.kr:16027-16091).
+// the x86 resolver (codegen.kr:16082-16146).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
     while i < fnaddr_fixup_count {
@@ -3000,7 +3000,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:16086-16087, codegen_aarch64.kr:7133-7134): without
+            // (codegen.kr:16141-16142, codegen_aarch64.kr:7133-7134): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)

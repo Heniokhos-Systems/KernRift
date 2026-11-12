@@ -14910,6 +14910,21 @@ fn scan_assigns(uint64 node, uint64 target_offset) -> uint64 {
         uint64 off = var_lookup(vn)
         if off == target_offset { return 1 }
     }
+    // Inline asm (43): out(reg -> var) writes var (#214).
+    if wk == 43 {
+        uint32 ac = ast_data3(node)
+        uint64 wac = ac
+        while wac != 0 {
+            uint32 ack = ast_data1(wac)
+            if ack == 1 {
+                uint32 avt = ast_data3(wac)
+                uint64 aoff = var_lookup(avt)
+                if aoff == target_offset { return 1 }
+            }
+            uint32 anx = ast_next(wac)
+            wac = anx
+        }
+    }
     // Recurse into child chain
     uint32 ch = ast_child(node)
     uint64 wch = ch
@@ -14926,6 +14941,43 @@ fn scan_assigns(uint64 node, uint64 target_offset) -> uint64 {
         uint32 d2 = ast_data2(node)
         uint64 wd2 = d2
         if scan_assigns(wd2, target_offset) != 0 { return 1 }
+    }
+    return 0
+}
+
+// Does an inline-asm block in this subtree name x86_64 register `code` in
+// in(), out() or clobbers()? Such a block writes that register, so parameter
+// 0 cannot stay pinned in it (#214). Uses the NON-exiting x86_reg_try: an
+// unknown name is reported, located, by the lowering (asm_check_constraints),
+// not from this pre-scan. Walks exactly what scan_assigns walks.
+fn scan_asm_writes_reg(uint64 node, uint64 code) -> uint64 {
+    if node == 0 { return 0 }
+    uint32 kind = ast_kind(node)
+    uint64 wk = kind
+    if wk == 43 {
+        uint32 ac = ast_data3(node)
+        uint64 wac = ac
+        while wac != 0 {
+            uint32 art = ast_data2(wac)
+            if x86_reg_try(art) == code { return 1 }
+            uint32 anx = ast_next(wac)
+            wac = anx
+        }
+    }
+    uint32 ch = ast_child(node)
+    uint64 wch = ch
+    while wch != 0 {
+        if scan_asm_writes_reg(wch, code) != 0 { return 1 }
+        uint32 nxt = ast_next(wch)
+        wch = nxt
+    }
+    if wk == 13 || wk == 14 || wk == 15 || wk == 19 || wk == 20 {
+        uint32 d1 = ast_data1(node)
+        uint64 wd1 = d1
+        if scan_asm_writes_reg(wd1, code) != 0 { return 1 }
+        uint32 d2 = ast_data2(node)
+        uint64 wd2 = d2
+        if scan_asm_writes_reg(wd2, code) != 0 { return 1 }
     }
     return 0
 }
@@ -15190,7 +15242,10 @@ fn gen_function(uint64 fn_node) {
     // Disable pinning when sret is active (rdi holds sret pointer, not first param)
     if is_naked == 0 && pidx_scan <= 6 && target_os != 2 && p0_is_float == 0 && p0_is_struct == 0 && sret_slot == 0xFFFFFFFF {
         if p0_off != 0xFFFFFFFF && wbs != 0 {
-            if scan_assigns(wbs, p0_off) == 0 {
+            // #214: nor when an asm block names rbx (its in() move, its
+            // body or its out() would overwrite the pinned value), nor when
+            // an asm out() writes the parameter (scan_assigns, kind 43).
+            if scan_assigns(wbs, p0_off) == 0 && scan_asm_writes_reg(wbs, 3) == 0 {
                 pin_param0_offset = p0_off
             }
         }
