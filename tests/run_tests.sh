@@ -77,6 +77,28 @@ KRC_FLAGS="${KRC_FLAGS:---arch=$ARCH}"
 # inspected rather than run (--emit=ir/obj/lkm/android).
 RUN_ARCH="x86_64"
 if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
+# arch_runner A: how THIS host runs a Linux binary built with --arch=A. Sets
+# ARCH_RUNNER to the command prefix -- empty when A is the host's own arch (an
+# arm64 binary runs natively on an aarch64 host, an x86_64 one on an x86_64
+# host), a qemu-user binary otherwise -- and returns 0; when the host can run
+# it neither way it returns 1 with ARCH_NORUN naming what is missing, for the
+# caller's skip_row (so under REQUIRE_FULL_RUN=1 it is still a FAIL). Every
+# row that executes an x86_64 or arm64 artifact should come through here (or
+# or_runner / t10_runner, which do): a row that runs the artifact directly
+# fails with "Exec format error" (rc 2/126/127) on the other arch's host.
+ARCH_QEMU_X86="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+ARCH_QEMU_A64="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+arch_runner() {
+    ARCH_RUNNER=""; ARCH_NORUN=""
+    [ "$1" = "$RUN_ARCH" ] && return 0
+    case $1 in
+        x86_64) ARCH_RUNNER="$ARCH_QEMU_X86"; ARCH_NORUN="no qemu-x86_64 (x86_64 binaries on an $ARCH host)" ;;
+        arm64) ARCH_RUNNER="$ARCH_QEMU_A64"; ARCH_NORUN="no qemu-aarch64 (arm64 binaries on an $ARCH host)" ;;
+        *) ARCH_NORUN="arch_runner: no Linux runner for '$1'" ;;
+    esac
+    [ -n "$ARCH_RUNNER" ] && { ARCH_NORUN=""; return 0; }
+    return 1
+}
 PASS=0
 FAIL=0
 SKIP=0
@@ -6754,14 +6776,11 @@ fn main() {
 }'
 for FCSE_ARCH in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
-    FCSE_RUN=""
-    if [ "$FCSE_ARCH" = "arm64" ]; then
-        if [ -z "$QEMU_A64" ]; then
-            skip_row "fmt_uint_stops_static_cse arm64" "no qemu-aarch64"
-            continue
-        fi
-        FCSE_RUN="$QEMU_A64"
+    if ! arch_runner $FCSE_ARCH; then
+        skip_row "fmt_uint_stops_static_cse $FCSE_ARCH" "$ARCH_NORUN"
+        continue
     fi
+    FCSE_RUN="$ARCH_RUNNER"
     printf '%s\n' "$FCSE_SRC" > /tmp/krc_fcse_$$.mlr
     rm -f /tmp/krc_fcse_$$
     FCSE_GOT="no binary"
@@ -6800,14 +6819,11 @@ for WB_KIND in memset memcpy store; do
     esac
     for WB_ARCH in x86_64 arm64; do
         TOTAL=$((TOTAL + 1))
-        WB_RUN=""
-        if [ "$WB_ARCH" = "arm64" ]; then
-            if [ -z "$QEMU_A64" ]; then
-                skip_row "write_builtins_stop_static_cse $WB_KIND arm64" "no qemu-aarch64"
-                continue
-            fi
-            WB_RUN="$QEMU_A64"
+        if ! arch_runner $WB_ARCH; then
+            skip_row "write_builtins_stop_static_cse $WB_KIND $WB_ARCH" "$ARCH_NORUN"
+            continue
         fi
+        WB_RUN="$ARCH_RUNNER"
         printf 'static u8[8] sbuf\nstatic u8[8] gbuf\nstatic u64 g = 7\nfn probe_layout() -> u64 {\n    u64 p = gbuf + 8\n    unsafe { *(p as u64) = 1234 }\n    return g\n}\nfn main() {\n    if probe_layout() != 1234 { exit(99) }\n    g = 7\n    memset(sbuf, 9, 1)\n    u64 a = g\n%s\n    u64 b = g\n    exit(b - a + 50)\n}\n' "$WB_STMT" > /tmp/krc_wbcse_$$.kr
         rm -f /tmp/krc_wbcse_$$
         WB_GOT="no binary"
@@ -6928,11 +6944,9 @@ rm -f /tmp/krc_mpcse_$$.kr /tmp/krc_mpcse_$$.s
 QEMU_RV32=""
 if command -v qemu-riscv32-static > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32-static"
 elif command -v qemu-riscv32 > /dev/null 2>&1; then QEMU_RV32="qemu-riscv32"; fi
-# x86_64 binaries run natively only on an x86_64 host; elsewhere (the native
-# ARM64 CI job) through qemu-x86_64, named here rather than left to binfmt,
-# so a row knows it is emulated (the time_ns row checks a trace instead).
-OR_HOST=$(uname -m)
-OR_QEMU_X86="$(command -v qemu-x86_64-static || command -v qemu-x86_64 || true)"
+# x86_64 and arm64 binaries run natively on their own host arch; elsewhere
+# through qemu-user (arch_runner), named rather than left to binfmt, so a row
+# knows it is emulated (the time_ns row checks a trace instead).
 OR_PAD=""
 for ((OR_PI = 1; OR_PI <= 150; OR_PI++)); do OR_PAD="$OR_PAD    acc = acc * 3 + $OR_PI
 "; done
@@ -6951,19 +6965,15 @@ or_main() {
 or_shape_name() {
     case $1 in S) printf '' ;; L) printf ' loop' ;; B) printf ' big' ;; esac
 }
-# or_runner ARCH ROW -> sets OR_R to the runner prefix, or skips the row (and
-# returns 1) when the arch's qemu is missing. The row is already in TOTAL.
+# or_runner ARCH ROW -> sets OR_R to the runner prefix (empty = native), or
+# skips the row (and returns 1) when the host cannot run ARCH's binaries. The
+# row is already in TOTAL.
 or_runner() {
     OR_R=""
     case $1 in
-        x86_64)
-            if [ "$OR_HOST" != x86_64 ] && [ "$OR_HOST" != amd64 ]; then
-                if [ -z "$OR_QEMU_X86" ]; then skip_row "$2" "no qemu-x86_64 (x86_64 binaries on an $OR_HOST host)"; return 1; fi
-                OR_R="$OR_QEMU_X86"
-            fi ;;
-        arm64)
-            if [ -z "$QEMU_A64" ]; then skip_row "$2" "no qemu-aarch64"; return 1; fi
-            OR_R="$QEMU_A64" ;;
+        x86_64|arm64)
+            if ! arch_runner $1; then skip_row "$2" "$ARCH_NORUN"; return 1; fi
+            OR_R="$ARCH_RUNNER" ;;
         riscv32)
             if [ -z "$QEMU_RV32" ]; then skip_row "$2" "no qemu-riscv32"; return 1; fi
             OR_R="$QEMU_RV32 -R 0x20000000" ;;
@@ -7101,12 +7111,13 @@ rm -f /tmp/krc_or_$$.kr /tmp/krc_or_$$
 #   time_ns 119           x86_64: prctl(PR_SET_SECCOMP, STRICT), time_ns(),
 #                         raw exit(50): clock_gettime is not allowed in
 #                         strict mode, so the kernel kills the program
-#                         (137); deleted, it exits 50. arm64: qemu-aarch64
-#                         refuses seccomp, so the row runs the program under
-#                         `qemu-aarch64 -strace` and wants a clock_gettime
-#                         call in the trace; so does x86_64 on a non-x86_64
-#                         host, where qemu-x86_64 runs it and refuses seccomp
-#                         too. Not on riscv32 (no time_ns there)
+#                         (137); deleted, it exits 50. arm64 natively (an
+#                         aarch64 host) does the same with arm64's numbers
+#                         (prctl 167, exit 93). Under qemu-user, which refuses
+#                         seccomp, the row runs the program with `-strace`
+#                         and wants a clock_gettime call in the trace: arm64
+#                         on a non-aarch64 host, x86_64 on a non-x86_64 host.
+#                         Not on riscv32 (no time_ns there)
 #   exec 113 / exec_argv 114    exec /bin/true                 0
 #   set_exec 115                chmod +x of a scratch file     the row checks -x
 #   arr_check 131 (--debug)     arr[5] on a 2-element array    1 (the trap)
@@ -7237,8 +7248,12 @@ for OR2_K in $OR2_CASES; do
                              [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; }
                          fi ;;
                 arm64)   OR2_UD="0x00000000"
-                         OR2_TIME='time_ns()'
-                         [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; } ;;
+                         if [ -n "$OR_R" ]; then
+                             OR2_TIME='time_ns()'
+                             [ "$OR2_K" = "time_ns" ] && { OR2_WANT_A=traced; OR_R="$OR_R -strace"; }
+                         else
+                             OR2_TIME='syscall_raw(167, 22, 1, 0, 0, 0, 0)\n    time_ns()\n    syscall_raw(93, 50, 0, 0, 0, 0, 0)'
+                         fi ;;
                 riscv32) OR2_UD="0x00000000"; OR2_W=u32 ;;
             esac
             rm -f /tmp/krc_or2_$$.x
@@ -9082,25 +9097,25 @@ fn main() -> uint64 {
 }
 KREOF
 constprec_err=""
+constprec_norun=""
 for cparch in x86_64 arm64; do
     cprun=""
-    if [ "$cparch" = "x86_64" ]; then
-        $KRC /tmp/krc_constprec_$$.kr --arch=x86_64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
-            && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_constprec_$$ 2>&1)
-    elif command -v qemu-aarch64-static >/dev/null 2>&1; then
-        $KRC /tmp/krc_constprec_$$.kr --arch=arm64 -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
-            && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" qemu-aarch64-static /tmp/krc_constprec_$$ 2>&1)
-    else
-        continue
-    fi
+    # A leg this host cannot run is named, and the row is then a counted SKIP
+    # (unless another leg FAILed): it used to drop the arm64 leg silently and
+    # PASS on x86_64 alone, and to FAIL on an arm64 host without qemu-x86_64.
+    if ! arch_runner $cparch; then constprec_norun="$constprec_norun $cparch: $ARCH_NORUN;"; continue; fi
+    $KRC /tmp/krc_constprec_$$.kr --arch=$cparch -o /tmp/krc_constprec_$$ >/dev/null 2>&1 \
+        && cprun=$(timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER /tmp/krc_constprec_$$ 2>&1)
     if [ -z "$cprun" ]; then constprec_err="$constprec_err $cparch:no-output"; continue; fi
     # Every line is "<folded> <runtime>" -- they must be equal, and there must
     # be one line per static, so a program that died halfway cannot pass.
     cpbad=$(printf '%s\n' "$cprun" | awk 'NF!=2 || $1!=$2 {print NR": "$0} END{if (NR!=12) print "line-count "NR" want 12"}')
     [ -n "$cpbad" ] && constprec_err="$constprec_err $cparch:[$cpbad]"
 done
-if [ -z "$constprec_err" ]; then
-    PASS=$((PASS + 1)); echo "  const_fold_agrees_with_runtime: PASS (12 expressions, folded == evaluated)"
+if [ -z "$constprec_err" ] && [ -n "$constprec_norun" ]; then
+    skip_row const_fold_agrees_with_runtime "a leg could not run:$constprec_norun"
+elif [ -z "$constprec_err" ]; then
+    PASS=$((PASS + 1)); echo "  const_fold_agrees_with_runtime: PASS (12 expressions, folded == evaluated, x86_64 and arm64)"
 else
     FAIL=$((FAIL + 1))
     echo "FAIL: const_fold_agrees_with_runtime ($constprec_err)"
@@ -9178,9 +9193,14 @@ fn main() -> uint64 {
 }
 KREOF
 fnaddr2_err=""
+fnaddr2_norun=""
 if $KRC --arch=x86_64 /tmp/krc_fnaddr2_$$.kr -o /tmp/krc_fnaddr2_$$ --emit=elf >/dev/null 2>&1; then
-    timeout -k 5 "$RUN_TEST_TIMEOUT" /tmp/krc_fnaddr2_$$; fa2rc=$?
-    [ "$fa2rc" = "42" ] || fnaddr2_err="called-through-fn_addr-gave-$fa2rc-want-42"
+    if arch_runner x86_64; then
+        timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER /tmp/krc_fnaddr2_$$; fa2rc=$?
+        [ "$fa2rc" = "42" ] || fnaddr2_err="called-through-fn_addr-gave-$fa2rc-want-42"
+    else
+        fnaddr2_norun="$ARCH_NORUN"
+    fi
 else
     fnaddr2_err="the-string-literal-form-stopped-compiling"
 fi
@@ -9190,7 +9210,9 @@ KREOF
 $KRC --arch=x86_64 /tmp/krc_fnaddr3_$$.kr -o /dev/null --emit=elf > /tmp/krc_fnaddr3_out_$$.txt 2>&1
 grep -q "undefined function 'no_such_function_here'" /tmp/krc_fnaddr3_out_$$.txt \
     || fnaddr2_err="$fnaddr2_err an-absent-name-lost-its-own-message"
-if [ -z "$fnaddr2_err" ]; then
+if [ -z "$fnaddr2_err" ] && [ -n "$fnaddr2_norun" ]; then
+    skip_row fnaddr_string_literal_still_resolves "built, but cannot call through it: $fnaddr2_norun"
+elif [ -z "$fnaddr2_err" ]; then
     PASS=$((PASS + 1)); echo "  fnaddr_string_literal_still_resolves: PASS (called through it, and absent names still named)"   # tripwire: not a skip -- every leg ran; "absent" is about names
 else
     FAIL=$((FAIL + 1)); echo "FAIL: fnaddr_string_literal_still_resolves ($fnaddr2_err)"
@@ -32888,14 +32910,18 @@ rm -rf "$C7_D"
 # sys.kr is the portable socket/random/wait API (sys_*), args.kr the thin
 # readers of the @shared cli_argc/cli_argv statics, win32.kr the (still empty)
 # home of the _kr_w32_ externs. Every row runs the real program: Linux
-# x86_64 natively, Linux arm64 under qemu-aarch64-static (a counted SKIP
-# without it), Windows slices under Wine for the C7 convergence (step 3b).
+# x86_64 and arm64 natively on their own host arch, under qemu-user on the
+# other one (arch_runner; a counted SKIP without it), Windows slices under
+# Wine for the C7 convergence (step 3b).
 T10_D=/tmp/krc_t10_$$
 mkdir -p "$T10_D/pfx"
 T10_FX="$DIR/fixtures"
 T10_KRC="$DIR/../build/krc2"
 T10_WINE="$(wine_path)"
-T10_QEMU="$(command -v qemu-aarch64-static || command -v qemu-aarch64 || true)"
+# t10_pfx <arch>: the runner prefix for an <arch> binary (arch_runner), on
+# stdout -- empty when native. Callers check arch_runner first and skip the row
+# when it fails.
+t10_pfx() { arch_runner "$1" && printf '%s' "$ARCH_RUNNER"; }
 t10_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
 t10_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
 t10_skip() { skip_row "$1" "$2"; }
@@ -32964,17 +32990,13 @@ t10_build() {
 # t10_run <arch> <fixture> [args...]: runs it; stdout in $T10_D/out, status returned.
 t10_run() {
     local a="$1" f="$2"; shift 2
-    if [ "$a" = "arm64" ]; then
-        timeout 60 "$T10_QEMU" "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
-    else
-        timeout 60 "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
-    fi
+    timeout 60 $(t10_pfx "$a") "$T10_D/$f-$a" "$@" > "$T10_D/out" 2>/dev/null
 }
 # t10_row <row> <arch> <fixture> <want stdout> <want rc> [args...]
 t10_row() {
     local row="$1" a="$2" f="$3" want="$4" wrc="$5" rc got; shift 5
     TOTAL=$((TOTAL + 1))
-    if [ "$a" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$row" "no qemu-aarch64-static"; return; fi
+    if ! arch_runner "$a"; then t10_skip "$row" "$ARCH_NORUN"; return; fi
     if ! t10_build "$a" "$f"; then t10_bad "$row" "build failed: $(grep -m1 'error' "$T10_D/$f-$a.log" | cut -c1-140)"; return; fi
     chmod +x "$T10_D/$f-$a"
     t10_run "$a" "$f" "$@"; rc=$?
@@ -33042,8 +33064,10 @@ else
     t10_bad sys_args_plain_user_cli_argc_refused "rc=$T10_RC: $(printf '%s' "$T10_O" | head -2 | cut -c1-200)"
 fi
 TOTAL=$((TOTAL + 1))
-if $T10_KRC --arch=x86_64 "$T10_U/shared.kr" -o "$T10_U/shared" > "$T10_U/shared.log" 2>&1; then
-    chmod +x "$T10_U/shared"; "$T10_U/shared" a b c > /dev/null 2>&1; T10_RC=$?
+if ! arch_runner x86_64; then
+    t10_skip sys_args_shared_user_cli_argc_one_variable "$ARCH_NORUN"
+elif $T10_KRC --arch=x86_64 "$T10_U/shared.kr" -o "$T10_U/shared" > "$T10_U/shared.log" 2>&1; then
+    chmod +x "$T10_U/shared"; $(t10_pfx x86_64) "$T10_U/shared" a b c > /dev/null 2>&1; T10_RC=$?
     if [ "$T10_RC" = "4" ]; then t10_ok sys_args_shared_user_cli_argc_one_variable "argc 4 through args.kr and the user's own declaration"; else t10_bad sys_args_shared_user_cli_argc_one_variable "rc=$T10_RC want 4"; fi
 else
     t10_bad sys_args_shared_user_cli_argc_one_variable "build: $(grep -m1 error "$T10_U/shared.log" | cut -c1-200)"
@@ -33135,9 +33159,11 @@ fi
 # Linux against an INDEPENDENT expectation (tests/fixtures/sys_w32_errno.expected
 # pairs each WSAE<X> with Linux's E<X> by name).
 TOTAL=$((TOTAL + 1))
-if t10_build x86_64 sys_w32_errno; then
+if ! arch_runner x86_64; then
+    t10_skip sys_w32_errno_map "$ARCH_NORUN"
+elif t10_build x86_64 sys_w32_errno; then
     chmod +x "$T10_D/sys_w32_errno-x86_64"
-    timeout 60 "$T10_D/sys_w32_errno-x86_64" > "$T10_D/errno.out" 2>/dev/null; T10_RC=$?
+    timeout 60 $(t10_pfx x86_64) "$T10_D/sys_w32_errno-x86_64" > "$T10_D/errno.out" 2>/dev/null; T10_RC=$?
     if [ "$T10_RC" = "0" ] && cmp -s "$T10_D/errno.out" "$T10_FX/sys_w32_errno.expected"; then
         t10_ok sys_w32_errno_map "$(grep -c '' "$T10_D/errno.out") codes match the by-name model"
     else
@@ -33162,11 +33188,10 @@ t10_row sys_send_epipe_arm64 arm64 sys_epipe "$T11_EPIPE" 0
 for T11_P in "sys_send_on_pipe_x86_64 x86_64" "sys_send_on_pipe_arm64 arm64"; do
     set -- $T11_P
     TOTAL=$((TOTAL + 1))
-    if [ "$2" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$1" "no qemu-aarch64-static"; continue; fi
+    if ! arch_runner "$2"; then t10_skip "$1" "$ARCH_NORUN"; continue; fi
     if ! t10_build "$2" sys_send_pipe; then t10_bad "$1" "build failed: $(grep -m1 'error' "$T10_D/sys_send_pipe-$2.log" | cut -c1-140)"; continue; fi
     chmod +x "$T10_D/sys_send_pipe-$2"
-    if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/sys_send_pipe-$2" | cat > "$T10_D/pipe.out"; T11_RC=${PIPESTATUS[0]}
-    else timeout 60 "$T10_D/sys_send_pipe-$2" | cat > "$T10_D/pipe.out"; T11_RC=${PIPESTATUS[0]}; fi
+    timeout 60 $(t10_pfx "$2") "$T10_D/sys_send_pipe-$2" | cat > "$T10_D/pipe.out"; T11_RC=${PIPESTATUS[0]}
     if [ "$T11_RC" = "0" ] && [ "$(cat "$T10_D/pipe.out")" = "piped" ]; then t10_ok "$1" "6 bytes through a pipe"
     else t10_bad "$1" "rc=$T11_RC got '$(head -c 40 "$T10_D/pipe.out")' want 'piped' rc=0"; fi
 done
@@ -33295,11 +33320,10 @@ t10_row alloc_guard_fault_read_arm64 arm64 alloc_guard_fault_read "armed" 139 2>
 for T12_P in "alloc_guard_refused_is_fatal_x86_64 x86_64" "alloc_guard_refused_is_fatal_arm64 arm64"; do
     set -- $T12_P
     TOTAL=$((TOTAL + 1))
-    if [ "$2" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$1" "no qemu-aarch64-static"; continue; fi
+    if ! arch_runner "$2"; then t10_skip "$1" "$ARCH_NORUN"; continue; fi
     if ! t10_build "$2" alloc_guard_false; then t10_bad "$1" "build failed: $(grep -m1 'error' "$T10_D/alloc_guard_false-$2.log" | cut -c1-140)"; continue; fi
     chmod +x "$T10_D/alloc_guard_false-$2"
-    if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?
-    else timeout 60 "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?; fi
+    timeout 60 $(t10_pfx "$2") "$T10_D/alloc_guard_false-$2" > "$T10_D/out" 2> "$T10_D/err"; T12_RC=$?
     if [ "$T12_RC" = "1" ] && [ "$(cat "$T10_D/err")" = "arena: guard page failed" ]; then t10_ok "$1" "rc=1, the fatal message"
     else t10_bad "$1" "rc=$T12_RC stderr '$(head -c 60 "$T10_D/err")' (want rc 1 + the fatal message; 2 = refusal not reported, 3 = fatal path returned)"; fi
 done
@@ -33314,13 +33338,12 @@ T12_RM_WANT_N="a 1 arena: guard page failed 25|p 1 pool: guard page failed 24|h 
 for T12_P in "alloc_guard_refused_names_allocator_x86_64 x86_64" "alloc_guard_refused_names_allocator_arm64 arm64"; do
     set -- $T12_P
     TOTAL=$((TOTAL + 1))
-    if [ "$2" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$1" "no qemu-aarch64-static"; continue; fi
+    if ! arch_runner "$2"; then t10_skip "$1" "$ARCH_NORUN"; continue; fi
     if ! t10_build "$2" alloc_guard_refused_msg; then t10_bad "$1" "build failed: $(grep -m1 'error' "$T10_D/alloc_guard_refused_msg-$2.log" | cut -c1-140)"; continue; fi
     chmod +x "$T10_D/alloc_guard_refused_msg-$2"
     T12_RM_GOT=""
     for T12_X in a p h; do
-        if [ "$2" = "arm64" ]; then timeout 60 "$T10_QEMU" "$T10_D/alloc_guard_refused_msg-$2" $T12_X > /dev/null 2> "$T10_D/err"; T12_RC=$?
-        else timeout 60 "$T10_D/alloc_guard_refused_msg-$2" $T12_X > /dev/null 2> "$T10_D/err"; T12_RC=$?; fi
+        timeout 60 $(t10_pfx "$2") "$T10_D/alloc_guard_refused_msg-$2" $T12_X > /dev/null 2> "$T10_D/err"; T12_RC=$?
         T12_RM_GOT="$T12_RM_GOT$T12_X $T12_RC $(cat "$T10_D/err") $(wc -c < "$T10_D/err")|"
     done
     if [ "$T12_RM_GOT" = "$T12_RM_WANT_N" ]; then t10_ok "$1" "arena/pool/heap: rc=1 and their own message, byte-exact"
@@ -35249,7 +35272,7 @@ t10_row sys_connect_timeout_immediate_restores_blocking_arm64 arm64 sys_cto "OK"
 for S1B_A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     S1B_ROW=sys_connect_timeout_refused_is_an_error_$S1B_A
-    if [ "$S1B_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$S1B_ROW" "no qemu-aarch64-static"; continue; fi
+    if ! arch_runner "$S1B_A"; then t10_skip "$S1B_ROW" "$ARCH_NORUN"; continue; fi
     if ! t10_build "$S1B_A" sys_cto; then t10_bad "$S1B_ROW" "build failed: $(grep -m1 'error' "$T10_D/sys_cto-$S1B_A.log" | cut -c1-140)"; continue; fi
     chmod +x "$T10_D/sys_cto-$S1B_A"
     t10_run "$S1B_A" sys_cto refused; S1B_RC=$?
@@ -35269,7 +35292,7 @@ done
 for S1B_A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     S1B_ROW=sys_connect_timeout_black_hole_times_out_$S1B_A
-    if [ "$S1B_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$S1B_ROW" "no qemu-aarch64-static"; continue; fi
+    if ! arch_runner "$S1B_A"; then t10_skip "$S1B_ROW" "$ARCH_NORUN"; continue; fi
     if ! t10_build "$S1B_A" sys_cto; then t10_bad "$S1B_ROW" "build failed: $(grep -m1 'error' "$T10_D/sys_cto-$S1B_A.log" | cut -c1-140)"; continue; fi
     chmod +x "$T10_D/sys_cto-$S1B_A"
     t10_run "$S1B_A" sys_cto full; S1B_RC=$?
@@ -35353,15 +35376,27 @@ fi
 # A multi-homed client sends one directed broadcast per interface, so it needs
 # every IPv4 address with its mask, broadcast and flags. ONE fixture
 # (sys_ifaces.kr: "count <n>", then "<addr> <mask> <bcast> <flags>" per record)
-# runs on Linux x86_64, Linux arm64 (qemu-user, which translates SIOCGIFCONF)
-# and Windows x86_64 under Wine (whose SIO_GET_INTERFACE_LIST walks the same
-# host's getifaddrs), and nif_judge holds every run to the same four rows:
+# runs on Linux x86_64, Linux arm64 (natively on an aarch64 host, else
+# qemu-user, which translates SIOCGIFCONF) and Windows x86_64 under Wine (whose
+# SIO_GET_INTERFACE_LIST walks the same host's getifaddrs), and nif_judge holds
+# every run to the same four rows:
 #   loopback   "127.0.0.1 255.0.0.0 0.0.0.0 5" is a record, count >= 1, the
 #              count line equals the number of record lines, and EVERY
 #              record's flags fit bits 0..2 (Windows' IFF_MULTICAST is masked);
-#   broadcast  every BROADCAST (bit 1) record's broadcast is (addr & mask) |
-#              ~mask, byte by byte -- a counted SKIP on a host where only lo
-#              has an address (no BROADCAST record to judge);
+#   broadcast  every BROADCAST (bit 1) record's broadcast is right, byte by
+#              byte -- a counted SKIP on a host where only lo has an address
+#              (no BROADCAST record to judge). What "right" is differs by OS
+#              (sys.kr's header): Linux reports the broadcast the KERNEL has
+#              configured (SIOCGIFBRDADDR), which is 0.0.0.0 on an address
+#              added without `brd` -- a persistent tap with a bare
+#              `ip addr add 10.0.2.2/24` is IFF_BROADCAST with broadcast
+#              0.0.0.0 -- so the Linux rows (..._broadcast_is_the_kernels)
+#              want what `ip -4 -o addr` says for that addr/prefix (its brd
+#              field, 0.0.0.0 when there is none; a counted SKIP without
+#              iproute2); sys.kr COMPUTES Windows' broadcast, so the Wine row
+#              (..._broadcast_is_directed) wants (addr & mask) | ~mask. Before
+#              2.11.1 the Linux rows wanted the directed broadcast too and
+#              failed on any host with such an address (#211);
 #   ip         the records' addr/prefix multiset equals `ip -4 -o addr`'s, and
 #              the UP (bit 0) records' addresses equal `ip -4 -o addr show up`'s
 #              (a counted SKIP without iproute2);
@@ -35371,9 +35406,38 @@ fi
 NIF_IP="$(command -v ip || true)"
 # nif_m2p <dotted mask> -> its prefix length (the number of one bits)
 nif_m2p() { local o n=0 IFS=.; for o in $1; do while [ "$o" -gt 0 ]; do n=$((n + (o & 1))); o=$((o >> 1)); done; done; echo $n; }
-# nif_judge <row prefix> <full out> <rc> <out with max n-1> <out with max 0> <n-1 used>
+# nif_ip_brd <ip -4 -o addr output> -> "<addr>/<prefix> <broadcast>" per line:
+# the brd field, or 0.0.0.0 for an address with none (the kernel's 0).
+nif_ip_brd() { awk '{ a = ""; b = "0.0.0.0"; for (i = 1; i < NF; i++) { if ($i == "inet" && a == "") a = $(i + 1); if ($i == "brd") b = $(i + 1) } if (a != "") print a, b }' "$1"; }
+# nif_bcast <full out> directed|kernel [ip -4 -o addr output] -> NIF_BX = the
+# number of BROADCAST (bit 1) records, NIF_BZ = how many of them read 0.0.0.0,
+# NIF_BWHY = each wrong one ("" = all
+# right). directed: (addr & mask) | ~mask; kernel: the brd `ip` reports for
+# the record's addr/prefix (0.0.0.0 without one).
+nif_bcast() {
+    local a m b f y want
+    NIF_BX=0; NIF_BZ=0; NIF_BWHY=""
+    while read -r a m b f; do
+        [ $((f & 2)) = 0 ] && continue
+        NIF_BX=$((NIF_BX + 1))
+        [ "$b" = "0.0.0.0" ] && NIF_BZ=$((NIF_BZ + 1))
+        if [ "$2" = "kernel" ]; then
+            want=$(nif_ip_brd "$3" | awk -v k="$a/$(nif_m2p "$m")" '$1 == k { print $2 }' | LC_ALL=C sort -u | tr '\n' ' ')
+            if [ -z "$want" ]; then NIF_BWHY="$NIF_BWHY $a/$m:$b(not-in-ip-addr)"
+            else case " $want" in *" $b "*) ;; *) NIF_BWHY="$NIF_BWHY $a/$m:$b(kernel:${want% })" ;; esac; fi
+            continue
+        fi
+        local -a A M B
+        IFS=. read -r -a A <<< "$a"; IFS=. read -r -a M <<< "$m"; IFS=. read -r -a B <<< "$b"
+        for y in 0 1 2 3; do
+            [ $(( (A[y] & M[y]) | (255 - M[y]) )) = "${B[y]}" ] || NIF_BWHY="$NIF_BWHY $a/$m:$b"
+        done
+    done < <(sed 1d "$1")
+    NIF_BWHY=$(printf '%s' "$NIF_BWHY" | tr ' ' '\n' | grep -v '^$' | LC_ALL=C sort -u | tr '\n' ' ')
+}
+# nif_judge <row prefix> <full out> <rc> <out with max n-1> <out with max 0> <n-1 used> linux|windows
 nif_judge() {
-    local p="$1" full="$2" rc="$3" tr="$4" z="$5" nm1="$6" n lines why a m b f x y IFS0
+    local p="$1" full="$2" rc="$3" tr="$4" z="$5" nm1="$6" os="$7" n lines why a m b f x y IFS0
     n=$(sed -n '1s/^count //p' "$full")
     lines=$(($(grep -c '' "$full") - 1))
     TOTAL=$((TOTAL + 1))
@@ -35384,20 +35448,21 @@ nif_judge() {
         t10_bad "${p}loopback" "rc=$rc count '$n' over $lines lines${x:+, flags outside bits 0..2: $x}: $(tr '\n' '|' < "$full" | head -c 160)"
     fi
     TOTAL=$((TOTAL + 1))
-    why=""; x=0
-    while read -r a m b f; do
-        [ $((f & 2)) = 0 ] && continue
-        x=$((x + 1))
-        local -a A M B
-        IFS=. read -r -a A <<< "$a"; IFS=. read -r -a M <<< "$m"; IFS=. read -r -a B <<< "$b"
-        for y in 0 1 2 3; do
-            [ $(( (A[y] & M[y]) | (255 - M[y]) )) = "${B[y]}" ] || why="$why $a/$m:$b"
-        done
-    done < <(sed 1d "$full")
-    if [ "$rc" != "0" ]; then t10_bad "${p}broadcast_is_directed" "rc=$rc"
-    elif [ "$x" = "0" ]; then t10_skip "${p}broadcast_is_directed" "no BROADCAST-capable interface has an IPv4 address on this host"
-    elif [ -z "$why" ]; then t10_ok "${p}broadcast_is_directed" "$x BROADCAST records, each (addr & mask) | ~mask"
-    else t10_bad "${p}broadcast_is_directed" "wrong broadcast:$(printf '%s' "$why" | tr ' ' '\n' | sort -u | tr '\n' ' ')"; fi
+    if [ "$os" = "windows" ]; then
+        y="${p}broadcast_is_directed"
+        nif_bcast "$full" directed
+    else
+        y="${p}broadcast_is_the_kernels"
+        : > "$T10_D/nif-ip"
+        [ -n "$NIF_IP" ] && "$NIF_IP" -4 -o addr > "$T10_D/nif-ip" 2>/dev/null
+        nif_bcast "$full" kernel "$T10_D/nif-ip"
+    fi
+    if [ "$rc" != "0" ]; then t10_bad "$y" "rc=$rc"
+    elif [ "$NIF_BX" = "0" ]; then t10_skip "$y" "no BROADCAST-capable interface has an IPv4 address on this host"
+    elif [ "$os" != "windows" ] && [ -z "$NIF_IP" ]; then t10_skip "$y" "no ip(8) on this host: the expected broadcast is the kernel's configured one, which only ip -4 -o addr reports"
+    elif [ -z "$NIF_BWHY" ] && [ "$os" = "windows" ]; then t10_ok "$y" "$NIF_BX BROADCAST records, each (addr & mask) | ~mask"
+    elif [ -z "$NIF_BWHY" ]; then t10_ok "$y" "$NIF_BX BROADCAST records, each the brd ip -4 -o addr reports ($NIF_BZ with none configured, so 0.0.0.0)"
+    else t10_bad "$y" "wrong broadcast:$NIF_BWHY"; fi
     TOTAL=$((TOTAL + 1))
     if [ -z "$NIF_IP" ]; then t10_skip "${p}matches_ip_addr" "no ip(8) on this host"
     else
@@ -35422,12 +35487,12 @@ nif_judge() {
 }
 for NIF_A in x86_64 arm64; do
     NIF_P=sys_net_ifaces_${NIF_A}_
-    if [ "$NIF_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then
-        for NIF_R in loopback broadcast_is_directed matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_skip "$NIF_P$NIF_R" "no qemu-aarch64-static"; done
+    if ! arch_runner "$NIF_A"; then
+        for NIF_R in loopback broadcast_is_the_kernels matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_skip "$NIF_P$NIF_R" "$ARCH_NORUN"; done
         continue
     fi
     if ! t10_build "$NIF_A" sys_ifaces; then
-        for NIF_R in loopback broadcast_is_directed matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_bad "$NIF_P$NIF_R" "build failed: $(grep -m1 'error' "$T10_D/sys_ifaces-$NIF_A.log" | cut -c1-140)"; done
+        for NIF_R in loopback broadcast_is_the_kernels matches_ip_addr truncates_at_max; do TOTAL=$((TOTAL + 1)); t10_bad "$NIF_P$NIF_R" "build failed: $(grep -m1 'error' "$T10_D/sys_ifaces-$NIF_A.log" | cut -c1-140)"; done
         continue
     fi
     chmod +x "$T10_D/sys_ifaces-$NIF_A"
@@ -35437,7 +35502,7 @@ for NIF_A in x86_64 arm64; do
     : > "$T10_D/nif-tr"
     [ -n "$NIF_M" ] && { t10_run "$NIF_A" sys_ifaces "$NIF_M"; cp "$T10_D/out" "$T10_D/nif-tr"; }
     t10_run "$NIF_A" sys_ifaces 0; cp "$T10_D/out" "$T10_D/nif-z"
-    nif_judge "$NIF_P" "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M"
+    nif_judge "$NIF_P" "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M" linux
 done
 # ONE DEVICE, TWO ADDRESSES, TWO MASKS (the label+address match). Each SIOCGIF*
 # query carries the SIOCGIFCONF entry's own address; a name-only query would
@@ -35454,23 +35519,29 @@ NIF_NS_SH='ip link set lo up && ip addr add 10.1.1.1/24 dev lo && ip addr add 10
 NIF_NS=""
 if command -v unshare > /dev/null 2>&1 && unshare -rn true > /dev/null 2>&1; then NIF_NS=unshare
 elif command -v docker > /dev/null 2>&1 && timeout 20 docker image inspect busybox:latest > /dev/null 2>&1; then NIF_NS=docker; fi
+# nif_ns_run <arch> <sh script> <out>: the script in a private network
+# namespace, sh -c's $0 run with $1 as its one argument: the fixture with max
+# 64 when it is native, else its runner (arch_runner) with the fixture (whose
+# max then defaults to 64). The caller has checked arch_runner.
+nif_ns_run() {
+    local a="$1" pfx; pfx=$(t10_pfx "$a")
+    if [ "$NIF_NS" = "unshare" ]; then
+        if [ -n "$pfx" ]; then timeout 60 unshare -rn sh -c "$2" "$pfx" "$T10_D/sys_ifaces-$a" > "$3" 2>&1
+        else timeout 60 unshare -rn sh -c "$2" "$T10_D/sys_ifaces-$a" 64 > "$3" 2>&1; fi
+    else
+        if [ -n "$pfx" ]; then timeout 60 docker run --rm --pull never --network none --cap-add NET_ADMIN -v "$T10_D:/w:ro" -v "$pfx:/q:ro" \
+                busybox:latest sh -c "$2" /q "/w/sys_ifaces-$a" > "$3" 2>&1
+        else timeout 60 docker run --rm --pull never --network none --cap-add NET_ADMIN -v "$T10_D:/w:ro" \
+                busybox:latest sh -c "$2" "/w/sys_ifaces-$a" 64 > "$3" 2>&1; fi
+    fi
+}
 for NIF_A in x86_64 arm64; do
     NIF_ROW=sys_net_ifaces_two_masks_on_one_device_$NIF_A
     TOTAL=$((TOTAL + 1))
     if [ -z "$NIF_NS" ]; then t10_skip "$NIF_ROW" "no user namespaces (unshare -rn) and no local busybox image for docker"; continue; fi
-    if [ "$NIF_A" = "arm64" ] && [ -z "$T10_QEMU" ]; then t10_skip "$NIF_ROW" "no qemu-aarch64-static"; continue; fi
+    if ! arch_runner "$NIF_A"; then t10_skip "$NIF_ROW" "$ARCH_NORUN"; continue; fi
     if [ ! -x "$T10_D/sys_ifaces-$NIF_A" ]; then t10_bad "$NIF_ROW" "sys_ifaces-$NIF_A was not built"; continue; fi
-    # sh -c's $0 runs with $1 as its one argument: the fixture with max 64, or
-    # qemu with the arm64 fixture (whose max then defaults to 64).
-    if [ "$NIF_NS" = "unshare" ]; then
-        if [ "$NIF_A" = "arm64" ]; then timeout 60 unshare -rn sh -c "$NIF_NS_SH" "$T10_QEMU" "$T10_D/sys_ifaces-$NIF_A" > "$T10_D/nif-ns" 2>&1
-        else timeout 60 unshare -rn sh -c "$NIF_NS_SH" "$T10_D/sys_ifaces-$NIF_A" 64 > "$T10_D/nif-ns" 2>&1; fi
-    else
-        if [ "$NIF_A" = "arm64" ]; then timeout 60 docker run --rm --pull never --network none --cap-add NET_ADMIN -v "$T10_D:/w:ro" -v "$T10_QEMU:/q:ro" \
-                busybox:latest sh -c "$NIF_NS_SH" /q "/w/sys_ifaces-$NIF_A" > "$T10_D/nif-ns" 2>&1
-        else timeout 60 docker run --rm --pull never --network none --cap-add NET_ADMIN -v "$T10_D:/w:ro" \
-                busybox:latest sh -c "$NIF_NS_SH" "/w/sys_ifaces-$NIF_A" 64 > "$T10_D/nif-ns" 2>&1; fi
-    fi
+    nif_ns_run "$NIF_A" "$NIF_NS_SH" "$T10_D/nif-ns"
     NIF_GOT=$(sed -n '1,/^--ip$/p' "$T10_D/nif-ns" | grep -v '^--ip$' | grep -v '^rc ' | sed 1d | LC_ALL=C sort | tr '\n' '|')
     NIF_CNT=$(sed -n '1s/^count //p' "$T10_D/nif-ns")
     NIF_RC=$(sed -n 's/^rc //p' "$T10_D/nif-ns")
@@ -35481,6 +35552,73 @@ for NIF_A in x86_64 arm64; do
         t10_ok "$NIF_ROW" "via $NIF_NS: lo carries /8, /24 and /16, each with its own mask"
     else
         t10_bad "$NIF_ROW" "via $NIF_NS: rc '$NIF_RC' count '$NIF_CNT' got '$NIF_GOT' want '$NIF_WANT'; ip says '$NIF_IPS'; raw: $(tr '\n' '|' < "$T10_D/nif-ns" | head -c 200)"
+    fi
+done
+# THE BROADCAST ORACLE, without a host (#211). The Linux broadcast rows above
+# judge against `ip -4 -o addr`, and the case that broke the old directed-only
+# oracle -- an IFF_BROADCAST device whose address was added without `brd`, so
+# the kernel's broadcast is 0.0.0.0 -- exists only where a host happens to have
+# one. So nif_bcast is held to synthetic records and an iproute2-format
+# listing: a /24 with no brd (0.0.0.0), one with the directed brd, one with an
+# odd brd (10.5.0.77) and lo. Kernel mode must accept all three and reject a
+# record that is directed where the kernel has none, one that ignores the odd
+# brd, and one ip does not list; directed mode must reject exactly the two
+# records the kernel configured otherwise (what the old rows failed on).
+TOTAL=$((TOTAL + 1))
+printf 'count 4\n127.0.0.1 255.0.0.0 0.0.0.0 5\n10.0.2.2 255.255.255.0 0.0.0.0 3\n192.168.2.2 255.255.255.0 192.168.2.255 3\n10.5.0.1 255.255.255.0 10.5.0.77 3\n' > "$T10_D/nbo-full"
+printf '%s\n' '1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever' \
+    '12: mtap0    inet 10.0.2.2/24 scope global mtap0\       valid_lft forever preferred_lft forever' \
+    '4: wlp15s0    inet 192.168.2.2/24 brd 192.168.2.255 scope global noprefixroute wlp15s0\       valid_lft forever preferred_lft forever' \
+    '5: d0    inet 10.5.0.1/24 brd 10.5.0.77 scope global d0\       valid_lft forever preferred_lft forever' > "$T10_D/nbo-ip"
+NBO_BAD=""
+nif_bcast "$T10_D/nbo-full" kernel "$T10_D/nbo-ip"
+[ "$NIF_BX:$NIF_BWHY" = "3:" ] || NBO_BAD="$NBO_BAD kernel-accepts:'$NIF_BX:$NIF_BWHY'"
+nif_bcast "$T10_D/nbo-full" directed
+[ "$NIF_BWHY" = "10.0.2.2/255.255.255.0:0.0.0.0 10.5.0.1/255.255.255.0:10.5.0.77 " ] || NBO_BAD="$NBO_BAD directed-rejects:'$NIF_BWHY'"
+sed 's/^10\.0\.2\.2 255\.255\.255\.0 0\.0\.0\.0/10.0.2.2 255.255.255.0 10.0.2.255/' "$T10_D/nbo-full" > "$T10_D/nbo-m"
+nif_bcast "$T10_D/nbo-m" kernel "$T10_D/nbo-ip"
+[ "$NIF_BWHY" = "10.0.2.2/255.255.255.0:10.0.2.255(kernel:0.0.0.0) " ] || NBO_BAD="$NBO_BAD no-brd-but-directed:'$NIF_BWHY'"
+sed 's/10\.5\.0\.77 3$/10.5.0.255 3/' "$T10_D/nbo-full" > "$T10_D/nbo-m"
+nif_bcast "$T10_D/nbo-m" kernel "$T10_D/nbo-ip"
+[ "$NIF_BWHY" = "10.5.0.1/255.255.255.0:10.5.0.255(kernel:10.5.0.77) " ] || NBO_BAD="$NBO_BAD odd-brd-ignored:'$NIF_BWHY'"
+grep -v wlp15s0 "$T10_D/nbo-ip" > "$T10_D/nbo-m"
+nif_bcast "$T10_D/nbo-full" kernel "$T10_D/nbo-m"
+[ "$NIF_BWHY" = "192.168.2.2/255.255.255.0:192.168.2.255(not-in-ip-addr) " ] || NBO_BAD="$NBO_BAD unlisted:'$NIF_BWHY'"
+if [ -z "$NBO_BAD" ]; then t10_ok sys_net_ifaces_broadcast_oracle_selftest "kernel mode takes no brd as 0.0.0.0 and an odd brd as itself, and rejects 3 wrong records; directed mode rejects the 2 the kernel configured otherwise"
+else t10_bad sys_net_ifaces_broadcast_oracle_selftest "$NBO_BAD"; fi
+# ...and END TO END, in a private network namespace (the runner the two-masks
+# rows use), so no host configuration is touched: a dummy device (IFF_BROADCAST)
+# with 10.3.0.1/24 added WITHOUT brd, 10.4.0.1/24 with `broadcast +` (the
+# directed one) and 10.5.0.1/24 with broadcast 10.5.0.77. The fixture must
+# print exactly those three records with flags 3 (UP|BROADCAST) and the
+# broadcast each was given -- 0.0.0.0 for the first -- plus lo, agree with the
+# namespace's own `ip -4 -o addr` under the kernel oracle, and fail the
+# directed one on exactly the 10.3 and 10.5 records. A kernel that cannot make
+# a dummy device (the `ip link add` fails: no dummy driver) is a counted SKIP.
+NIF_BC_SH='ip link set lo up || exit 97; ip link add krb0 type dummy || exit 96; ip link set krb0 up && ip addr add 10.3.0.1/24 dev krb0 && ip addr add 10.4.0.1/24 broadcast + dev krb0 && ip addr add 10.5.0.1/24 broadcast 10.5.0.77 dev krb0 || exit 97; "$0" "$1"; echo "rc $?"; echo "--ip"; ip -4 -o addr'
+for NIF_A in x86_64 arm64; do
+    NIF_ROW=sys_net_ifaces_broadcast_as_configured_$NIF_A
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$NIF_NS" ]; then t10_skip "$NIF_ROW" "no user namespaces (unshare -rn) and no local busybox image for docker"; continue; fi
+    if ! arch_runner "$NIF_A"; then t10_skip "$NIF_ROW" "$ARCH_NORUN"; continue; fi
+    if [ ! -x "$T10_D/sys_ifaces-$NIF_A" ]; then t10_bad "$NIF_ROW" "sys_ifaces-$NIF_A was not built"; continue; fi
+    nif_ns_run "$NIF_A" "$NIF_BC_SH" "$T10_D/nif-ns"; NIF_SRC=$?
+    if [ "$NIF_SRC" = "96" ]; then t10_skip "$NIF_ROW" "via $NIF_NS: this kernel cannot create a dummy device in a namespace ($(head -c 100 "$T10_D/nif-ns" | tr '\n' '|'))"; continue; fi
+    sed -n '1,/^--ip$/p' "$T10_D/nif-ns" | grep -v '^--ip$' | grep -v '^rc ' > "$T10_D/nif-bc"
+    sed -n '/^--ip$/,$p' "$T10_D/nif-ns" | sed 1d > "$T10_D/nif-bc-ip"
+    NIF_GOT=$(sed 1d "$T10_D/nif-bc" | LC_ALL=C sort | tr '\n' '|')
+    NIF_CNT=$(sed -n '1s/^count //p' "$T10_D/nif-bc")
+    NIF_RC=$(sed -n 's/^rc //p' "$T10_D/nif-ns")
+    NIF_IPS=$(awk '{print $4}' "$T10_D/nif-bc-ip" | LC_ALL=C sort | tr '\n' ' ')
+    NIF_MINE=$(sed 1d "$T10_D/nif-bc" | while read -r a m b f; do [ -n "$a" ] && echo "$a/$(nif_m2p "$m")"; done | LC_ALL=C sort | tr '\n' ' ')
+    NIF_WANT='10.3.0.1 255.255.255.0 0.0.0.0 3|10.4.0.1 255.255.255.0 10.4.0.255 3|10.5.0.1 255.255.255.0 10.5.0.77 3|127.0.0.1 255.0.0.0 0.0.0.0 5|'
+    nif_bcast "$T10_D/nif-bc" kernel "$T10_D/nif-bc-ip"; NIF_KW="$NIF_BX:$NIF_BWHY"
+    nif_bcast "$T10_D/nif-bc" directed; NIF_DW="$NIF_BWHY"
+    if [ "$NIF_RC" = "0" ] && [ "$NIF_CNT" = "4" ] && [ "$NIF_GOT" = "$NIF_WANT" ] && [ "$NIF_MINE" = "$NIF_IPS" ] && [ "$NIF_KW" = "3:" ] \
+        && [ "$NIF_DW" = "10.3.0.1/255.255.255.0:0.0.0.0 10.5.0.1/255.255.255.0:10.5.0.77 " ]; then
+        t10_ok "$NIF_ROW" "via $NIF_NS: a dummy device's /24s read broadcast 0.0.0.0 (no brd), 10.4.0.255 (brd +) and 10.5.0.77, as ip reports"
+    else
+        t10_bad "$NIF_ROW" "via $NIF_NS: sh rc $NIF_SRC, rc '$NIF_RC' count '$NIF_CNT' got '$NIF_GOT' want '$NIF_WANT'; ip says '$NIF_IPS'; kernel oracle '$NIF_KW' want '3:'; directed oracle '$NIF_DW'; raw: $(tr '\n' '|' < "$T10_D/nif-ns" | head -c 200)"
     fi
 done
 # _kr_sys_w32_ifrec on synthetic INTERFACE_INFO entries: flag bits 0..2 only
@@ -35543,7 +35681,7 @@ else
     : > "$T10_D/nif-tr"
     if [ -n "$NIF_M" ]; then t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_ifaces.exe "$NIF_M"; tr -d '\r' < "$T10_D/win.out" > "$T10_D/nif-tr"; fi
     t10_wine "$T10_D/win.out" "$T10_D/win.err" sys_ifaces.exe 0; tr -d '\r' < "$T10_D/win.out" > "$T10_D/nif-z"
-    nif_judge sys_net_ifaces_windows_wine_ "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M"
+    nif_judge sys_net_ifaces_windows_wine_ "$T10_D/nif-full" "$NIF_RC" "$T10_D/nif-tr" "$T10_D/nif-z" "$NIF_M" windows
     if [ -x "$(dirname "$T10_WINE")/wineserver" ]; then
         WINEPREFIX="$T10_D/pfx" "$(dirname "$T10_WINE")/wineserver" -w > /dev/null 2>&1
     fi

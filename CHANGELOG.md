@@ -18,6 +18,21 @@ programs and modules after upgrading. Code without unused reads compiles to the 
 compiler itself, the benchmarks and every ApexRift image are byte-identical).
 Bootstrap fixed point 1501560 bytes.
 
+### Test suite
+
+**The suite runs cleanly on an arm64 host and on hosts with an address that has no broadcast
+(#211, #212, #213).** One helper (`arch_runner` in `tests/run_tests.sh`) now decides how a row
+runs an x86_64 or arm64 program: natively on its own architecture, under qemu-user otherwise, and
+a counted SKIP naming the missing qemu when neither works (still a FAIL under
+`REQUIRE_FULL_RUN=1`). On an arm64 Linux host without qemu-x86_64, ~45 x86_64 rows used to FAIL
+with "Exec format error" instead of skipping, and arm64 rows needed qemu-aarch64 even there;
+they now skip and run natively respectively. The Linux `sys_net_ifaces_*_broadcast_is_directed`
+rows wanted the directed broadcast for every broadcast-capable address and failed on any address
+added without `brd`, for which Linux reports 0.0.0.0 — which is what `sys_net_ifaces` returns,
+by design. They are now `sys_net_ifaces_*_broadcast_is_the_kernels` and check against
+`ip -4 -o addr`; three new rows pin the no-`brd` case without depending on the host. No compiler
+or library change.
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF
