@@ -6204,8 +6204,13 @@ fn gen_stmt_a64(uint64 node) {
                 uint32 vtok = ast_data3(wci)
                 uint64 wrtok = rtok
                 uint64 wvtok = vtok
-                uint64 rcode = a64_reg_code(wrtok)
+                // Both checks as on x86_64 legacy and every IR backend
+                // (#204): an unknown register name and an operand that is not
+                // a local (a static, an undeclared name) used to be skipped
+                // here in silence, so the binding vanished.
+                uint64 rcode = a64_reg_code_strict(wrtok)
                 uint64 voff  = var_lookup(wvtok)
+                asm_require_local(wvtok, voff)
                 if rcode != 0xFFFF && voff != 0xFFFFFFFF {
                     emit_a64_ldr(rcode, 31, a64_var_base + voff)
                 }
@@ -6241,8 +6246,9 @@ fn gen_stmt_a64(uint64 node) {
                 uint32 vtok2 = ast_data3(wco)
                 uint64 wrtok2 = rtok2
                 uint64 wvtok2 = vtok2
-                uint64 rcode2 = a64_reg_code(wrtok2)
+                uint64 rcode2 = a64_reg_code_strict(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
+                asm_require_local(wvtok2, voff2)
                 if rcode2 != 0xFFFF && voff2 != 0xFFFFFFFF {
                     emit_a64_str(rcode2, 31, a64_var_base + voff2)
                 }

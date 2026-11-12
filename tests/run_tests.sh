@@ -8545,6 +8545,160 @@ else
 fi
 rm -rf "$SDD_T"
 
+# --- inline-asm operands on arm64 --legacy / --emit=obj / --emit=lkm (#204) --
+# The arm64 legacy code generator (also the one behind --emit=obj and
+# --emit=lkm on arm64) dropped an asm in()/out() operand that was not a local
+# variable (a static, an undeclared name) and a register name other than
+# x0..x30 without a word: the binding just vanished. Every IR backend and the
+# x86_64 legacy one refuse both; arm64 legacy now does the same. On the IR
+# backend, `out(r -> s)` after `*(p as T) -> s` in the same function used to
+# write the hidden local of #203; it is now the same error.
+# (arm64 --emit=lkm is not an output format -- the build stops with
+# "--emit=lkm currently supports x86_64 only" after code generation -- so
+# its configs below check which of the two errors comes first.)
+#
+# sdd_ref ARCH CONFIG SRC WANT -> "" when building SRC for ARCH with CONFIG
+# (IR, --O0, --legacy, -c, --emit=asm, --emit=ir, --emit=lkm) exits 1, its
+# first stderr line is exactly WANT and no output file was written; else a
+# description of what happened.
+sdd_ref() {
+    local f=$2 rc
+    [ $2 = IR ] && f=""
+    rm -f $SDD_T/out
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$1 $f "$3" -o $SDD_T/out > /dev/null 2> $SDD_T/err
+    rc=$?
+    if [ $rc = 1 ] && [ ! -e $SDD_T/out ] && [ "$(head -1 $SDD_T/err)" = "$4" ]; then return; fi
+    printf ' %s %s: exit %s, %s, stderr: %s;' $1 $2 $rc "$([ -e $SDD_T/out ] && echo 'output written' || echo 'no output')" "$(head -1 $SDD_T/err | cut -c1-140)"
+    rm -f $SDD_T/out
+}
+# sdd_ref_row ROW SRC WANT ARCH:CONFIG...: one refusal row over the configs.
+sdd_ref_row() {
+    local row=$1 src=$2 want=$3 bad="" ac
+    shift 3
+    TOTAL=$((TOTAL + 1))
+    for ac in "$@"; do bad="$bad$(sdd_ref ${ac%%:*} ${ac#*:} "$src" "$want")"; done
+    if [ -z "$bad" ]; then
+        PASS=$((PASS + 1))
+        echo "  $row: PASS (refused on $*: ${want#"$SDD_T"/})"
+    else
+        echo "FAIL: $row (want exit 1, no output, '${want#"$SDD_T"/}':$bad)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+# sdd_lkm SRC OUT: SRC with the @module_init/@module_exit stubs --emit=lkm needs.
+sdd_lkm() {
+    { printf '@module_init\nfn init() -> u64 {\n    return 0\n}\n@module_exit\nfn fini() {\n    return\n}\n'; cat "$1"; } > "$2"
+}
+SDD_T=$(mktemp -d)
+SDD_NF="error: inline-asm constraint variable not found: 'gs' (asm in()/out() operands must be local variables)"
+SDD_LKM_X86="krc: --emit=lkm currently supports x86_64 only"
+# asm_out_static_rejected <arch>: out(reg -> gs), gs a static.
+printf 'static u64 gs = 0\nfn getgs() -> u64 { return gs }\nfn setit() { asm { "0x48 0xC7 0xC0 0x2A 0x00 0x00 0x00" } out(rax -> gs) }\nfn main() {\n    setit()\n    exit(getgs())\n}\n' > $SDD_T/ox.kr
+printf 'static u64 gs = 0\nfn getgs() -> u64 { return gs }\nfn setit() { asm { "mov x0, #42" } out(x0 -> gs) }\nfn main() {\n    setit()\n    exit(getgs())\n}\n' > $SDD_T/oa.kr
+printf 'static u32 gs = 0\nfn getgs() -> u32 { return gs }\nfn setit() { asm { "li a0, 42" } out(a0 -> gs) }\nfn main() {\n    setit()\n    exit(getgs())\n}\n' > $SDD_T/or.kr
+sdd_lkm $SDD_T/oa.kr $SDD_T/oal.kr
+sdd_ref_row "asm_out_static_rejected x86_64" $SDD_T/ox.kr "$SDD_NF" x86_64:IR x86_64:--legacy
+TOTAL=$((TOTAL + 1))
+SDD_BAD="$(sdd_ref arm64 IR $SDD_T/oa.kr "$SDD_NF")$(sdd_ref arm64 --legacy $SDD_T/oa.kr "$SDD_NF")$(sdd_ref arm64 -c $SDD_T/oa.kr "$SDD_NF")$(sdd_ref arm64 --emit=lkm $SDD_T/oal.kr "$SDD_NF")"
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_out_static_rejected arm64: PASS (refused on IR, --legacy, -c, --emit=lkm: $SDD_NF)"
+else
+    echo "FAIL: asm_out_static_rejected arm64 (want exit 1, no output, '$SDD_NF':$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+sdd_ref_row "asm_out_static_rejected riscv32" $SDD_T/or.kr "$SDD_NF" riscv32:IR
+# asm_out_after_ptrload_static_rejected <arch>: `-> gs` then out(reg -> gs)
+# in the same function (IR: exit 0 before, the hidden local took the write).
+printf 'static u64 gs = 0\nfn getgs() -> u64 { return gs }\nfn setit(u64 b) {\n    unsafe { *(b as u64) -> gs }\n    asm { "0x48 0xC7 0xC0 0x2A 0x00 0x00 0x00" } out(rax -> gs)\n}\nfn main() {\n    u64 b = alloc(8)\n    store64(b, 1)\n    setit(b)\n    exit(getgs())\n}\n' > $SDD_T/px.kr
+sed 's/"0x48 0xC7 0xC0 0x2A 0x00 0x00 0x00" } out(rax/"mov x0, #42" } out(x0/' $SDD_T/px.kr > $SDD_T/pa.kr
+sdd_ref_row "asm_out_after_ptrload_static_rejected x86_64" $SDD_T/px.kr "$SDD_NF" x86_64:IR x86_64:--legacy
+sdd_ref_row "asm_out_after_ptrload_static_rejected arm64" $SDD_T/pa.kr "$SDD_NF" arm64:IR arm64:--legacy arm64:-c
+# asm_in_static_rejected_arm64_legacy: in(gs -> x0), gs a static.
+printf 'static u64 gs = 42\nfn f() -> u64 { u64 r = 0\n asm { "mov x1, x0" } in(gs -> x0) out(x1 -> r)\n return r }\nfn main() { exit(f()) }\n' > $SDD_T/ia.kr
+sdd_lkm $SDD_T/ia.kr $SDD_T/ial.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD="$(sdd_ref arm64 --legacy $SDD_T/ia.kr "$SDD_NF")$(sdd_ref arm64 -c $SDD_T/ia.kr "$SDD_NF")$(sdd_ref arm64 --emit=lkm $SDD_T/ial.kr "$SDD_NF")"
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_in_static_rejected_arm64_legacy: PASS (refused on --legacy, -c, --emit=lkm: $SDD_NF)"
+else
+    echo "FAIL: asm_in_static_rejected_arm64_legacy (want exit 1, no output, '$SDD_NF':$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# asm_bad_reg_rejected_arm64_legacy: out(rax -> r) on arm64.
+SDD_BR="error: unknown arm64 inline-asm constraint register 'rax' (want x0-x30)"
+printf 'fn f() -> u64 { u64 r = 5\n asm { "mov x1, x0" } out(rax -> r)\n return r }\nfn main() { exit(f()) }\n' > $SDD_T/ba.kr
+sdd_lkm $SDD_T/ba.kr $SDD_T/bal.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD="$(sdd_ref arm64 --legacy $SDD_T/ba.kr "$SDD_BR")$(sdd_ref arm64 -c $SDD_T/ba.kr "$SDD_BR")$(sdd_ref arm64 --emit=lkm $SDD_T/bal.kr "$SDD_BR")"
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_bad_reg_rejected_arm64_legacy: PASS (refused on --legacy, -c, --emit=lkm: $SDD_BR)"
+else
+    echo "FAIL: asm_bad_reg_rejected_arm64_legacy (want exit 1, no output, '$SDD_BR':$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# asm_constraint_accepted_names_still_bind_arm64 (pin): in(v -> xN) and
+# out(xN -> o) for every N in 0..30 build on arm64 IR, --legacy and -c; on
+# --emit=lkm the build gets past code generation to the x86_64-only refusal
+# (no asm error first).
+{ printf 'fn main() {\n    u64 v = 1\n    u64 o = 0\n'
+  for SDD_N in $(seq 0 30); do printf '    asm { "0xD503201F" } in(v -> x%d)\n    asm { "0xD503201F" } out(x%d -> o)\n' $SDD_N $SDD_N; done
+  printf '    exit(o - 1)\n}\n'; } > $SDD_T/na.kr
+sdd_lkm $SDD_T/na.kr $SDD_T/nal.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD=""
+for SDD_F in IR --legacy -c; do
+    SDD_FL=$SDD_F; [ $SDD_F = IR ] && SDD_FL=""
+    rm -f $SDD_T/out
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 $SDD_FL $SDD_T/na.kr -o $SDD_T/out > $SDD_T/err 2>&1 || [ ! -f $SDD_T/out ]; then
+        SDD_BAD="$SDD_BAD $SDD_F: $(grep -m1 error $SDD_T/err | cut -c1-120);"
+    fi
+done
+SDD_BAD="$SDD_BAD$(sdd_ref arm64 --emit=lkm $SDD_T/nal.kr "$SDD_LKM_X86")"
+rm -f $SDD_T/out
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_constraint_accepted_names_still_bind_arm64: PASS (x0-x30 in() and out() build on IR, --legacy, -c; --emit=lkm stops only at '$SDD_LKM_X86')"
+else
+    echo "FAIL: asm_constraint_accepted_names_still_bind_arm64 (want x0-x30 to build:$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# asm_constraint_out_x0_binds_arm64 (pin): `movz x0, #42` then out(x0 -> v)
+# exits 42 on IR and --legacy; with -c, <f>'s disassembly stores x0 to v's
+# slot right after the movz and loads that slot back later.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() {\n    u64 v = 7\n    asm { "0xD2800540" } out(x0 -> v)\n    exit(v)\n}\n' > $SDD_T/xa.kr
+printf 'fn f() -> u64 {\n    u64 v = 7\n    asm { "0xD2800540" } out(x0 -> v)\n    return v\n}\n' > $SDD_T/xo.kr
+if ! command -v llvm-objdump > /dev/null 2>&1; then
+    skip_row asm_constraint_out_x0_binds_arm64 "llvm-objdump not installed (the -c config disassembles an arm64 object)"
+elif sdd_runner arm64 asm_constraint_out_x0_binds_arm64; then
+    SDD_GOT="IR $(sdd_exec arm64 "" $SDD_T/xa.kr), --legacy $(sdd_exec arm64 --legacy $SDD_T/xa.kr)"
+    rm -f $SDD_T/xo.o
+    SDD_OBJ=no
+    if $KRC --arch=arm64 -c $SDD_T/xo.kr -o $SDD_T/xo.o > /dev/null 2>&1 \
+       && llvm-objdump -d $SDD_T/xo.o | awk '/^[0-9a-f]+ <[^>]*>:$/ { on = ($2 == "<f>:"); next } on' | python3 -I -c '
+import re, sys
+ins = [l.rstrip("\n").split("\t") for l in sys.stdin]
+ins = [(i[1].strip() + " " + (i[2] if len(i) > 2 else "")).split("//")[0].strip() for i in ins if len(i) >= 2]
+for k, t in enumerate(ins):
+    if re.fullmatch(r"mov x0, #0x2a", t) and k + 1 < len(ins):
+        m = re.fullmatch(r"str x0, \[sp, #(0x[0-9a-f]+)\]", ins[k + 1])
+        if m and any(re.fullmatch(r"ldr x0, \[sp, #" + m.group(1) + r"\]", u) for u in ins[k + 2:]):
+            sys.exit(0)
+sys.exit(1)'; then SDD_OBJ=yes; fi
+    rm -f $SDD_T/xo.o
+    if [ "$SDD_GOT" = "IR 42, --legacy 42" ] && [ $SDD_OBJ = yes ]; then
+        PASS=$((PASS + 1))
+        echo "  asm_constraint_out_x0_binds_arm64: PASS ($SDD_GOT; -c: mov x0, #0x2a; str x0 to v's slot; ldr of that slot later)"
+    else
+        echo "FAIL: asm_constraint_out_x0_binds_arm64 (want IR 42, --legacy 42, -c store+reload of x0: got $SDD_GOT, -c $SDD_OBJ)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -rf "$SDD_T"
+
 # CSE across the ops above is not observable by a single-threaded run: they
 # write no memory the program reads back, and the second agent that a real
 # atomic_load, vload or asm orders against does not exist in a test. So count,
