@@ -9489,6 +9489,339 @@ else
     echo "FAIL: asm_naked_spill_warns_x86_64 (want exit 0 and '$ALR_WANT': exit $ALR_RC, $(printf '%s' "$ALR_ERR" | grep -m1 -i 'warning\|error' | cut -c1-160))"
     FAIL=$((FAIL + 1))
 fi
+# --- inline asm: constraint registers are checked, located (#214, #215, #218)
+# Every in()/out()/clobbers() register is resolved by one table per arch
+# (x86_64 rax..r15, arm64 x0-x30, riscv32 x0-x31 + ABI names, xtensa a0-a15)
+# and checked where the asm is lowered: an unknown name or the stack pointer
+# stops the build at the register token (file:line:col) with its name and a
+# hint. clobbers() names used to be ignored (`clobbers(memory)`,
+# `clobbers(eax)` built, and nothing knew what the block wrote); the stack
+# pointer was accepted everywhere (#218); xtensa took the x86_64 names, so
+# `in(x -> rcx)` wrote a1, its stack pointer (#215).
+#
+# alr_ref ARCH CONFIG SRC WANT -> "" when building SRC for ARCH with CONFIG
+# (IR, --legacy, -c, --emit=lkm, --freestanding) exits 1, writes no output
+# and its first stderr line is exactly WANT; else what happened.
+alr_ref() {
+    local f=$2 rc
+    [ $2 = IR ] && f=""
+    rm -f $ALR_T/out
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$1 $f "$3" -o $ALR_T/out > /dev/null 2> $ALR_T/err
+    rc=$?
+    if [ $rc = 1 ] && [ ! -e $ALR_T/out ] && [ "$(head -1 $ALR_T/err)" = "$4" ]; then return; fi
+    printf ' %s %s %s: exit %s, %s, stderr: %s;' $1 $2 "$(basename $3)" $rc "$([ -e $ALR_T/out ] && echo 'output written' || echo 'no output')" "$(head -1 $ALR_T/err | cut -c1-160)"
+    rm -f $ALR_T/out
+}
+# alr_lkm SRC OUT: SRC behind the 8 lines of @module_init/@module_exit stubs
+# --emit=lkm needs (so every location moves down 8 lines).
+alr_lkm() {
+    { printf '@module_init\nfn init() -> u64 {\n    return 0\n}\n@module_exit\nfn fini() {\n    return\n}\n'; cat "$1"; } > "$2"
+}
+# alr_csrc CLAUSE NAME WORD > FILE: a program whose line 3 names NAME in one
+# clause; the name is at column 27 (in), 23 (out) or 28 (clobbers).
+alr_csrc() {
+    printf 'fn main() {\n    %s v = 1\n' $3
+    case $1 in
+        in)       printf '    asm { "nop" } in(v -> %s)\n' $2 ;;
+        out)      printf '    asm { "nop" } out(%s -> v)\n' $2 ;;
+        clobbers) printf '    asm { "nop" } clobbers(%s)\n' $2 ;;
+    esac
+    printf '    exit(v - 1)\n}\n'
+}
+alr_col() { case $1 in in) echo 27 ;; out) echo 23 ;; clobbers) echo 28 ;; esac; }
+# alr_unk ARCH NAME: the message for an unknown name (after "error: ").
+alr_unk() {
+    local pre want hint=")"
+    case $1 in
+        x86_64)  pre="unknown inline-asm constraint register"; want="rax rcx rdx rbx rbp rsi rdi r8-r15" ;;
+        arm64)   pre="unknown arm64 inline-asm constraint register"; want="x0-x30" ;;
+        riscv32) pre="unknown riscv32 inline-asm constraint register"; want="x0-x31 or zero/ra/gp/tp/t0-t6/s0-s11/a0-a7/fp" ;;
+        xtensa)  pre="unknown xtensa inline-asm constraint register"; want="a0 or a2-a15" ;;
+    esac
+    case $1:$2 in
+        *:memory|*:cc) hint="; drop it: an asm block is already ordered with the memory accesses around it, and flags are never live across one)" ;;
+        x86_64:xmm0|arm64:v8|arm64:d8|riscv32:fa0|xtensa:f0) hint="; only integer registers can be constraints)" ;;
+        x86_64:eax) hint="; there are no 32-, 16- or 8-bit names)" ;;
+        arm64:w19) hint="; there are no 32-bit (w) names)" ;;
+        arm64:lr) hint="; the link register is x30)" ;;
+    esac
+    printf "%s '%s' (want %s%s" "$pre" $2 "$want" "$hint"
+}
+alr_spmsg() {
+    if [ $1:$2 = xtensa:sp ]; then
+        printf 'the xtensa stack pointer is a1, and the stack pointer cannot be an inline-asm in()/out()/clobbers() register'
+    else
+        printf "the stack pointer ('%s') cannot be an inline-asm in()/out()/clobbers() register" $2
+    fi
+}
+# alr_diag_row ROW ARCH KIND CLAUSES NAMES CONFIGS: every NAME in every CLAUSE
+# under every CONFIG is refused with its located message (KIND unk|sp).
+alr_diag_row() {
+    local row=$1 a=$2 kind=$3 cl nm cf bad="" w=uint64 msg col n=0
+    [ $a = riscv32 ] || [ $a = xtensa ] && w=uint32
+    TOTAL=$((TOTAL + 1))
+    for cl in $4; do
+        col=$(alr_col $cl)
+        for nm in $5; do
+            alr_csrc $cl $nm $w > $ALR_T/d.kr
+            if [ $kind = sp ]; then msg=$(alr_spmsg $a $nm); else msg=$(alr_unk $a $nm); fi
+            for cf in $6; do
+                n=$((n + 1))
+                if [ $cf = --emit=lkm ]; then
+                    alr_lkm $ALR_T/d.kr $ALR_T/dl.kr
+                    bad="$bad$(alr_ref $a $cf $ALR_T/dl.kr "$ALR_T/dl.kr:11:$col: error: $msg")"
+                else
+                    bad="$bad$(alr_ref $a $cf $ALR_T/d.kr "$ALR_T/d.kr:3:$col: error: $msg")"
+                fi
+            done
+        done
+    done
+    if [ -z "$bad" ]; then
+        PASS=$((PASS + 1))
+        echo "  $row: PASS ($n builds refused, located, e.g. '$msg')"
+    else
+        echo "FAIL: $row (want exit 1, no output, the located message:$bad)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+ALR_CF_x86_64="IR --legacy -c --emit=lkm"
+ALR_CF_arm64="IR --legacy -c --emit=lkm"
+ALR_CF_riscv32="IR"
+ALR_CF_xtensa="--freestanding"
+ALR_FP_x86_64="xmm0"; ALR_FP_arm64="v8 d8"; ALR_FP_riscv32="fa0"; ALR_FP_xtensa="f0"
+ALR_SP_x86_64="rsp"; ALR_SP_arm64="sp wsp"; ALR_SP_riscv32="sp x2"; ALR_SP_xtensa="a1 sp"
+# asm_constraint_bad_name_<arch> <clause>: eax, memory, cc, xmm0, w19, lr,
+# foo and the arch's own FP/SIMD names. Red on 2.11.0 and main: every
+# clobbers() case built (exit 0); in()/out() were refused unlocated with no
+# hint (arm64 legacy/-c/lkm and riscv32 included), xtensa refused them with
+# the x86_64 list.
+for ALR_A in x86_64 arm64 riscv32 xtensa; do
+    eval "ALR_CF=\$ALR_CF_$ALR_A; ALR_FP=\$ALR_FP_$ALR_A"
+    for ALR_CL in in out clobbers; do
+        alr_diag_row "asm_constraint_bad_name_$ALR_A $ALR_CL" $ALR_A unk $ALR_CL "eax memory cc xmm0 w19 lr foo $ALR_FP" "$ALR_CF"
+    done
+done
+# asm_constraint_sp_refused_<arch> (#218): the stack pointer by every name,
+# in every clause. Red: built (exit 0) on x86_64/riscv32/xtensa; arm64's
+# `sp` was an unknown name, unlocated.
+for ALR_A in x86_64 arm64 riscv32 xtensa; do
+    eval "ALR_CF=\$ALR_CF_$ALR_A; ALR_SP=\$ALR_SP_$ALR_A"
+    alr_diag_row asm_constraint_sp_refused_$ALR_A $ALR_A sp "in out clobbers" "$ALR_SP" "$ALR_CF"
+done
+# asm_xtensa_x86_names_refused (#215): x86_64 names on xtensa. Red: built.
+alr_diag_row asm_xtensa_x86_names_refused xtensa unk "in out clobbers" "rax rcx r12 r15" "--freestanding"
+
+# asm_constraint_good_names_still_build <arch> (positive control): every
+# accepted name of the arch, in in(), out() and clobbers(), builds on every
+# config (arm64/x86_64 --emit=lkm: x86_64 only, so arm64 skips it).
+ALR_OK_x86_64="rax rcx rdx rbx rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15"
+ALR_OK_arm64="$(seq -s ' ' -f 'x%g' 0 30)"
+ALR_OK_riscv32="zero ra gp tp t0 t1 t2 fp s0 s1 a0 a1 a2 a3 a4 a5 a6 a7 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 t3 t4 t5 t6 x0 x1 x3 x4 x5 x8 x10 x17 x18 x27 x28 x31"
+ALR_OK_xtensa="a0 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15"
+for ALR_A in x86_64 arm64 riscv32 xtensa; do
+    eval "ALR_OK=\$ALR_OK_$ALR_A; ALR_CF=\$ALR_CF_$ALR_A"
+    [ $ALR_A = arm64 ] && ALR_CF="IR --legacy -c"
+    ALR_W=uint64; [ $ALR_A = riscv32 ] || [ $ALR_A = xtensa ] && ALR_W=uint32
+    { printf 'fn main() {\n    %s v = 1\n    %s o = 0\n' $ALR_W $ALR_W
+      for ALR_G in $ALR_OK; do printf '    asm { "nop" } in(v -> %s)\n    asm { "nop" } out(%s -> o)\n    asm { "nop" } clobbers(%s)\n' $ALR_G $ALR_G $ALR_G; done
+      printf '    exit(0)\n}\n'; } > $ALR_T/g.kr
+    alr_lkm $ALR_T/g.kr $ALR_T/gl.kr
+    TOTAL=$((TOTAL + 1))
+    ALR_BAD=""
+    for ALR_C in $ALR_CF; do
+        ALR_F=$ALR_C; [ $ALR_C = IR ] && ALR_F=""
+        ALR_S=$ALR_T/g.kr; [ $ALR_C = --emit=lkm ] && ALR_S=$ALR_T/gl.kr
+        rm -f $ALR_T/out
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$ALR_A $ALR_F $ALR_S -o $ALR_T/out > $ALR_T/err 2>&1 || [ ! -f $ALR_T/out ]; then
+            ALR_BAD="$ALR_BAD $ALR_C: $(grep -m1 'error:' $ALR_T/err | cut -c1-140);"
+        fi
+    done
+    rm -f $ALR_T/out
+    if [ -z "$ALR_BAD" ]; then
+        PASS=$((PASS + 1))
+        echo "  asm_constraint_good_names_still_build $ALR_A: PASS ($(echo $ALR_OK | wc -w) names x in/out/clobbers build on $ALR_CF)"
+    else
+        echo "FAIL: asm_constraint_good_names_still_build $ALR_A (want every name to build:$ALR_BAD)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+
+# Far out() with no scratch left (#219, emitter-time): the block names every
+# register the far store could address through. arm64 IR: x9-x17 (the out()
+# register x17 included); xtensa: a8, a9, a11 named and a10 is the out()
+# register (a12-a15 named too, so `o` cannot have a colour: an earlier out()
+# destination is banned from every register the block names). Located at
+# the out() register. Red: arm64 built (its store went
+# through x11); xtensa refused unlocated ("cannot spill a10 through the
+# large-frame path") after the x86_64 table had resolved `r10`.
+{ printf 'fn f(uint64 a0, uint64 b) -> uint64 {\n    uint64 s = a0\n'
+  for ALR_K in $(seq 1 4300); do printf '    s = s + %d\n' $(( (ALR_K - 1) % 7 + 1 )); done
+  for ALR_K in $(seq 0 11); do printf '    uint64 v%d = s + %d\n' $ALR_K $ALR_K; done
+  printf '    uint64 z = 0\n    uint64 o = 0\n'
+  printf '    asm { "nop" } in(z -> x9, z -> x10, z -> x11, z -> x12, z -> x13, z -> x14, z -> x15, z -> x16) out(x17 -> o)\n'
+  printf '    uint64 acc = o\n'
+  for ALR_K in $(seq 0 11); do printf '    acc = acc + v%d\n' $ALR_K; done
+  printf '    return acc\n}\nfn main() { exit(f(1, 2)) }\n'; } > $ALR_T/ns.kr
+ALR_NSL=$((4300 + 12 + 5))
+TOTAL=$((TOTAL + 1))
+ALR_BAD=$(alr_ref arm64 IR $ALR_T/ns.kr "$ALR_T/ns.kr:$ALR_NSL:105: error: no scratch register left to store this out() value to its stack slot: the asm block names every one of x9-x17; leave one of them out of its in()/out()/clobbers()")
+ALR_BAD="$ALR_BAD$(alr_ref arm64 --O0 $ALR_T/ns.kr "$ALR_T/ns.kr:$ALR_NSL:105: error: no scratch register left to store this out() value to its stack slot: the asm block names every one of x9-x17; leave one of them out of its in()/out()/clobbers()")"
+if [ -z "$ALR_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_far_out_no_scratch_arm64: PASS (IR, --O0: refused at out(x17 ...), $ALR_NSL:105)"
+else
+    echo "FAIL: asm_far_out_no_scratch_arm64 (want exit 1, no output, the located no-scratch error:$ALR_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+{ printf 'fn f(uint32 a, uint32 b) -> uint32 {\n'
+  for ALR_K in $(seq 0 299); do printf '    uint32 v%d = a + %d\n' $ALR_K $ALR_K; done
+  printf '    uint32 z = 0\n    uint32 o = 0\n    uint32 o2 = 0\n'
+  printf '    asm { "nop" } in(z -> a8, z -> a9, z -> a11) out(a10 -> o, a12 -> o2) clobbers(a13, a14, a15)\n'
+  printf '    uint32 acc = 0\n'
+  for ALR_K in $(seq 0 299); do printf '    acc = acc + v%d\n' $ALR_K; done
+  printf '    return acc + o + o2\n}\nfn main() { exit(f(1, 2)) }\n'; } > $ALR_T/nx.kr
+ALR_NXL=$((300 + 5))
+TOTAL=$((TOTAL + 1))
+ALR_BAD=$(alr_ref xtensa --freestanding $ALR_T/nx.kr "$ALR_T/nx.kr:$ALR_NXL:54: error: no scratch register left to store this out() value to its stack slot: the asm block names every one of a8-a11; leave one of them out of its in()/out()/clobbers()")
+if [ -z "$ALR_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_far_out_no_scratch_xtensa: PASS (refused at out(a10 ...), $ALR_NXL:54)"
+else
+    echo "FAIL: asm_far_out_no_scratch_xtensa (want exit 1, no output, the located no-scratch error:$ALR_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+
+# xtensa listing rows (no xtensa runner in the suite): the code blob's
+# segmented disassembly (tests/helpers/xtcount.py --dump) around the block's
+# nop.n. alr_xt_dump SRC -> the dump on stdout, or nothing.
+alr_xt_dump() {
+    rm -f $ALR_T/x.elf $ALR_T/x.code
+    $KRC --arch=xtensa --freestanding "$1" -o $ALR_T/x.elf > /dev/null 2> $ALR_T/xerr || return
+    ul_xt_blob $ALR_T/x.elf $ALR_T/x.code || return
+    python3 -I "$DIR/helpers/xtcount.py" $ALR_T/x.code --dump
+}
+# asm_xtensa_inw_a12: in(junk -> a12) with a, b, e, g live after the block:
+# after the nop.n, nothing may READ a12 before something writes it (a value
+# homed in a12 would be read as the junk). Red: 2.11.0 and main refuse the
+# name a12 (x86_64 table); with the x86_64 spelling `r12` they homed `a` in
+# a12 and compared the junk (beq a12, ...).
+cat > $ALR_T/xi.kr <<'EOF'
+fn f(uint32 a, uint32 b, uint32 c, uint32 d) -> uint32 {
+    uint32 e = a + 1
+    uint32 g = b + 2
+    uint32 junk = 0xBEEF
+    asm { "nop" } in(junk -> a12)
+    if a != 11 { return 100 }
+    if b != 22 { return 101 }
+    if e != 12 { return 104 }
+    if g != 24 { return 105 }
+    return c + d
+}
+fn main() { exit(f(11, 22, 33, 44)) }
+EOF
+# alr_xt_judge MODE: reads a dump; MODE inw: "OK <n>" when a12 is written
+# before it is read after the nop.n; MODE far: "OK <base>" when the first
+# store of a10 after the nop.n is s32i a10, aN with N in 8, 9, 11, right
+# after an addmi aN, a1, ...
+alr_xt_judge() {
+    python3 -I -c '
+import re, sys
+mode = sys.argv[1]
+ins = [l.rstrip("\n").split("\t") for l in sys.stdin if l.strip()]
+ins = [(int(i[0]), i[1], i[2] if len(i) > 2 else "") for i in ins if len(i) >= 2]
+k = [n for n, (a, m, o) in enumerate(ins) if m == "nop.n"]
+if len(k) != 1:
+    print("NO-NOP(%d)" % len(k)); sys.exit()
+k = k[0]
+def regs(o):
+    return re.findall(r"\ba(\d+)\b", o.split("(")[0])
+STOREBR = re.compile(r"s(8|16|32)i(\.n)?|b\w*|j|jx|ret(\.n)?|call\w*|wsr\w*|nop(\.n)?")
+if mode == "inw":
+    for a, m, o in ins[k + 1:]:
+        r = regs(o)
+        if m in ("ret", "ret.n", "j") or m.startswith("call"):
+            print("OK-UNTIL-%s" % m); sys.exit()
+        if STOREBR.fullmatch(m):
+            if "12" in r:
+                print("READ %d %s %s" % (a, m, o)); sys.exit()
+            continue
+        if "12" in r[1:]:
+            print("READ %d %s %s" % (a, m, o)); sys.exit()
+        if r and r[0] == "12":
+            print("OK %d %s %s" % (a, m, o)); sys.exit()
+    print("END")
+else:
+    for n in range(k + 1, len(ins)):
+        a, m, o = ins[n]
+        r = regs(o)
+        if re.fullmatch(r"s32i(\.n)?", m) and r and r[0] == "10":
+            p = ins[n - 1]
+            pr = regs(p[2])
+            if len(r) > 1 and r[1] in ("8", "9", "11") and p[1] == "addmi" and pr[:2] == [r[1], "1"]:
+                print("OK a%s" % r[1])
+            else:
+                print("BAD %s %s / %s %s" % (p[1], p[2], m, o))
+            sys.exit()
+    print("NO-STORE")
+' "$1"
+}
+TOTAL=$((TOTAL + 1))
+if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then
+    skip_row asm_xtensa_inw_a12 "xtensa-lx106-elf-objdump/readelf not installed"
+else
+    ALR_D=$(alr_xt_dump $ALR_T/xi.kr)
+    if [ -z "$ALR_D" ]; then ALR_J="CE($(grep -m1 error $ALR_T/xerr | cut -c1-140))"; else ALR_J=$(printf '%s\n' "$ALR_D" | alr_xt_judge inw); fi
+    case "$ALR_J" in
+        OK*) PASS=$((PASS + 1)); echo "  asm_xtensa_inw_a12: PASS (after the block a12 is written before any read: $ALR_J)" ;;
+        *)   echo "FAIL: asm_xtensa_inw_a12 (want a12 written before it is read after the block: $ALR_J)"; FAIL=$((FAIL + 1)) ;;
+    esac
+fi
+# asm_xtensa_far_out_a10: in(p -> a10) out(a10 -> o) with o in a far slot
+# (300 live values): builds, and o is stored straight from a10 through a
+# scratch from a8, a9, a11. Red: 2.11.0 and main refuse the name a10; with
+# the x86_64 spelling `r10` the far store refused a10 ("cannot spill a10
+# through the large-frame path").
+{ printf 'fn f(uint32 a, uint32 b) -> uint32 {\n'
+  for ALR_K in $(seq 0 299); do printf '    uint32 v%d = a + %d\n' $ALR_K $ALR_K; done
+  printf '    uint32 o = 0\n    uint32 p = 77\n    asm { "nop" } in(p -> a10) out(a10 -> o)\n    uint32 acc = 0\n'
+  for ALR_K in $(seq 0 299); do printf '    acc = acc + v%d\n' $ALR_K; done
+  printf '    if o != 77 { return 110 }\n    return acc & 1\n}\nfn main() { exit(f(1, 2)) }\n'; } > $ALR_T/xf.kr
+TOTAL=$((TOTAL + 1))
+if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then
+    skip_row asm_xtensa_far_out_a10 "xtensa-lx106-elf-objdump/readelf not installed"
+else
+    ALR_D=$(alr_xt_dump $ALR_T/xf.kr)
+    if [ -z "$ALR_D" ]; then ALR_J="CE($(grep -m1 error $ALR_T/xerr | cut -c1-140))"; else ALR_J=$(printf '%s\n' "$ALR_D" | alr_xt_judge far); fi
+    case "$ALR_J" in
+        OK*) PASS=$((PASS + 1)); echo "  asm_xtensa_far_out_a10: PASS (builds; out(a10) stored through addmi + s32i a10 with scratch ${ALR_J#OK })" ;;
+        *)   echo "FAIL: asm_xtensa_far_out_a10 (want a build whose far store of a10 goes through a8/a9/a11: $ALR_J)"; FAIL=$((FAIL + 1)) ;;
+    esac
+fi
+# asm_xtensa_a_names_bind (positive control, #215): in(a -> a6) out(a6 -> r)
+# moves the value into a6 before the block and reads a6 after it.
+printf 'fn f(uint32 a) -> uint32 {\n    uint32 r = 0\n    asm { "nop" } in(a -> a6) out(a6 -> r)\n    return r + 1\n}\nfn main() { exit(f(6)) }\n' > $ALR_T/xb.kr
+TOTAL=$((TOTAL + 1))
+if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then
+    skip_row asm_xtensa_a_names_bind "xtensa-lx106-elf-objdump/readelf not installed"
+else
+    ALR_D=$(alr_xt_dump $ALR_T/xb.kr)
+    [ -z "$ALR_D" ] && ALR_J="CE($(grep -m1 error $ALR_T/xerr | cut -c1-140))" || ALR_J=$(printf '%s\n' "$ALR_D" | python3 -I -c '
+import re, sys
+ins = [l.rstrip("\n").split("\t") for l in sys.stdin if l.strip()]
+ins = [(i[1], i[2] if len(i) > 2 else "") for i in ins if len(i) >= 2]
+k = [n for n, (m, o) in enumerate(ins) if m == "nop.n"]
+if len(k) != 1: print("NO-NOP"); sys.exit()
+k = k[0]
+pre = ins[k - 1]
+post = ins[k + 1]
+ok = re.match(r"a6,", pre[1]) and re.search(r"\ba6\b", post[1].split(",", 1)[1] if "," in post[1] else "")
+print("OK %s %s / %s %s" % (pre + post) if ok else "BAD %s %s / %s %s" % (pre + post))')
+    true
+    case "$ALR_J" in
+        OK*) PASS=$((PASS + 1)); echo "  asm_xtensa_a_names_bind: PASS (${ALR_J#OK })" ;;
+        *)   echo "FAIL: asm_xtensa_a_names_bind (want a write of a6 right before the block and a read of a6 right after: $ALR_J)"; FAIL=$((FAIL + 1)) ;;
+    esac
+fi
 rm -rf "$ALR_T"
 
 # CSE across the ops above is not observable by a single-threaded run: they

@@ -1,4 +1,4 @@
-# xtcount.py <code.bin> [--list | --stores]
+# xtcount.py <code.bin> [--list | --stores | --dump]
 #
 # Counts the real memory accesses in an xtensa code blob (an --arch=xtensa
 # --freestanding ELF with its header stripped, as xtensa_call_disasm strips
@@ -33,6 +33,11 @@
 # addr), all addresses in decimal: the hoisting row checks that the load lies
 # inside a loop span.
 #
+# --dump prints the segmented disassembly itself, one `<addr> <mnemonic>
+# <operands>` line per instruction (tab-separated, address in decimal), and no
+# count: the asm_xtensa_* rows (#214/#219) read the instructions around an asm
+# block's `nop.n`.
+#
 # Needs xtensa-lx106-elf-objdump on PATH. Run it with python3 -I.
 import re
 import subprocess
@@ -47,8 +52,8 @@ BRANCH = re.compile(r"j|b(eq|ne|lt|ge|ltu|geu|any|none|all|nall|bc|bs)|"
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("--list", "--stores")):
-        sys.stderr.write("usage: xtcount.py <code.bin> [--list | --stores]\n")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("--list", "--stores", "--dump")):
+        sys.stderr.write("usage: xtcount.py <code.bin> [--list | --stores | --dump]\n")
         return 2
     blob = sys.argv[1]
     listing = len(sys.argv) == 3 and sys.argv[2] == "--list"
@@ -105,6 +110,10 @@ def main():
         sys.stderr.write("xtcount.py: no fixed point after 50 rounds\n")
         return 1
 
+    if len(sys.argv) == 3 and sys.argv[2] == "--dump":
+        for a, sz, mn, ops in sorted(ins):
+            print("%d\t%s\t%s" % (a, mn, ops.strip()))
+        return 0
     n = 0
     for a, sz, mn, ops in ins:
         if counted.fullmatch(mn) and not re.match(r"a\d+, a1,", ops.strip()):
