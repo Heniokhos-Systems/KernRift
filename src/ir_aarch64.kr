@@ -1578,7 +1578,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // low 32 bits of src1, rotates by src2 mod 32, and zeroes the upper
     // half — bit-identical to x86's `ROR r32, cl` lowering, so the result
     // is w32-clean and downstream `& 0xFFFFFFFF` masks stay elided
-    // (const-fold relies on that, see ir.kr:13685). The hardware count is
+    // (const-fold relies on that, see ir.kr:13716). The hardware count is
     // taken mod datasize, matching the documented `src2 mod imm` contract
     // without an explicit mask (unlike riscv, which must AND with 31).
     if op == 137 {
@@ -2670,14 +2670,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if op == 94 {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 val_reg = ir_a64_resolve_src(s2_v, 10)
-        // Width is in the DEST slot (ir.kr:5625 for device fields, plus the
-        // vstore8/16/32/64 builtins at ir.kr:2703/2714/2398/2409).
+        // Width is in the DEST slot (ir.kr:5656 for device fields, plus the
+        // vstore8/16/32/64 builtins at ir.kr:2729/2740/2424/2435).
         // NOT dst_r: that is computed near the top of this function from
         // dest_v, which for op 94 is the width, not a vreg id.
         uint64 vw = dest_v
         // Size is bits 31:30 — STLRB / STLRH / STLR Wt / STLR Xt.
         // An unrecognised width takes the narrowest form, matching x86
-        // (ir.kr:11594): losing data locally beats corrupting neighbours.
+        // (ir.kr:11625): losing data locally beats corrupting neighbours.
         // Unreachable today — parser.kr:4300-4305 is the only producer and it
         // yields 1/2/4/8 only — but defensive, and cheap.
         uint64 vs_base = 0x089FFC00
@@ -2697,8 +2697,8 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 d = dst_r
         if d == 0xFFFFFFFF { d = 9 }
-        // Width is in the IMM slot (ir.kr:4098 for device fields, plus the
-        // vload8/16/32/64 builtins at ir.kr:2686/2694/2419/2427).
+        // Width is in the IMM slot (ir.kr:4124 for device fields, plus the
+        // vload8/16/32/64 builtins at ir.kr:2712/2720/2445/2453).
         uint64 lw = imm
         // LDARB / LDARH / LDAR Wt / LDAR Xt. The narrow forms zero-extend into
         // Wt, and a Wt write zeroes Xt[63:32], so the 64-bit spill below stays

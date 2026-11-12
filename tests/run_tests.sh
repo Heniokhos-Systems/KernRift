@@ -7742,6 +7742,1102 @@ for PL_V in "merged x86_64 nm" "merged arm64 nm" "merged riscv32 xnm" "merged xt
 done
 rm -rf "$PL_T"
 
+# --- `*(p as T) -> s` stores into a static `s` (#203) ---------------------
+# `unsafe/volatile { *(p as T) -> s }`, with `s` a static and no local or
+# parameter `s` in scope, never wrote the static on any IR backend (every
+# arch, --O0 included): the value was bound to a new function-private local
+# named `s`, so later reads in that function saw it and every other function
+# (and the next call) read the static's old value. --legacy was correct. The
+# destination now resolves like `s = v`: a local or parameter, else a static,
+# else a new local. "Works in main" was the inliner (#189): an inlined reader
+# resolved `s` in main's scope, to the hidden local (row
+# static_deref_dest_inlined_reader).
+#
+# sdd_runner ARCH ROW -> SDD_R, the runner prefix for an ARCH binary: none
+# for the host arch (native), qemu for the other 64-bit arch and riscv32;
+# skips the row (already in TOTAL) and returns 1 when that qemu is missing.
+sdd_runner() {
+    SDD_R=""
+    case $1 in
+        x86_64|arm64)
+            if ! arch_runner $1; then skip_row "$2" "$ARCH_NORUN"; return 1; fi
+            SDD_R="$ARCH_RUNNER" ;;
+        riscv32)
+            if [ -z "$QEMU_RV32" ]; then skip_row "$2" "no qemu-riscv32"; return 1; fi
+            SDD_R="$QEMU_RV32 -R 0x20000000" ;;
+    esac
+    return 0
+}
+# sdd_exec ARCH FLAGS SRC -> "<exit status>" of SRC built with FLAGS and run
+# with $SDD_R, or "CE(<first error line>)".
+sdd_exec() {
+    rm -f $SDD_T/bin
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$1 $2 "$3" -o $SDD_T/bin > $SDD_T/ce 2>&1 || [ ! -f $SDD_T/bin ]; then
+        printf 'CE(%s)' "$(grep -m1 'error' $SDD_T/ce | cut -c1-120)"
+        return
+    fi
+    chmod +x $SDD_T/bin
+    ( ulimit -c 0; timeout -k 5 "$RUN_TEST_TIMEOUT" $SDD_R $SDD_T/bin < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null
+    rm -f $SDD_T/bin
+}
+# sdd_rt_row ROW ARCH WANT SRC CONFIG...: one runtime row. CONFIG is IR,
+# --O0 or --legacy; every config must build and exit WANT.
+sdd_rt_row() {
+    local row=$1 arch=$2 want=$3 src=$4 got="" bad=0 c f r n=0
+    shift 4
+    TOTAL=$((TOTAL + 1))
+    sdd_runner $arch "$row" || return
+    for c in "$@"; do
+        f=$c; [ $c = IR ] && f=""
+        r=$(sdd_exec $arch "$f" "$src")
+        n=$((n + 1))
+        got="$got $c $r,"
+        [ "$r" = "$want" ] || bad=1
+    done
+    if [ $bad = 0 ] && [ $n = $# ]; then
+        PASS=$((PASS + 1))
+        echo "  $row: PASS (want $want:${got%,})"
+    else
+        echo "FAIL: $row (want $want:${got%,})"
+        FAIL=$((FAIL + 1))
+    fi
+}
+# sdd_src CASE: the program of one case, `@W@` for the word type (u64, or
+# u32 on riscv32). Each writes its static through `-> s` in a function that
+# is not the one reading it (except samefn_then_other, which reads it in
+# both, and main_noinl, whose reader is not inlined), and exits 42 when the
+# static holds the stored value.
+sdd_src() {
+    case $1 in
+        fn) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn setit(@W@ b) { unsafe { *(b as @W@) -> gs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    setit(b)
+    exit(getgs())
+}
+EOF
+        ;;
+        main_noinl) cat <<'EOF'
+static @W@ gs = 0
+fn rd(@W@ n) -> @W@ {
+    @W@ r = 0
+    @W@ i = 0
+    while i < n { r = r + gs; i = i + 1 }
+    return r
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    unsafe { *(b as @W@) -> gs }
+    exit(rd(1))
+}
+EOF
+        ;;
+        samefn_then_other) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn setit(@W@ b) -> @W@ {
+    unsafe { *(b as @W@) -> gs }
+    gs = gs + 1
+    return gs
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 41)
+    @W@ r = setit(b)
+    if r != 42 { exit(1) }
+    exit(getgs())
+}
+EOF
+        ;;
+        nested_if) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn setit(@W@ b, @W@ c) {
+    if c != 0 {
+        unsafe { *(b as @W@) -> gs }
+    }
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    setit(b, 1)
+    exit(getgs())
+}
+EOF
+        ;;
+        loop) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn setit(@W@ b) {
+    @W@ i = 0
+    while i < 3 {
+        store32(b, 40 + i)
+        unsafe { *(b as @W@) -> gs }
+        i = i + 1
+    }
+}
+fn main() {
+    @W@ b = alloc(8)
+    setit(b)
+    exit(getgs())
+}
+EOF
+        ;;
+        loopcond) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn spin(@W@ b) -> @W@ {
+    @W@ n = 0
+    while gs < 42 {
+        store32(b, gs + 1)
+        unsafe { *(b as @W@) -> gs }
+        n = n + 1
+        if n > 100 { return 99 }
+    }
+    return n
+}
+fn main() {
+    @W@ b = alloc(8)
+    @W@ n = spin(b)
+    if n != 42 { exit(n) }
+    exit(getgs())
+}
+EOF
+        ;;
+        w_u8|w_u16|w_u32) sed "s/@T@/${1#w_}/g" <<'EOF'
+static @T@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn setit(@W@ b) { unsafe { *(b as @T@) -> gs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 0x1234002A)
+    setit(b)
+    @W@ g = getgs()
+    exit(g & 0xFF)
+}
+EOF
+        ;;
+        # The signed cases copy the static into a local before comparing:
+        # `gs < 0` directly on a signed static compares unsigned (a separate
+        # defect, not this one).
+        w_i32) cat <<'EOF'
+static i32 gs = 0
+fn neg() -> @W@ { i32 v = gs
+ if v < 0 { return 1 } return 0 }
+fn setit(@W@ b) { unsafe { *(b as i32) -> gs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 0xFFFFFFD6)
+    setit(b)
+    if neg() == 0 { exit(1) }
+    exit(42)
+}
+EOF
+        ;;
+        w_i8) cat <<'EOF'
+static i32 gs = 0
+fn neg() -> @W@ { i32 v = gs
+ if v == 0 - 42 { return 1 } return 0 }
+fn setit(@W@ b) { unsafe { *(b as i8) -> gs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 0xD6)
+    setit(b)
+    if neg() == 0 { exit(1) }
+    exit(42)
+}
+EOF
+        ;;
+        volatile) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn setit(@W@ b) { volatile { *(b as @W@) -> gs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    setit(b)
+    exit(getgs())
+}
+EOF
+        ;;
+        # import: the static lives in the imported file sdd_mod.kr.
+        import) cat <<'EOF'
+import "sdd_mod.kr"
+fn setit(@W@ b) { unsafe { *(b as @W@) -> mgs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    setit(b)
+    exit(mod_get())
+}
+EOF
+        ;;
+        static_ptr_addr) cat <<'EOF'
+static @W@ gs = 0
+static @W@ gp = 0
+fn getgs() -> @W@ { return gs }
+fn setit() { unsafe { *(gp as @W@) -> gs } }
+fn main() {
+    gp = alloc(8)
+    store32(gp, 42)
+    setit()
+    exit(getgs())
+}
+EOF
+        ;;
+        # rec adds 8 + 7 + ... + 1 = 36 to acc through gs and leaves gs = 1:
+        # 36 + 1 + 5 = 42.
+        recursive) cat <<'EOF'
+static @W@ gs = 0
+static @W@ acc = 0
+fn rec(@W@ b, @W@ n) {
+    if n == 0 { return }
+    store32(b, n)
+    unsafe { *(b as @W@) -> gs }
+    acc = acc + gs
+    rec(b, n - 1)
+}
+fn main() {
+    @W@ b = alloc(8)
+    rec(b, 8)
+    exit(acc + gs + 5)
+}
+EOF
+        ;;
+        # innerblock: a local `gs` declared in an inner block is out of scope
+        # after it, so the `->` below writes the static. (--legacy keeps the
+        # inner local visible after its block, #40, so this case has no
+        # legacy pin.) The readers below loop so they are not inlined.
+        innerblock) cat <<'EOF'
+static @W@ gs = 7
+fn getgs() -> @W@ { @W@ r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(@W@ b, @W@ c) {
+    if c == 1 { @W@ gs = 1
+        gs = gs + 1 }
+    unsafe { *(b as @W@) -> gs }
+}
+fn main() { @W@ b = alloc(8)
+ store32(b, 42)
+ setit(b, 1)
+ exit(getgs()) }
+EOF
+        ;;
+        # laterdecl / loopdecl: a local `gs` declared AFTER the `->` does not
+        # capture it.
+        laterdecl) cat <<'EOF'
+static @W@ gs = 7
+fn getgs() -> @W@ { @W@ r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(@W@ b) -> @W@ {
+    unsafe { *(b as @W@) -> gs }
+    @W@ gs = 5
+    return gs
+}
+fn main() { @W@ b = alloc(8)
+ store32(b, 42)
+ @W@ t = setit(b)
+ exit(getgs() + t - 5) }
+EOF
+        ;;
+        loopdecl) cat <<'EOF'
+static @W@ gs = 7
+fn getgs() -> @W@ { @W@ r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(@W@ b) {
+    @W@ i = 0
+    while i < 2 {
+        unsafe { *(b as @W@) -> gs }
+        @W@ gs = 5
+        gs = gs + 1
+        i = i + 1
+    }
+}
+fn main() { @W@ b = alloc(8)
+ store32(b, 42)
+ setit(b)
+ exit(getgs()) }
+EOF
+        ;;
+        # fwd: the static is declared after its users.
+        fwd) cat <<'EOF'
+fn getgs() -> @W@ { @W@ r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(@W@ b) { unsafe { *(b as @W@) -> gs } }
+fn main() { @W@ b = alloc(8)
+ store32(b, 42)
+ setit(b)
+ exit(getgs()) }
+static @W@ gs = 7
+EOF
+        ;;
+        # defer (IR only): the deferred `->` runs at the function's exit.
+        defer) cat <<'EOF'
+static @W@ gs = 7
+fn getgs() -> @W@ { @W@ r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(@W@ b) {
+    defer { unsafe { *(b as @W@) -> gs } }
+    @W@ x = 5
+}
+fn main() { @W@ b = alloc(8)
+ store32(b, 42)
+ setit(b)
+ exit(getgs()) }
+EOF
+        ;;
+        w_u64) cat <<'EOF'
+static u64 gs = 0
+fn getgs() -> u64 { return gs }
+fn setit(u64 b) { unsafe { *(b as u64) -> gs } }
+fn main() {
+    u64 b = alloc(8)
+    store64(b, 0x100000000 + 42)
+    setit(b)
+    u64 g = getgs()
+    if (g >> 32) != 1 { exit(1) }
+    exit(g & 0xFF)
+}
+EOF
+        ;;
+        f64|f32) sed "s/@F@/$1/g" <<'EOF'
+static @F@ gs = 0.0
+fn getgs() -> @F@ { return gs }
+fn setit(u64 b) { unsafe { *(b as @F@) -> gs } }
+fn main() {
+    u64 b = alloc(8)
+    @F@ x = 2.5
+    unsafe { *(b as @F@) = x }
+    setit(b)
+    @F@ g = getgs()
+    if g == 2.5 { exit(42) }
+    exit(1)
+}
+EOF
+        ;;
+        # f32_from_f64: an f64 load stored into an f32 static is narrowed,
+        # as `s = <f64>` is.
+        f32_from_f64) cat <<'EOF'
+static f32 gs = 0.0
+fn getgs() -> f32 { return gs }
+fn setit(u64 b) { unsafe { *(b as f64) -> gs } }
+fn main() {
+    u64 b = alloc(8)
+    unsafe { *(b as f64) = 2.5 }
+    setit(b)
+    f32 g = getgs()
+    if g == 2.5 { exit(42) }
+    exit(1)
+}
+EOF
+        ;;
+        # raw_*: an integer load stored into a float static keeps its bits
+        # (= --legacy).
+        raw_u64_to_f64) cat <<'EOF'
+static f64 gs = 0.0
+fn getgs() -> f64 { u64 r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(u64 b) { unsafe { *(b as u64) -> gs } }
+fn main() { u64 b = alloc(8)
+ f64 v = 42.0
+ unsafe { *(b as f64) = v }
+ setit(b)
+ f64 g = getgs()
+ if g == 42.0 { exit(42) }
+ exit(1) }
+EOF
+        ;;
+        raw_u32_to_f32) cat <<'EOF'
+static f32 gs = 0.0
+fn getgs() -> f32 { u64 r = 0
+ while r < 1 { r = r + 1 }
+ return gs }
+fn setit(u64 b) { unsafe { *(b as u32) -> gs } }
+fn main() { u64 b = alloc(8)
+ f32 v = 42.0
+ unsafe { *(b as f32) = v }
+ setit(b)
+ f32 g = getgs()
+ if g == 42.0 { exit(42) }
+ exit(1) }
+EOF
+        ;;
+        # Guards (green before and after): the destination is a local, a
+        # parameter, undeclared (a new local), a local shadowing a static;
+        # the write form `*(p as T) = s` and the compound store `+= s`.
+        local) cat <<'EOF'
+fn rd(@W@ b) -> @W@ {
+    @W@ x = 0
+    unsafe { *(b as @W@) -> x }
+    return x
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    exit(rd(b))
+}
+EOF
+        ;;
+        param) cat <<'EOF'
+fn rd(@W@ b, @W@ x) -> @W@ {
+    unsafe { *(b as @W@) -> x }
+    return x
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    exit(rd(b, 7))
+}
+EOF
+        ;;
+        undeclared) cat <<'EOF'
+fn rd(@W@ b) -> @W@ {
+    unsafe { *(b as @W@) -> fresh }
+    return fresh
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    exit(rd(b))
+}
+EOF
+        ;;
+        shadow_local) cat <<'EOF'
+static @W@ gs = 7
+fn getgs(@W@ n) -> @W@ {
+    @W@ r = 0
+    @W@ i = 0
+    while i < n { r = r + gs; i = i + 1 }
+    return r
+}
+fn rd(@W@ b) -> @W@ {
+    @W@ gs = 0
+    unsafe { *(b as @W@) -> gs }
+    return gs
+}
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 35)
+    @W@ l = rd(b)
+    exit(l + getgs(1))
+}
+EOF
+        ;;
+        write_form) cat <<'EOF'
+static @W@ gs = 42
+fn wr(@W@ b) { unsafe { *(b as @W@) = gs } }
+fn main() {
+    @W@ b = alloc(8)
+    wr(b)
+    exit(load32(b))
+}
+EOF
+        ;;
+        compound_store) cat <<'EOF'
+static @W@ gs = 40
+fn wr(@W@ b) { unsafe { *(b as @W@) += gs } }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 2)
+    wr(b)
+    exit(load32(b))
+}
+EOF
+        ;;
+        # raw_f64_to_u64: f64 bits stored into a u64 static unconverted, as
+        # --legacy does: the static is neither 42 nor 0, exit 9.
+        raw_f64_to_u64) cat <<'EOF'
+static @W@ gs = 0
+fn g(@W@ b) { unsafe { *(b as f64) -> gs } }
+fn main() { @W@ b = alloc(8)
+ f64 w = 42.0
+ unsafe { *(b as f64) = w }
+ g(b)
+ @W@ r = 0
+ while r < 1 { r = r + 1 }
+ if gs == 42 { exit(42) }
+ if gs == 0 { exit(0) }
+ exit(9) }
+EOF
+        ;;
+        # inlined_reader: getgs is inlined into main; this "worked" before
+        # the fix only because the inlined `gs` resolved, in main's scope, to
+        # the hidden local (#189).
+        inlined_reader) cat <<'EOF'
+static @W@ gs = 0
+fn getgs() -> @W@ { return gs }
+fn main() {
+    @W@ b = alloc(8)
+    store32(b, 42)
+    unsafe { *(b as @W@) -> gs }
+    exit(getgs())
+}
+EOF
+        ;;
+    esac
+}
+# sdd_write CASE ARCH: writes $SDD_T/c.kr (and sdd_mod.kr) for ARCH.
+sdd_write() {
+    local w=u64
+    [ "$2" = riscv32 ] && w=u32
+    sdd_src $1 | sed "s/@W@/$w/g" > $SDD_T/c.kr
+    printf 'static %s mgs = 0\nfn mod_get() -> %s { return mgs }\n' $w $w > $SDD_T/sdd_mod.kr
+}
+SDD_T=$(mktemp -d)
+SDD_CASES="fn main_noinl samefn_then_other nested_if loop loopcond w_u8 w_u16 w_u32 w_i32 w_i8 volatile import static_ptr_addr recursive innerblock laterdecl loopdecl fwd defer"
+SDD_CASES64="w_u64 f64 f32 f32_from_f64 raw_u64_to_f64 raw_u32_to_f32"
+# static_deref_dest_<case> <arch>: IR and --O0 exit 42 (riscv32: the cases
+# without 64-bit or float types). Red before the fix (0, 1, 7, 41 or 99).
+for SDD_A in x86_64 arm64 riscv32; do
+    SDD_L="$SDD_CASES"
+    [ $SDD_A != riscv32 ] && SDD_L="$SDD_L $SDD_CASES64"
+    for SDD_K in $SDD_L; do
+        sdd_write $SDD_K $SDD_A
+        sdd_rt_row "static_deref_dest_$SDD_K $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0
+    done
+done
+# static_deref_dest_legacy_<case> <arch>: the same programs on --legacy,
+# which always stored to the static (green before and after). Not defer
+# (IR only) and not innerblock (--legacy keeps the inner local visible
+# after its block, #40, and exits 7).
+for SDD_A in x86_64 arm64; do
+    for SDD_K in $SDD_CASES $SDD_CASES64; do
+        case $SDD_K in defer|innerblock) continue ;; esac
+        sdd_write $SDD_K $SDD_A
+        sdd_rt_row "static_deref_dest_legacy_$SDD_K $SDD_A" $SDD_A 42 $SDD_T/c.kr --legacy
+    done
+done
+# static_deref_dest_guard_<case> <arch>: shapes the fix must not change, on
+# IR, --O0 and --legacy (green before and after, except raw_f64_to_u64 on
+# x86_64/arm64, whose IR and --O0 configs gave 0 before the fix: the value
+# went to the hidden local of #203). raw_f64_to_u64 wants 9
+# (the raw f64 bits, as --legacy stores them); riscv32 has no float types,
+# so its raw_f64_to_u64 row pins the refusal instead (want the
+# no-hardware-FPU error on every config, no output).
+for SDD_A in x86_64 arm64 riscv32; do
+    for SDD_K in local param undeclared shadow_local write_form compound_store raw_f64_to_u64; do
+        sdd_write $SDD_K $SDD_A
+        SDD_ROW="static_deref_dest_guard_$SDD_K $SDD_A"
+        if [ $SDD_K = raw_f64_to_u64 ] && [ $SDD_A = riscv32 ]; then
+            TOTAL=$((TOTAL + 1))
+            SDD_BAD=""
+            for SDD_F in "" --O0 --legacy; do
+                rm -f $SDD_T/bin
+                if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=riscv32 $SDD_F $SDD_T/c.kr -o $SDD_T/bin > $SDD_T/ce 2>&1 || [ -f $SDD_T/bin ] \
+                   || ! grep -qF "c.kr:2:31: error: float (f16/f32/f64) not supported on riscv32 (no hardware FPU)" $SDD_T/ce; then
+                    SDD_BAD="$SDD_BAD ${SDD_F:-IR}: $(head -1 $SDD_T/ce | cut -c1-120);"
+                fi
+            done
+            if [ -z "$SDD_BAD" ]; then
+                PASS=$((PASS + 1))
+                echo "  $SDD_ROW: PASS (riscv32 has no float types: refused at 2:31 on IR, --O0, --legacy)"
+            else
+                echo "FAIL: $SDD_ROW (want the riscv32 no-FPU refusal at 2:31, no output:$SDD_BAD)"
+                FAIL=$((FAIL + 1))
+            fi
+            continue
+        fi
+        SDD_W=42
+        [ $SDD_K = raw_f64_to_u64 ] && SDD_W=9
+        sdd_rt_row "$SDD_ROW" $SDD_A $SDD_W $SDD_T/c.kr IR --O0 --legacy
+    done
+done
+# static_deref_dest_inlined_reader: 42 on every config of every arch (a
+# pin: green before and after, see inlined_reader above). Skipped as a
+# whole when a needed qemu is missing.
+TOTAL=$((TOTAL + 1))
+SDD_ROW=static_deref_dest_inlined_reader
+SDD_GOT=""; SDD_BAD=0; SDD_SKIP=""
+for SDD_A in x86_64 arm64 riscv32; do
+    case $SDD_A in
+        x86_64|arm64) arch_runner $SDD_A || SDD_SKIP="$ARCH_NORUN" ;;
+        riscv32) [ -n "$QEMU_RV32" ] || SDD_SKIP="no qemu-riscv32" ;;
+    esac
+done
+if [ -n "$SDD_SKIP" ]; then
+    skip_row $SDD_ROW "$SDD_SKIP"
+else
+    for SDD_A in x86_64 arm64 riscv32; do
+        sdd_runner $SDD_A $SDD_ROW
+        sdd_write inlined_reader $SDD_A
+        for SDD_F in IR --O0 --legacy; do
+            [ $SDD_A = riscv32 ] && [ $SDD_F = --legacy ] && continue
+            SDD_FL=$SDD_F; [ $SDD_F = IR ] && SDD_FL=""
+            SDD_RC=$(sdd_exec $SDD_A "$SDD_FL" $SDD_T/c.kr)
+            SDD_GOT="$SDD_GOT $SDD_A $SDD_F $SDD_RC,"
+            [ "$SDD_RC" = 42 ] || SDD_BAD=1
+        done
+    done
+    if [ $SDD_BAD = 0 ]; then
+        PASS=$((PASS + 1))
+        echo "  $SDD_ROW: PASS (want 42:${SDD_GOT%,})"
+    else
+        echo "FAIL: $SDD_ROW (want 42:${SDD_GOT%,})"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+
+# Listing rows for the targets that do not run here (#203): the case stores
+# its `-> gs` into a static, its control twin into a local; both programs
+# declare their statics zero-initialised (`= 0`).
+#   static_deref_dest_xtensa_<case>: --arch=xtensa --freestanding, counted by
+#       tests/helpers/xtcount.py --stores (base not a1): want case - control
+#       = 1 (0 before the fix: the value went to a register).
+#   static_deref_dest_xtensa_ir: --emit=ir of the u32 case: one static_store
+#       in setit (0 before the fix).
+#   static_deref_dest_riscv32_freestanding: --emit=asm, the u32 case and its
+#       control: (c.)?(sw|sh|sb) not on (sp): want 1 / 0 (0 / 0 before).
+# sdd_xt_prog CASE 1|0: the case (1) or its control twin (0).
+sdd_xt_prog() {
+    local t=u32 st=u32 cast=u32 pre="" body
+    case $1 in
+        u8|u16) t=$1; st=$1; cast=$1 ;;
+        i8) t=i32; st=i32; cast=i8 ;;
+    esac
+    if [ "$2" = 1 ]; then body="unsafe { *(b as $cast) -> gs }"; else pre="$st lv = 0
+ "; body="unsafe { *(b as $cast) -> lv }"; fi
+    [ $1 = volatile ] && body=$(printf '%s' "$body" | sed 's/^unsafe/volatile/')
+    printf 'static %s gs = 0\nstatic u32 gt = 0\n' $t
+    case $1 in
+        nested_if) printf 'fn setit(u32 b, u32 c) { %sif c != 0 { %s } }\n' "$pre" "$body" ;;
+        loop) printf 'fn setit(u32 b, u32 c) { %su32 i = 0\n while i < c { %s\n i = i + 1 } }\n' "$pre" "$body" ;;
+        *) printf 'fn setit(u32 b, u32 c) { %s%s }\n' "$pre" "$body" ;;
+    esac
+    printf 'fn main() { setit(0x3FF00000, 1) }\n'
+}
+# sdd_xt_stores FILE: xtcount.py --stores of FILE's code blob, or CE
+sdd_xt_stores() {
+    rm -f "$1.elf" "$1.code"
+    if ! $KRC --arch=xtensa --freestanding "$1" -o "$1.elf" > /dev/null 2>&1 || ! ul_xt_blob "$1.elf" "$1.code"; then
+        echo CE; return
+    fi
+    python3 -I "$DIR/helpers/xtcount.py" "$1.code" --stores 2>&1
+    rm -f "$1.elf" "$1.code"
+}
+SDD_XT_TOOLS=1
+if ! command -v xtensa-lx106-elf-objdump > /dev/null 2>&1 || ! command -v readelf > /dev/null 2>&1; then SDD_XT_TOOLS=0; fi
+for SDD_K in u32 u8 u16 i8 volatile nested_if loop; do
+    TOTAL=$((TOTAL + 1))
+    SDD_ROW="static_deref_dest_xtensa_$SDD_K"
+    if [ $SDD_XT_TOOLS = 0 ]; then skip_row $SDD_ROW "xtensa-lx106-elf-objdump/readelf not installed"; continue; fi
+    sdd_xt_prog $SDD_K 1 > $SDD_T/xc.kr
+    sdd_xt_prog $SDD_K 0 > $SDD_T/xk.kr
+    SDD_C=$(sdd_xt_stores $SDD_T/xc.kr)
+    SDD_K0=$(sdd_xt_stores $SDD_T/xk.kr)
+    if [ -n "$SDD_C" ] && [ -n "$SDD_K0" ] && [ "${SDD_C//[0-9]/}${SDD_K0//[0-9]/}" = "" ] && [ $((SDD_C - SDD_K0)) = 1 ]; then
+        PASS=$((PASS + 1))
+        echo "  $SDD_ROW: PASS (stores: case $SDD_C / control $SDD_K0)"
+    else
+        echo "FAIL: $SDD_ROW (stores: case $SDD_C / control $SDD_K0, want case = control + 1; equal = the static was not written)"
+        FAIL=$((FAIL + 1))
+    fi
+done
+# xtensa_store_counter_selftest: the guard of xtcount.py --stores. Every
+# layout writes with `vstore*`, which every compiler keeps, so the expected
+# counts do not depend on the compiler under test: case = control + 1 on
+# every layout. 198 layouts, each a case and its control twin (the write
+# removed):
+#   padding        vstore8/16/32 after 0..31 lines of `h = k` (static
+#                  writes: literal pools of growing size, and stores the
+#                  counter must count in both) or `h = h + k` padding
+#                  (static reads and writes): 3 forms x 15 x 2 = 90
+#   multi-function a write helper wr() after 1-3 literal-free functions
+#                  rotating through six body shapes, with 0 or 1
+#                  literal-using function in between and a literal-free and
+#                  a literal-using one after it; the twin's wr() is empty:
+#                  3 x 6 x 2 x 3 widths = 108
+TOTAL=$((TOTAL + 1))
+if [ $SDD_XT_TOOLS = 0 ]; then
+    skip_row xtensa_store_counter_selftest "xtensa-lx106-elf-objdump/readelf not installed"
+else
+    # sdd_xs_pad WIDTH N 1|0 w|r: one padding layout
+    sdd_xs_pad() {
+        local P="" k R=""
+        for k in $(seq 1 $2); do
+            if [ "$4" = r ]; then P="$P    h = h + $k
+"; else P="$P    h = $k
+"; fi
+        done
+        [ "$3" = 1 ] && R="    vstore$1(z, 1)"
+        printf 'static u32 h = 3\nfn main() {\n    u32 z = 256\n%s%s\n    exit(0)\n}\n' "$P" "$R"
+    }
+    SDD_XB=("p + 7" "p * 3" "p & 5" "p - 1" "p ^ 9" "p << 2")
+    # sdd_xs_multi NFREE ROT NLIT WIDTH 1|0: one multi-function layout
+    sdd_xs_multi() {
+        local i
+        printf 'static u32 h = 3\n'
+        for i in $(seq 1 $1); do printf 'fn f%d(u32 p) { h = %s }\n' $i "${SDD_XB[$(( ($2 + i) % 6 ))]}"; done
+        for i in $(seq 1 $3); do printf 'fn g%d(u32 p) { h = p + 0x%x }\n' $i $((0x12340 + i)); done
+        if [ "$5" = 1 ]; then
+            printf 'fn wr(u32 p) {\n    vstore%d(p + 4, 1)\n}\n' $4
+        else
+            printf 'fn wr(u32 p) {\n    return\n}\n'
+        fi
+        printf 'fn z1(u32 p) { h = p * 3 }\nfn z2(u32 p) { h = p + 0x12345 }\nfn main() {\n'
+        for i in $(seq 1 $1); do printf '    f%d(1)\n' $i; done
+        for i in $(seq 1 $3); do printf '    g%d(1)\n' $i; done
+        printf '    wr(256)\n    z1(2)\n    z2(3)\n    exit(0)\n}\n'
+    }
+    SDD_XN=0; SDD_XOK=0; SDD_XBAD=""
+    sdd_xs_check() {
+        local c t
+        c=$(sdd_xt_stores $SDD_T/xsc.kr); t=$(sdd_xt_stores $SDD_T/xsk.kr)
+        SDD_XN=$((SDD_XN + 1))
+        if [ -n "$c" ] && [ -n "$t" ] && [ "${c//[0-9]/}${t//[0-9]/}" = "" ] && [ $((c - t)) = 1 ]; then
+            SDD_XOK=$((SDD_XOK + 1))
+        elif [ ${#SDD_XBAD} -lt 300 ]; then
+            SDD_XBAD="$SDD_XBAD $1: $c/$t;"
+        fi
+    }
+    for SDD_XK in w r; do
+        for SDD_XW in 8 16 32; do
+            for SDD_XP in 0 1 2 3 4 5 6 7 8 9 11 13 17 23 31; do
+                sdd_xs_pad $SDD_XW $SDD_XP 1 $SDD_XK > $SDD_T/xsc.kr
+                sdd_xs_pad $SDD_XW $SDD_XP 0 $SDD_XK > $SDD_T/xsk.kr
+                sdd_xs_check "$SDD_XK/$SDD_XW/$SDD_XP"
+            done
+        done
+    done
+    for SDD_XF in 1 2 3; do
+        for SDD_XR in 0 1 2 3 4 5; do
+            for SDD_XL in 0 1; do
+                for SDD_XW in 8 16 32; do
+                    sdd_xs_multi $SDD_XF $SDD_XR $SDD_XL $SDD_XW 1 > $SDD_T/xsc.kr
+                    sdd_xs_multi $SDD_XF $SDD_XR $SDD_XL $SDD_XW 0 > $SDD_T/xsk.kr
+                    sdd_xs_check "m/$SDD_XF/$SDD_XR/$SDD_XL/$SDD_XW"
+                done
+            done
+        done
+    done
+    if [ "$SDD_XN/$SDD_XOK" = "198/198" ]; then
+        PASS=$((PASS + 1))
+        echo "  xtensa_store_counter_selftest: PASS (198 of 198 layouts: case = control + 1)"
+    else
+        echo "FAIL: xtensa_store_counter_selftest ($SDD_XOK of $SDD_XN layouts counted case = control + 1, want 198 of 198; case/control:$SDD_XBAD)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+TOTAL=$((TOTAL + 1))
+sdd_xt_prog u32 1 > $SDD_T/xc.kr
+SDD_IR=$($KRC --arch=xtensa --freestanding --emit=ir $SDD_T/xc.kr 2> /dev/null)
+SDD_N=$(printf '%s\n' "$SDD_IR" | awk '/^function / { on = ($2 == "setit:") ; next } on' | grep -c 'static_store')
+if ! printf '%s\n' "$SDD_IR" | grep -q '^function setit:'; then
+    echo "FAIL: static_deref_dest_xtensa_ir (no 'function setit:' in the --emit=ir output)"
+    FAIL=$((FAIL + 1))
+elif [ "$SDD_N" = 1 ]; then
+    PASS=$((PASS + 1))
+    echo "  static_deref_dest_xtensa_ir: PASS (1 static_store in setit)"
+else
+    echo "FAIL: static_deref_dest_xtensa_ir ($SDD_N static_store in setit, want 1; 0 = the static was not written)"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+sdd_xt_prog u32 0 > $SDD_T/xk.kr
+SDD_C=$(ul_rv_listing $SDD_T/xc.kr | grep -E ': [0-9a-f]+  (c\.)?(sw|sh|sb) ' | grep -vc '(sp)')
+SDD_K0=$(ul_rv_listing $SDD_T/xk.kr | grep -E ': [0-9a-f]+  (c\.)?(sw|sh|sb) ' | grep -vc '(sp)')
+if [ "$SDD_C/$SDD_K0" = "1/0" ]; then
+    PASS=$((PASS + 1))
+    echo "  static_deref_dest_riscv32_freestanding: PASS (real stores: case 1 / control 0)"
+else
+    echo "FAIL: static_deref_dest_riscv32_freestanding (real stores: case $SDD_C / control $SDD_K0, want 1 / 0; 0 / 0 = the static was not written)"
+    FAIL=$((FAIL + 1))
+fi
+rm -rf "$SDD_T"
+
+# --- inline-asm operands on arm64 --legacy / --emit=obj / --emit=lkm (#204) --
+# The arm64 legacy code generator (also the one behind --emit=obj and
+# --emit=lkm on arm64) dropped an asm in()/out() operand that was not a local
+# variable (a static, an undeclared name) and a register name other than
+# x0..x30 without a word: the binding just vanished. Every IR backend and the
+# x86_64 legacy one refuse both; arm64 legacy now does the same. On the IR
+# backend, `out(r -> s)` after `*(p as T) -> s` in the same function used to
+# write the hidden local of #203; it is now the same error.
+# (arm64 --emit=lkm is not an output format -- the build stops with
+# "--emit=lkm currently supports x86_64 only" after code generation -- so
+# its configs below check which of the two errors comes first.)
+#
+# sdd_ref ARCH CONFIG SRC WANT -> "" when building SRC for ARCH with CONFIG
+# (IR, --O0, --legacy, -c, --emit=asm, --emit=ir, --emit=lkm) exits 1, its
+# first stderr line is exactly WANT and no output file was written; else a
+# description of what happened.
+sdd_ref() {
+    local f=$2 rc
+    [ $2 = IR ] && f=""
+    rm -f $SDD_T/out
+    timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$1 $f "$3" -o $SDD_T/out > /dev/null 2> $SDD_T/err
+    rc=$?
+    if [ $rc = 1 ] && [ ! -e $SDD_T/out ] && [ "$(head -1 $SDD_T/err)" = "$4" ]; then return; fi
+    printf ' %s %s: exit %s, %s, stderr: %s;' $1 $2 $rc "$([ -e $SDD_T/out ] && echo 'output written' || echo 'no output')" "$(head -1 $SDD_T/err | cut -c1-140)"
+    rm -f $SDD_T/out
+}
+# sdd_ref_row ROW SRC WANT ARCH:CONFIG...: one refusal row over the configs.
+sdd_ref_row() {
+    local row=$1 src=$2 want=$3 bad="" ac
+    shift 3
+    TOTAL=$((TOTAL + 1))
+    for ac in "$@"; do bad="$bad$(sdd_ref ${ac%%:*} ${ac#*:} "$src" "$want")"; done
+    if [ -z "$bad" ]; then
+        PASS=$((PASS + 1))
+        echo "  $row: PASS (refused on $*: ${want#"$SDD_T"/})"
+    else
+        echo "FAIL: $row (want exit 1, no output, '${want#"$SDD_T"/}':$bad)"
+        FAIL=$((FAIL + 1))
+    fi
+}
+# sdd_lkm SRC OUT: SRC with the @module_init/@module_exit stubs --emit=lkm needs.
+sdd_lkm() {
+    { printf '@module_init\nfn init() -> u64 {\n    return 0\n}\n@module_exit\nfn fini() {\n    return\n}\n'; cat "$1"; } > "$2"
+}
+SDD_T=$(mktemp -d)
+SDD_NF="error: inline-asm constraint variable not found: 'gs' (asm in()/out() operands must be local variables)"
+SDD_LKM_X86="krc: --emit=lkm currently supports x86_64 only"
+# asm_out_static_rejected <arch>: out(reg -> gs), gs a static.
+printf 'static u64 gs = 0\nfn getgs() -> u64 { return gs }\nfn setit() { asm { "0x48 0xC7 0xC0 0x2A 0x00 0x00 0x00" } out(rax -> gs) }\nfn main() {\n    setit()\n    exit(getgs())\n}\n' > $SDD_T/ox.kr
+printf 'static u64 gs = 0\nfn getgs() -> u64 { return gs }\nfn setit() { asm { "mov x0, #42" } out(x0 -> gs) }\nfn main() {\n    setit()\n    exit(getgs())\n}\n' > $SDD_T/oa.kr
+printf 'static u32 gs = 0\nfn getgs() -> u32 { return gs }\nfn setit() { asm { "li a0, 42" } out(a0 -> gs) }\nfn main() {\n    setit()\n    exit(getgs())\n}\n' > $SDD_T/or.kr
+sdd_lkm $SDD_T/oa.kr $SDD_T/oal.kr
+sdd_ref_row "asm_out_static_rejected x86_64" $SDD_T/ox.kr "$SDD_NF" x86_64:IR x86_64:--legacy
+TOTAL=$((TOTAL + 1))
+SDD_BAD="$(sdd_ref arm64 IR $SDD_T/oa.kr "$SDD_NF")$(sdd_ref arm64 --legacy $SDD_T/oa.kr "$SDD_NF")$(sdd_ref arm64 -c $SDD_T/oa.kr "$SDD_NF")$(sdd_ref arm64 --emit=lkm $SDD_T/oal.kr "$SDD_NF")"
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_out_static_rejected arm64: PASS (refused on IR, --legacy, -c, --emit=lkm: $SDD_NF)"
+else
+    echo "FAIL: asm_out_static_rejected arm64 (want exit 1, no output, '$SDD_NF':$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+sdd_ref_row "asm_out_static_rejected riscv32" $SDD_T/or.kr "$SDD_NF" riscv32:IR
+# asm_out_after_ptrload_static_rejected <arch>: `-> gs` then out(reg -> gs)
+# in the same function (IR: exit 0 before, the hidden local took the write).
+printf 'static u64 gs = 0\nfn getgs() -> u64 { return gs }\nfn setit(u64 b) {\n    unsafe { *(b as u64) -> gs }\n    asm { "0x48 0xC7 0xC0 0x2A 0x00 0x00 0x00" } out(rax -> gs)\n}\nfn main() {\n    u64 b = alloc(8)\n    store64(b, 1)\n    setit(b)\n    exit(getgs())\n}\n' > $SDD_T/px.kr
+sed 's/"0x48 0xC7 0xC0 0x2A 0x00 0x00 0x00" } out(rax/"mov x0, #42" } out(x0/' $SDD_T/px.kr > $SDD_T/pa.kr
+sdd_ref_row "asm_out_after_ptrload_static_rejected x86_64" $SDD_T/px.kr "$SDD_NF" x86_64:IR x86_64:--legacy
+sdd_ref_row "asm_out_after_ptrload_static_rejected arm64" $SDD_T/pa.kr "$SDD_NF" arm64:IR arm64:--legacy arm64:-c
+# asm_in_static_rejected_arm64_legacy: in(gs -> x0), gs a static.
+printf 'static u64 gs = 42\nfn f() -> u64 { u64 r = 0\n asm { "mov x1, x0" } in(gs -> x0) out(x1 -> r)\n return r }\nfn main() { exit(f()) }\n' > $SDD_T/ia.kr
+sdd_lkm $SDD_T/ia.kr $SDD_T/ial.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD="$(sdd_ref arm64 --legacy $SDD_T/ia.kr "$SDD_NF")$(sdd_ref arm64 -c $SDD_T/ia.kr "$SDD_NF")$(sdd_ref arm64 --emit=lkm $SDD_T/ial.kr "$SDD_NF")"
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_in_static_rejected_arm64_legacy: PASS (refused on --legacy, -c, --emit=lkm: $SDD_NF)"
+else
+    echo "FAIL: asm_in_static_rejected_arm64_legacy (want exit 1, no output, '$SDD_NF':$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# asm_bad_reg_rejected_arm64_legacy: out(rax -> r) on arm64.
+SDD_BR="error: unknown arm64 inline-asm constraint register 'rax' (want x0-x30)"
+printf 'fn f() -> u64 { u64 r = 5\n asm { "mov x1, x0" } out(rax -> r)\n return r }\nfn main() { exit(f()) }\n' > $SDD_T/ba.kr
+sdd_lkm $SDD_T/ba.kr $SDD_T/bal.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD="$(sdd_ref arm64 --legacy $SDD_T/ba.kr "$SDD_BR")$(sdd_ref arm64 -c $SDD_T/ba.kr "$SDD_BR")$(sdd_ref arm64 --emit=lkm $SDD_T/bal.kr "$SDD_BR")"
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_bad_reg_rejected_arm64_legacy: PASS (refused on --legacy, -c, --emit=lkm: $SDD_BR)"
+else
+    echo "FAIL: asm_bad_reg_rejected_arm64_legacy (want exit 1, no output, '$SDD_BR':$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# asm_constraint_accepted_names_still_bind_arm64 (pin): in(v -> xN) and
+# out(xN -> o) for every N in 0..30 build on arm64 IR, --legacy and -c; on
+# --emit=lkm the build gets past code generation to the x86_64-only refusal
+# (no asm error first).
+{ printf 'fn main() {\n    u64 v = 1\n    u64 o = 0\n'
+  for SDD_N in $(seq 0 30); do printf '    asm { "0xD503201F" } in(v -> x%d)\n    asm { "0xD503201F" } out(x%d -> o)\n' $SDD_N $SDD_N; done
+  printf '    exit(o - 1)\n}\n'; } > $SDD_T/na.kr
+sdd_lkm $SDD_T/na.kr $SDD_T/nal.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD=""
+for SDD_F in IR --legacy -c; do
+    SDD_FL=$SDD_F; [ $SDD_F = IR ] && SDD_FL=""
+    rm -f $SDD_T/out
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 $SDD_FL $SDD_T/na.kr -o $SDD_T/out > $SDD_T/err 2>&1 || [ ! -f $SDD_T/out ]; then
+        SDD_BAD="$SDD_BAD $SDD_F: $(grep -m1 error $SDD_T/err | cut -c1-120);"
+    fi
+done
+SDD_BAD="$SDD_BAD$(sdd_ref arm64 --emit=lkm $SDD_T/nal.kr "$SDD_LKM_X86")"
+rm -f $SDD_T/out
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  asm_constraint_accepted_names_still_bind_arm64: PASS (x0-x30 in() and out() build on IR, --legacy, -c; --emit=lkm stops only at '$SDD_LKM_X86')"
+else
+    echo "FAIL: asm_constraint_accepted_names_still_bind_arm64 (want x0-x30 to build:$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# asm_constraint_out_x0_binds_arm64 (pin): `movz x0, #42` then out(x0 -> v)
+# exits 42 on IR and --legacy; with -c, <f>'s disassembly stores x0 to v's
+# slot right after the movz and loads that slot back later.
+TOTAL=$((TOTAL + 1))
+printf 'fn main() {\n    u64 v = 7\n    asm { "0xD2800540" } out(x0 -> v)\n    exit(v)\n}\n' > $SDD_T/xa.kr
+printf 'fn f() -> u64 {\n    u64 v = 7\n    asm { "0xD2800540" } out(x0 -> v)\n    return v\n}\n' > $SDD_T/xo.kr
+if ! command -v llvm-objdump > /dev/null 2>&1; then
+    skip_row asm_constraint_out_x0_binds_arm64 "llvm-objdump not installed (the -c config disassembles an arm64 object)"
+elif sdd_runner arm64 asm_constraint_out_x0_binds_arm64; then
+    SDD_GOT="IR $(sdd_exec arm64 "" $SDD_T/xa.kr), --legacy $(sdd_exec arm64 --legacy $SDD_T/xa.kr)"
+    rm -f $SDD_T/xo.o
+    SDD_OBJ=no
+    if $KRC --arch=arm64 -c $SDD_T/xo.kr -o $SDD_T/xo.o > /dev/null 2>&1 \
+       && llvm-objdump -d $SDD_T/xo.o | awk '/^[0-9a-f]+ <[^>]*>:$/ { on = ($2 == "<f>:"); next } on' | python3 -I -c '
+import re, sys
+ins = [l.rstrip("\n").split("\t") for l in sys.stdin]
+ins = [(i[1].strip() + " " + (i[2] if len(i) > 2 else "")).split("//")[0].strip() for i in ins if len(i) >= 2]
+for k, t in enumerate(ins):
+    if re.fullmatch(r"mov x0, #0x2a", t) and k + 1 < len(ins):
+        m = re.fullmatch(r"str x0, \[sp, #(0x[0-9a-f]+)\]", ins[k + 1])
+        if m and any(re.fullmatch(r"ldr x0, \[sp, #" + m.group(1) + r"\]", u) for u in ins[k + 2:]):
+            sys.exit(0)
+sys.exit(1)'; then SDD_OBJ=yes; fi
+    rm -f $SDD_T/xo.o
+    if [ "$SDD_GOT" = "IR 42, --legacy 42" ] && [ $SDD_OBJ = yes ]; then
+        PASS=$((PASS + 1))
+        echo "  asm_constraint_out_x0_binds_arm64: PASS ($SDD_GOT; -c: mov x0, #0x2a; str x0 to v's slot; ldr of that slot later)"
+    else
+        echo "FAIL: asm_constraint_out_x0_binds_arm64 (want IR 42, --legacy 42, -c store+reload of x0: got $SDD_GOT, -c $SDD_OBJ)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+rm -rf "$SDD_T"
+
+# --- stores by name into a const or a whole static array/struct (#206/#207) --
+# `C = v`, `C OP= v`, `*(p as T) -> C` and asm `out(r -> C)` with C a
+# `const` wrote the constant's storage (runtime reads changed, folded uses
+# kept the declared value); the same stores into a whole static array or
+# struct by its bare name (`ga = v`, `gp = q`, `-> gp`) wrote its first word
+# (`gp = struct_value` crashed on --legacy). Both are now an error at the
+# name, on every backend. Field and element stores are unchanged.
+# Refusal rows: exit 1, the exact `file:line:col: error: ...` line, no
+# output; x86_64 and arm64 on IR, --legacy and -c (--emit=obj), riscv32 on
+# IR (riscv32 programs use u32).
+SDD_T=$(mktemp -d)
+SDD_CMSG="error: cannot assign to const 'C' (a const is a compile-time constant; declare it \`static\` to change it)"
+# sdd_amsg struct|array NAME: the whole-aggregate message
+sdd_amsg() {
+    if [ $1 = struct ]; then
+        printf "error: cannot assign to the whole static struct '%s' (not supported yet; assign a field: %s.field = v)" $2 $2
+    else
+        printf "error: cannot assign to the whole static array '%s' (not supported yet; assign an element: %s[i] = v)" $2 $2
+    fi
+}
+# sdd_wsrc FORM ARCH: the program of one refusal form, `@W@` the word type,
+# and "<line:col> <message>" of its error in SDD_LOC / SDD_MSG.
+sdd_wsrc() {
+    SDD_MSG=$SDD_CMSG
+    case $1 in
+        assign) SDD_LOC=2:10; printf 'const @W@ C = 3\nfn f() { C = 5 }\nfn main() { f()\n exit(C) }\n' ;;
+        compound) SDD_LOC=2:10; printf 'const @W@ C = 3\nfn f() { C += 2 }\nfn main() { f()\n exit(C) }\n' ;;
+        ptrload) SDD_LOC=2:39; printf 'const @W@ C = 3\nfn f(@W@ b) { unsafe { *(b as @W@) -> C } }\nfn main() { @W@ b = alloc(8)\n store32(b, 5)\n f(b)\n exit(C) }\n' ;;
+        asm_out)
+            case $2 in
+                x86_64)  SDD_LOC=2:36; printf 'const @W@ C = 3\nfn f() { asm { "0x90" } out(rax -> C) }\nfn main() { f()\n exit(C) }\n' ;;
+                arm64)   SDD_LOC=2:41; printf 'const @W@ C = 3\nfn f() { asm { "0xD503201F" } out(x0 -> C) }\nfn main() { f()\n exit(C) }\n' ;;
+                riscv32) SDD_LOC=2:34; printf 'const @W@ C = 3\nfn f() { asm { "nop" } out(a0 -> C) }\nfn main() { f()\n exit(C) }\n' ;;
+            esac ;;
+        struct_assign) SDD_LOC=4:10; SDD_MSG=$(sdd_amsg struct gp)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nfn f() { gp = 5 }\nfn main() { f()\n exit(gp.a) }\n' ;;
+        struct_copy) SDD_LOC=7:2; SDD_MSG=$(sdd_amsg struct gp)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nfn f() { P l\n l.a = 5\n l.b = 6\n gp = l }\nfn rd() -> @W@ { @W@ r = 0\n while r < 1 { r = r + 1 }\n return gp.a + gp.b }\nfn main() { f()\n exit(rd()) }\n' ;;
+        array_assign) SDD_LOC=2:10; SDD_MSG=$(sdd_amsg array ga)
+            printf 'static @W@[4] ga\nfn f() { ga = 5 }\nfn main() { f()\n exit(ga[0]) }\n' ;;
+        array_compound) SDD_LOC=2:10; SDD_MSG=$(sdd_amsg array ga)
+            printf 'static @W@[4] ga\nfn f() { ga += 5 }\nfn main() { f()\n exit(ga[0]) }\n' ;;
+        struct_ptrload) SDD_LOC=4:43; SDD_MSG=$(sdd_amsg struct gp)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nfn setit(@W@ b) { unsafe { *(b as @W@) -> gp } }\nfn main() { @W@ b = alloc(8)\n store32(b, 5)\n setit(b)\n exit(gp.a) }\n' ;;
+        array_ptrload) SDD_LOC=2:43; SDD_MSG=$(sdd_amsg array ga)
+            printf 'static @W@[4] ga\nfn setit(@W@ b) { unsafe { *(b as @W@) -> ga } }\nfn main() { @W@ b = alloc(8)\n store32(b, 5)\n setit(b)\n exit(ga[0]) }\n' ;;
+        structarray_assign) SDD_LOC=4:10; SDD_MSG=$(sdd_amsg array gps)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P[2] gps\nfn f() { gps = 5 }\nfn main() { f()\n exit(0) }\n' ;;
+    esac
+}
+# const_write_refused_<form> <arch> / whole_static_write_refused_<form> <arch>
+for SDD_A in x86_64 arm64 riscv32; do
+    SDD_W=u64; SDD_CF="$SDD_A:IR $SDD_A:--legacy $SDD_A:-c"
+    [ $SDD_A = riscv32 ] && { SDD_W=u32; SDD_CF="$SDD_A:IR"; }
+    for SDD_K in assign compound ptrload asm_out struct_assign struct_copy array_assign array_compound struct_ptrload array_ptrload structarray_assign; do
+        sdd_wsrc $SDD_K $SDD_A > /dev/null
+        sdd_wsrc $SDD_K $SDD_A | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+        case $SDD_K in
+            assign|compound|ptrload|asm_out) SDD_ROW="const_write_refused_$SDD_K $SDD_A" ;;
+            *) SDD_ROW="whole_static_write_refused_$SDD_K $SDD_A" ;;
+        esac
+        sdd_ref_row "$SDD_ROW" $SDD_T/c.kr "$SDD_T/c.kr:$SDD_LOC: $SDD_MSG" $SDD_CF
+    done
+done
+# Guards (pins): a local shadowing the const may be assigned; the const may
+# be read; field and element stores of whole statics still work. 42 on IR,
+# --O0 and --legacy.
+for SDD_A in x86_64 arm64 riscv32; do
+    SDD_W=u64; [ $SDD_A = riscv32 ] && SDD_W=u32
+    printf 'const @W@ C = 3\nfn f() -> @W@ { @W@ C = 9\n C = C + 33\n return C }\nfn main() { exit(f()) }\n' | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+    sdd_rt_row "const_shadow_local_ok $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0 --legacy
+    printf 'const @W@ C = 42\nfn main() { @W@ x = C\n exit(x) }\n' | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+    sdd_rt_row "const_read_ok $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0 --legacy
+    printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nstatic @W@[4] ga\nfn f() { gp.a = 40\n ga[1] = 2\n gp.b += 0 }\nfn main() { f()\n exit(gp.a + ga[1]) }\n' | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+    sdd_rt_row "whole_static_field_and_element_ok $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0 --legacy
+done
+# Uncalled functions: the default executable build (IR or --legacy) does not
+# lower a function nothing calls, so an uncalled `-> gp` (u) or `C = 5` (q)
+# still builds there (whole_static_write_uncalled_builds, pin); -c,
+# --emit=asm, --emit=ir and --emit=lkm lower every function and refuse it
+# (static_write_uncalled_refused_obj_lkm, red before: all of them built).
+printf 'struct P { u64 a\n u64 b }\nstatic P gp\nfn setit(u64 b) { unsafe { *(b as u64) -> gp } }\nfn main() { exit(0) }\n' > $SDD_T/u.kr
+printf 'const u64 C = 3\nfn never() { C = 5 }\nfn main() { exit(C) }\n' > $SDD_T/q.kr
+printf 'const u64 C = 3\nfn never() { C = 5 }\n@module_init\nfn init() -> u64 { return 0 }\n@module_exit\nfn fini() { }\n' > $SDD_T/ql.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD=""
+for SDD_A in x86_64 arm64; do
+    for SDD_F in IR --legacy; do
+        SDD_FL=$SDD_F; [ $SDD_F = IR ] && SDD_FL=""
+        for SDD_S in u q; do
+            rm -f $SDD_T/out
+            if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$SDD_A $SDD_FL $SDD_T/$SDD_S.kr -o $SDD_T/out > $SDD_T/err 2>&1 || [ ! -f $SDD_T/out ]; then
+                SDD_BAD="$SDD_BAD $SDD_S.kr $SDD_A $SDD_F: $(grep -m1 error $SDD_T/err | cut -c1-140);"
+            fi
+        done
+    done
+done
+rm -f $SDD_T/out
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  whole_static_write_uncalled_builds: PASS (uncalled '-> gp' and 'C = 5' build on x86_64/arm64 IR and --legacy)"
+else
+    echo "FAIL: whole_static_write_uncalled_builds (want both to build:$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+SDD_BAD=""
+SDD_QW="$SDD_T/q.kr:2:14: $SDD_CMSG"
+SDD_QLW="$SDD_T/ql.kr:2:14: $SDD_CMSG"
+SDD_UW="$SDD_T/u.kr:4:43: $(sdd_amsg struct gp)"
+for SDD_A in x86_64 arm64; do
+    SDD_BAD="$SDD_BAD$(sdd_ref $SDD_A -c $SDD_T/q.kr "$SDD_QW")$(sdd_ref $SDD_A --emit=asm $SDD_T/q.kr "$SDD_QW")$(sdd_ref $SDD_A --emit=ir $SDD_T/q.kr "$SDD_QW")"
+    SDD_BAD="$SDD_BAD$(sdd_ref $SDD_A --emit=lkm $SDD_T/ql.kr "$SDD_QLW")$(sdd_ref $SDD_A -c $SDD_T/u.kr "$SDD_UW")"
+done
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  static_write_uncalled_refused_obj_lkm: PASS (x86_64 and arm64: uncalled 'C = 5' refused at 2:14 on -c, --emit=asm, --emit=ir, --emit=lkm; uncalled '-> gp' at 4:43 on -c)"
+else
+    echo "FAIL: static_write_uncalled_refused_obj_lkm (want exit 1, no output, the located error:$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# const_write_refused_after_inner_local (IR only): a local `C` declared in an
+# inner block is out of scope after it, so `C = 5` below it is a write to the
+# const. (--legacy keeps the inner local visible after its block, #40, and
+# accepts this program; no legacy row uses this shape.)
+printf 'const u64 C = 3\nfn main() { u64 r = 0\n if r == 0 { u64 C = 1\n  r = C }\n C = 5\n exit(r) }\n' > $SDD_T/c.kr
+sdd_ref_row const_write_refused_after_inner_local $SDD_T/c.kr "$SDD_T/c.kr:5:2: $SDD_CMSG" x86_64:IR x86_64:--O0 arm64:IR arm64:--O0
+rm -rf "$SDD_T"
+
 # CSE across the ops above is not observable by a single-threaded run: they
 # write no memory the program reads back, and the second agent that a real
 # atomic_load, vload or asm orders against does not exist in a test. So count,

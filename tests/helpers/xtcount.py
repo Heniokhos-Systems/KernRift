@@ -1,17 +1,21 @@
-# xtcount.py <code.bin> [--list]
+# xtcount.py <code.bin> [--list | --stores]
 #
-# Counts the real memory loads in an xtensa code blob (an --arch=xtensa
+# Counts the real memory accesses in an xtensa code blob (an --arch=xtensa
 # --freestanding ELF with its header stripped, as xtensa_call_disasm strips
-# it). Used by the unused_load_kept_xtensa_*, plain_load_not_merged xtensa and
-# plain_load_not_hoisted xtensa rows (#199); xtensa_load_counter_selftest is
-# this script's own guard.
+# it). Two modes:
+#   loads (default, and --list): the unused_load_kept_xtensa_*,
+#       plain_load_not_merged xtensa and plain_load_not_hoisted xtensa rows
+#       (#199); xtensa_load_counter_selftest is its guard.
+#   --stores: the static_deref_dest_xtensa_* rows (#203);
+#       xtensa_store_counter_selftest is its guard.
 #
 # A linear disassembly of the blob is wrong in two ways: the l32r literal
 # pools are data that objdump decodes as instructions (a pool word can look
 # like `l32i.n a13, a0, 0`), and objdump runs on from the end of a pool or
 # from the zero padding after a `ret.n` into the next function at a byte that
-# is not an instruction boundary, so real loads vanish and garbage appears.
-# So the blob is disassembled in segments, to a fixed point:
+# is not an instruction boundary, so real accesses vanish and garbage appears.
+# So the blob is disassembled in segments, to a fixed point (the same in both
+# modes):
 #   1. every l32r target word [t, t+4) is a pool byte;
 #   2. the 4-byte-aligned address after every ret/ret.n is a restart point
 #      (functions are 4-aligned);
@@ -20,13 +24,14 @@
 #      on its own (--start-address/--stop-address), so every segment starts on
 #      an instruction boundary and never runs into a pool;
 #   4. 1-3 repeat until no new l32r target and no new restart point appears.
-# Counted: l8ui, l16ui, l16si, l32i and l32i.n whose base is not a1 (the stack
-# pointer). Prints the count.
+# Counted, base not a1 (the stack pointer): loads l8ui, l16ui, l16si, l32i
+# and l32i.n; with --stores, stores s8i, s16i, s32i and s32i.n instead.
+# Prints the count.
 #
-# --list also prints, before the count, one line per counted load
-# (`L <addr>`) and per backward branch (`B <addr> <target>`, target < addr),
-# all addresses in decimal: the hoisting row checks that the load lies inside
-# a loop span.
+# --list (loads only) also prints, before the count, one line per counted
+# load (`L <addr>`) and per backward branch (`B <addr> <target>`, target <
+# addr), all addresses in decimal: the hoisting row checks that the load lies
+# inside a loop span.
 #
 # Needs xtensa-lx106-elf-objdump on PATH. Run it with python3 -I.
 import re
@@ -36,16 +41,18 @@ import sys
 OBJ = "xtensa-lx106-elf-objdump"
 LINE = re.compile(r"\s*([0-9a-f]+):\s+([0-9a-f]+)\s+(\S+)\s*(.*)")
 LOAD = re.compile(r"l32i(\.n)?|l8ui|l16ui|l16si")
+STORE = re.compile(r"s32i(\.n)?|s8i|s16i")
 BRANCH = re.compile(r"j|b(eq|ne|lt|ge|ltu|geu|any|none|all|nall|bc|bs)|"
                     r"b(eq|ne|lt|ge)z(\.n)?|b(eq|ne|lt|ge|ltu|geu)i|bb[cs]i")
 
 
 def main():
-    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--list"):
-        sys.stderr.write("usage: xtcount.py <code.bin> [--list]\n")
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] not in ("--list", "--stores")):
+        sys.stderr.write("usage: xtcount.py <code.bin> [--list | --stores]\n")
         return 2
     blob = sys.argv[1]
-    listing = len(sys.argv) == 3
+    listing = len(sys.argv) == 3 and sys.argv[2] == "--list"
+    counted = STORE if len(sys.argv) == 3 and sys.argv[2] == "--stores" else LOAD
     with open(blob, "rb") as fh:
         size = len(fh.read())
 
@@ -100,7 +107,7 @@ def main():
 
     n = 0
     for a, sz, mn, ops in ins:
-        if LOAD.fullmatch(mn) and not re.match(r"a\d+, a1,", ops.strip()):
+        if counted.fullmatch(mn) and not re.match(r"a\d+, a1,", ops.strip()):
             n += 1
             if listing:
                 print("L %d" % a)

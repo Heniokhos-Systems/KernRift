@@ -916,6 +916,11 @@ fn tick() {
 Static variables live in the data section for the lifetime of the program.
 Without an initializer the slot is zero (BSS).
 
+A whole static array or struct cannot be assigned as one value (`ga = v`,
+`gp = q`, `-> gp`); assign its elements or fields. (Whole-aggregate assignment
+is planned.) Such a store is a compile error at the name, on every backend —
+before 2.11.1 it silently wrote the first word (#207).
+
 **The initializer is a constant expression, not merely a literal.** This
 section said the opposite for a long time — that `= 5 + 3` stored `5` and the
 rest was silently dropped, tracked as issue #53. It is not so, and the wrong
@@ -956,7 +961,10 @@ const u64 UART_BASE = 0x3F201000
 ```
 
 `const` creates a compile-time integer constant. At use sites the value is
-inlined — there is no runtime storage.
+inlined — there is no runtime storage. Assigning to a const — `C = v`,
+`C += v`, `*(p as T) -> C`, or an asm `out(r -> C)` — is a compile error
+(before 2.11.1 it wrote the constant's storage, so runtime reads changed while
+folded uses kept the declared value, #206).
 
 ### One declaration per name, and `@shared`
 
@@ -1046,6 +1054,14 @@ u64 val = 0
 unsafe { *(addr as u32) -> val }     // load
 unsafe { *(addr as u8)  = some_byte } // store
 ```
+
+`-> dest` stores the loaded value into `dest`, resolving the name the way an
+assignment does: a local or parameter of that name, otherwise a `static` (from
+this file or an imported one), otherwise it declares a new local. `dest` is a
+name — not `arr[i]` or `s.field` — and it may not be a `const` or a whole static
+array or struct (§10). (Before 2.11.1 the default IR backend never wrote a
+static here: it bound a hidden local of that name instead, so other functions
+kept reading the static's old value, #203.)
 
 The cast type determines access width. Supported cast types:
 `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64` (plus the long
@@ -1310,9 +1326,13 @@ fn cpuid_signature() -> u64 {
 **Clause semantics**:
 - `in(<var> -> <reg>, ...)` — before the block runs, KernRift emits a
   `mov <reg>, <local_slot>` for each pair. Inputs are load-only; the
-  named variable is not updated after the block.
+  named variable is not updated after the block. `<var>` must be a local
+  variable — a `static` is rejected on every backend (arm64 `--legacy` and
+  `-c`/`--emit=obj` used to drop it silently, #204).
 - `out(<reg> -> <var>, ...)` — after the block runs, KernRift emits a
-  `mov <local_slot>, <reg>` for each pair. Outputs are store-only.
+  `mov <local_slot>, <reg>` for each pair. Outputs are store-only — a
+  `static` or `const` is rejected on every backend (arm64 `--legacy` and
+  `-c`/`--emit=obj` used to drop it silently, #204).
 - `clobbers(<reg>, ...)` — accepted syntactically but currently
   **advisory**. You still must list every register your block writes
   under `out(...)` if you need its value, and every register whose
@@ -1324,7 +1344,9 @@ fn cpuid_signature() -> u64 {
 - **x86_64**: `rax` `rcx` `rdx` `rbx` `rsp` `rbp` `rsi` `rdi` `r8` …
   `r15`. No 32-bit or 8-bit aliases yet — use the 64-bit form even if
   the instruction operates on a sub-register.
-- **ARM64**: `x0` … `x30`. No `w` (32-bit) aliases.
+- **ARM64**: `x0` … `x30`. No `w` (32-bit) aliases. Any other name is
+  an error on every arm64 backend (`--legacy` and `-c`/`--emit=obj` used to
+  drop it silently, #204).
 
 **Limitations** (V1):
 - Clauses must come immediately after the closing `)` or `}` of the
@@ -3054,8 +3076,8 @@ The migration engine currently handles the `legacy_ptr_ops` pattern:
 - `unsafe { *(addr as T) -> dest }`  →  `dest = loadN(addr)`
 - `unsafe { *(addr as T) = val }`    →  `storeN(addr, val)`
 
-Both forms lower to identical code at the codegen level, so the rewrite
-is safe by construction.
+The rewrite is exact only when `dest` is already declared and the cast type
+is unsigned; see #209.
 
 ### Proposal registry
 

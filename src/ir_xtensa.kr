@@ -1682,7 +1682,7 @@ fn xt_relax_function(uint64 code_start, uint64 line_start) {
 // --- Inline-asm mnemonic assembler --------------------------------------
 // Assembles ONE quoted asm string token into the code stream. Mirrors
 // asm_emit_rv (ir_riscv.kr:1007) but for Xtensa. Scope is deliberately tight
-// (audit: constraint-binding hardcodes x86 reg codes upstream, ir.kr:5481):
+// (audit: constraint-binding hardcodes x86 reg codes upstream, ir.kr:5506):
 // operand-less nullary mnemonics only — the register conventions the boot
 // test exercises. Xtensa has no intra-instruction compression pass, so unlike
 // riscv there is no non-compressible range to mark (rv_mark_noc has no analog).
@@ -1773,7 +1773,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_ARG (51): move value to CALL0 arg register a2..a7 -----
-    // Mirror of ir_riscv.kr:1545. imm is the 0-based arg index (ir.kr:3757):
+    // Mirror of ir_riscv.kr:1545. imm is the 0-based arg index (ir.kr:3783):
     // < 6 = register arg in a2..a7 (CALL0 ABI — six arg registers, vs
     // riscv's eight a0-a7); >= 100 = direct physical AR target (ASM I/O
     // constraints); 6..99 = overflow arg (the 7th+), stored to the pre-
@@ -1818,7 +1818,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // ----- IR_CALL (50): call0 <target> with a callee-name fixup -----
     // Mirror of ir_riscv.kr:1579, but xtensa reaches the callee in a single
     // `call0` (24-bit, PC-relative ±512 KiB) rather than an auipc+jalr pair.
-    // src1 is the ARG COUNT (ir.kr:3761), NOT a vreg — never resolve it. imm
+    // src1 is the ARG COUNT (ir.kr:3787), NOT a vreg — never resolve it. imm
     // is the callee's name token. Emit a placeholder call0 (imm18=0) and
     // record [call0_site:u32, callee_tok:u32] into the shared fixup_table;
     // resolve_fixups_xtensa() patches the imm18 after every function is laid
@@ -2030,7 +2030,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // Mirror of ir_riscv.kr:1382. Offset is always 0 — struct/array offsets
     // are folded into a prior ADD by the IR lowering, so the address is
     // entirely in src1. Width can arrive in imm OR src2 (struct field
-    // loads reuse the src2 slot — ir.kr:4024/4060/4126 — the same as the
+    // loads reuse the src2 slot — ir.kr:4050/4086/4152 — the same as the
     // riscv/arm64 backends read it). IR has no signed-load marking
     // anywhere in ir.kr (riscv's comment at the same site: x86 uses movzx,
     // arm64 ldrb/ldrh, never a sign-extending load, for every narrow load
@@ -2288,7 +2288,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_FN_ADDR (86): dst = code address of a named function -----
-    // imm = the fn_addr("name") STRING-LITERAL token (ir.kr:3367). Same PIC
+    // imm = the fn_addr("name") STRING-LITERAL token (ir.kr:3393). Same PIC
     // sequence as STR_CONST/STATIC_ADDR, table_sel 2 (fn addrs), resolved
     // against the function's code offset in resolve_addr_fixups_xtensa (NO
     // remap — code_start is final, H1). One PIC site → one reserved pool word
@@ -2338,7 +2338,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
 
     // ----- IR_STACK_ADDR (32): dst = address of a compile-time local array -----
     // imm = byte offset within this function's stack-array region (rel_off,
-    // assigned by ir.kr:4473). The region sits directly above the spill
+    // assigned by ir.kr:4499). The region sits directly above the spill
     // slots — exactly matching the frame layout already folded into
     // cs_base/total_frame above (ir_xtensa_gen step 5):
     //     base_off = XT_OVERFLOW_RESERVE + ir_spill_count*4 + imm
@@ -2366,10 +2366,10 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11293, mirror of ir_riscv.kr:1796-1847): dest =
+    // Semantics (ir.kr:95/11324, mirror of ir_riscv.kr:1796-1847): dest =
     // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
     // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
-    // the one emit site, ir.kr:2122). Assume-equal result preset AFTER the
+    // the one emit site, ir.kr:2148). Assume-equal result preset AFTER the
     // loop (not before, unlike the riscv/arm64 twins): every write to `d`
     // happens only at the two converging exit points (natural loop
     // exhaustion / len==0 guard-skip -> both "equal") or at the mismatch
@@ -2540,7 +2540,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_STRLEN (73): byte scan loop -----
-    // Semantics (ir.kr:80/2902, mirror of ir_riscv.kr:1703-1738): dest =
+    // Semantics (ir.kr:80/2928, mirror of ir_riscv.kr:1703-1738): dest =
     // length, src1 = NUL-terminated string pointer. cur=a8 (walking ptr),
     // start=a9 (fixed at the original ptr), byte tmp=a10. Loop scans cur
     // forward until a NUL byte (forward beqz -> END, placeholder + patch,
@@ -2573,7 +2573,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_STR_EQ (75): byte-by-byte string compare, no flags -----
-    // Semantics (ir.kr:82/2920, mirror of ir_riscv.kr:1740-1794): dest = 1
+    // Semantics (ir.kr:82/2946, mirror of ir_riscv.kr:1740-1794): dest = 1
     // if equal else 0, src1/src2 = pointers. Mirrors this file's IR_MEMCMP
     // (88) shape but with no length bound: loop body loads both bytes, a
     // mismatch (bne) jumps to NE, a shared NUL (beqz on byteA once bytes
@@ -2624,7 +2624,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_FMT_UINT (74): format uint to buffer -----
-    // Semantics (ir.kr:2910-2919, "fmt_uint(buf, val) -> IR_FMT_UINT"): dest
+    // Semantics (ir.kr:2936-2945, "fmt_uint(buf, val) -> IR_FMT_UINT"): dest
     // = digit count, src1 = output buffer pointer, src2 = value. Mirror of
     // ir_riscv.kr:1962-2036's two-pass shape, but re-budgeted for Xtensa's
     // narrower free-scratch set (a5,a8-a11 = 5 regs vs riscv's a0-a7 = 8):
@@ -2724,7 +2724,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // string children (data1 = single-line `asm("...")` form; child list =
     // multi-line `asm { "..."; ... }` form) and hand each to asm_emit_xt. I/O
     // constraints are NOT handled here (the block is operand-less by scope — the
-    // upstream binding hardcodes x86 reg codes, ir.kr:5481). The asm text is
+    // upstream binding hardcodes x86 reg codes, ir.kr:5506). The asm text is
     // opaque passthrough. No non-compressible marking is needed (Xtensa has no
     // intra-instruction compression pass, so the emitted words are never
     // rewritten after the fact — unlike riscv's rv_compress_function).
@@ -2775,7 +2775,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
         // SIMCALL: a2 = call number (SYS_exit = 1), a3 = status.
         //
         // The status is NOT in `imm` — `imm` is 231, the exit_group syscall
-        // number (ir.kr:2258). The status arrives in a2 via IR_ARG (op 51),
+        // number (ir.kr:2284). The status arrives in a2 via IR_ARG (op 51),
         // because XT_ARG0 = 2 and CALL0 passes arg0 in a2 (ir_xtensa.kr:21).
         //
         // ORDER IS LOAD-BEARING: copy a2 into a3 BEFORE overwriting a2 with
@@ -3468,7 +3468,7 @@ fn resolve_addr_fixups_xtensa(uint64 str_start, uint64 data_start) {
 }
 
 // table_sel 2 = fn addrs. payload is the fn_addr("name") STRING-LITERAL
-// token (ir.kr:3367), whose text carries the surrounding quotes ("dbl" = 5
+// token (ir.kr:3393), whose text carries the surrounding quotes ("dbl" = 5
 // bytes), so fn_lookup — which byte-compares via tok_text_eq (length-first)
 // against the bare fn identifier ("dbl" = 3 bytes) — NEVER matches. Strip
 // the quotes and byte-scan fn_table directly. Ported from
