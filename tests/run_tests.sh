@@ -8830,6 +8830,159 @@ printf 'const u64 C = 3\nfn main() { u64 r = 0\n if r == 0 { u64 C = 1\n  r = C 
 sdd_ref_row const_write_refused_after_inner_local $SDD_T/c.kr "$SDD_T/c.kr:5:2: $SDD_CMSG" x86_64:IR x86_64:--O0 arm64:IR arm64:--O0
 rm -rf "$SDD_T"
 
+# --- inline asm: a variable not named in out() keeps its value (#214) -------
+# The register allocator was never told which registers an asm block writes,
+# so a variable still needed after the block -- a parameter, an in() variable,
+# a loop counter -- could be held in one of the block's in(), out() or
+# clobbers() registers and came back with the block's value: every IR backend
+# (x86_64, arm64, riscv32, xtensa), every target, --O0 included. On x86_64
+# --legacy (and --emit=obj/lkm) parameter 0 was pinned in rbx even when the
+# block named rbx. The moves around the block staged spilled values through
+# a scratch register (rax / x9 / t5 / a8) that a later out() of the same block
+# still had to read, and on arm64 a far stack slot (> 32760 B) was addressed
+# through x11 (IR) or x16 (--legacy) -- possibly one of the block's own
+# registers (#219). On arm64 an f64 kept in d8-d15 did not survive a block that
+# writes those registers (#220). Now: every register a block names is banned,
+# for every value live across the block or its moves; the moves never use a
+# scratch the block names; f64 values live across asm get no d8-d15 home.
+#
+# asm_live_across_<shape>_<reg> <arch> <mode>: f(a, b, c, d) keeps a, b, c, d
+# and four values derived from them live across one block that writes <reg>:
+#   out   in(junk -> src) out(<reg> -> r)   r must be 0xBEEF (exit 110)
+#   inw   in(junk -> src, x -> <reg>)       the block writes the in() register
+#                                           <reg>; x must survive (exit 111)
+#   clob  in(junk -> src) clobbers(<reg>)
+# Exit 7 = correct; 100-107 = a, b, c, d, e, g, h, i corrupted (riscv32 also
+# 108/109/112/113 for its four extra values). src = rax (x86_64), x9 (arm64),
+# a0 (riscv32); rcx / x10 when <reg> is src. The block is `mov <reg>, src`
+# (riscv32: raw `addi <reg>, a0, 0`). Modes: x86_64 and arm64 IR, --O0,
+# --legacy; riscv32 IR, --O0. Red on krc 2.11.0 and on post-M1 main (both
+# record the same exits; see the task's red log): x86_64 IR+O0 out_{rbx,r12,
+# r13,r14,rbp, r15 IR only}, inw_{rbx,r12,r13,r14,r15}, clob_{rbx,r12,r13,
+# r14,rbp}, legacy out/inw/clob_rbx; arm64 IR+O0 out/inw/clob x19-x22 and
+# x24-x27 (out_x23 IR only, out_x27 O0 only); riscv32 IR+O0 every s-register
+# (out/inw/clob_s4 O0 only). arm64 --legacy out/inw/clob_x30 are KNOWN RED (#226,
+# D3: a legacy arm64 leaf does not save x30, so `ret` jumps to the block's
+# value -- a Bus error / SIGSEGV on 2.11.0, main and this fix alike); they
+# FAIL until #226 is fixed and are listed in the release's known-reds list.
+ALR_T=$(mktemp -d)
+# alr_runner ARCH ROW -> ALR_R: the runner prefix for an ARCH binary (none on
+# the host arch, else qemu-user); skips ROW (already in TOTAL) and returns 1
+# when that qemu is missing.
+alr_runner() {
+    ALR_R=""
+    [ "$1" = "$RUN_ARCH" ] && return 0
+    case $1 in
+        x86_64)
+            if [ -z "$OR_QEMU_X86" ]; then skip_row "$2" "no qemu-x86_64 (x86_64 binaries on an $OR_HOST host)"; return 1; fi
+            ALR_R="$OR_QEMU_X86" ;;
+        arm64)
+            if [ -z "$QEMU_A64" ]; then skip_row "$2" "no qemu-aarch64"; return 1; fi
+            ALR_R="$QEMU_A64" ;;
+        riscv32)
+            if [ -z "$QEMU_RV32" ]; then skip_row "$2" "no qemu-riscv32"; return 1; fi
+            ALR_R="$QEMU_RV32 -R 0x20000000" ;;
+    esac
+    return 0
+}
+# alr_exec ARCH FLAGS SRC -> "<exit status>" of SRC built with FLAGS and run
+# with $ALR_R, or "CE(<first error line>)".
+alr_exec() {
+    rm -f $ALR_T/bin
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$1 $2 "$3" -o $ALR_T/bin > $ALR_T/ce 2>&1 || [ ! -f $ALR_T/bin ]; then
+        printf 'CE(%s)' "$(grep -m1 'error' $ALR_T/ce | cut -c1-140)"
+        return
+    fi
+    chmod +x $ALR_T/bin
+    ( ulimit -c 0; timeout -k 5 "$RUN_TEST_TIMEOUT" $ALR_R $ALR_T/bin < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null
+    rm -f $ALR_T/bin
+}
+# alr_row ROW ARCH WANT SRC CONFIG...: one runtime row; CONFIG is IR, --O0 or
+# --legacy, and every config must build and exit WANT.
+alr_row() {
+    local row=$1 arch=$2 want=$3 src=$4 got="" bad=0 c f r n=0
+    shift 4
+    TOTAL=$((TOTAL + 1))
+    alr_runner $arch "$row" || return
+    for c in "$@"; do
+        f=$c; [ $c = IR ] && f=""
+        r=$(alr_exec $arch "$f" "$src")
+        n=$((n + 1))
+        got="$got $c $r,"
+        [ "$r" = "$want" ] || bad=1
+    done
+    if [ $bad = 0 ] && [ $n = $# ]; then
+        PASS=$((PASS + 1))
+        echo "  $row: PASS (want $want:${got%,})"
+    else
+        echo "FAIL: $row (want $want:${got%,})"
+        FAIL=$((FAIL + 1))
+    fi
+}
+# alr_gen ARCH SHAPE REG > FILE: one program of the matrix above.
+alr_gen() {
+    local t=uint64 src ins extra="" chk="" asm
+    case $1 in
+        x86_64)  src=rax; [ $3 = rax ] && src=rcx; ins="mov $3, $src" ;;
+        arm64)   src=x9;  [ $3 = x9 ] && src=x10; ins="mov $3, $src" ;;
+        riscv32) t=uint32; src=a0
+                 ins=$(printf '0x%08x' $(( 0x00050013 | ($(alr_rv_num $3) << 7) )))
+                 extra="    $t e2 = a + 5
+    $t g2 = b + 6
+    $t h2 = c + 7
+    $t i2 = d + 8
+"
+                 chk="    if e2 != 16 { return 108 }
+    if g2 != 28 { return 109 }
+    if h2 != 40 { return 112 }
+    if i2 != 52 { return 113 }
+" ;;
+    esac
+    case $2 in
+        out)  asm="    asm { \"$ins\" } in(junk -> $src) out($3 -> r)"
+              chk="$chk    if r != 0xBEEF { return 110 }
+" ;;
+        inw)  asm="    $t x = a + 100
+    asm { \"$ins\" } in(junk -> $src, x -> $3)"
+              chk="$chk    if x != 111 { return 111 }
+" ;;
+        clob) asm="    asm { \"$ins\" } in(junk -> $src) clobbers($3)" ;;
+    esac
+    printf 'fn f(%s a, %s b, %s c, %s d) -> %s {\n' $t $t $t $t $t
+    printf '    %s e = a + 1\n    %s g = b + 2\n    %s h = c + 3\n    %s i = d + 4\n' $t $t $t $t
+    printf '%s' "$extra"
+    printf '    %s junk = 0xBEEF\n    %s r = 0\n' $t $t
+    printf '%s\n' "$asm"
+    printf '    if a != 11 { return 100 }\n    if b != 22 { return 101 }\n    if c != 33 { return 102 }\n    if d != 44 { return 103 }\n'
+    printf '    if e != 12 { return 104 }\n    if g != 24 { return 105 }\n    if h != 36 { return 106 }\n    if i != 48 { return 107 }\n'
+    printf '%s' "$chk"
+    printf '    return 7\n}\nfn main() {\n    exit(f(11, 22, 33, 44))\n}\n'
+}
+alr_rv_num() {
+    case $1 in
+        t0) echo 5 ;; t1) echo 6 ;; s0) echo 8 ;; s1) echo 9 ;; a1) echo 11 ;; a2) echo 12 ;; a7) echo 17 ;;
+        t5) echo 30 ;; t6) echo 31 ;; s1[01]) echo $(( 16 + ${1#s} )) ;; s[2-9]) echo $(( 16 + ${1#s} )) ;;
+    esac
+}
+ALR_REGS_x86_64="rax rcx rdx rbx rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15"
+ALR_REGS_arm64="$(seq -s ' ' -f 'x%g' 0 30)"
+ALR_REGS_riscv32="s0 s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 t0 t1 t5 t6 a1 a2 a7"
+for ALR_A in x86_64 arm64 riscv32; do
+    ALR_MODES="IR O0 legacy"; [ $ALR_A = riscv32 ] && ALR_MODES="IR O0"
+    eval "ALR_REGS=\$ALR_REGS_$ALR_A"
+    for ALR_S in out inw clob; do
+        for ALR_G in $ALR_REGS; do
+            if [ $ALR_S = inw ] && { [ $ALR_G = rax ] || [ $ALR_G = x9 ]; }; then continue; fi
+            alr_gen $ALR_A $ALR_S $ALR_G > $ALR_T/m.kr
+            for ALR_M in $ALR_MODES; do
+                ALR_C=IR; [ $ALR_M = O0 ] && ALR_C=--O0; [ $ALR_M = legacy ] && ALR_C=--legacy
+                alr_row "asm_live_across_${ALR_S}_$ALR_G $ALR_A $ALR_M" $ALR_A 7 $ALR_T/m.kr $ALR_C
+            done
+        done
+    done
+done
+rm -rf "$ALR_T"
+
 # CSE across the ops above is not observable by a single-threaded run: they
 # write no memory the program reads back, and the second agent that a real
 # atomic_load, vload or asm orders against does not exist in a test. So count,
