@@ -37,8 +37,10 @@ and on arm64 an `f64` kept in d8–d15 did not survive a block that uses those r
 block must list every integer register it writes (LANGUAGE.md §14, which also drops the false
 claim that pinned parameters were "handled correctly"). Programs whose blocks list their
 registers compile to the same code, except where a value had to move out of a register the block
-writes: 58 of 11171 surveyed downstream builds change (ApexRift ×4, Morgana_VM; KernRift's own
-examples, benchmarks and tests, CarRift and Comp_in_KernRift do not; 20 configurations each), and
+writes: 65 of 12879 surveyed downstream builds change (ApexRift ×4, Morgana_VM; KernRift's own
+examples, benchmarks and tests, CarRift and Comp_in_KernRift do not) — 58 of 11171 in 20
+configurations each (whose two `--target=windows` ones emitted ELF files, #230/#233) and 7 of 1708
+PE builds (`--target=windows --emit=pe`, x86_64 and arm64; all 7 x86_64, in the same files) — and
 none of them was miscompiled — a spilled `out()` value is now stored straight from its register,
 and a value or pinned parameter moves off `rbx`/`r12` (Morgana_VM's `cpuid` fixtures record the
 bug met in the field). Not every ApexRift kernel image is byte-identical (ApexRift-d0's `kernel.kr`

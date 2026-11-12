@@ -20450,8 +20450,8 @@ fi
 
 # Compiles examples/riscv-featuregap/t9_asm.kr, which exercises inline asm
 # (IR_ASM_BLOCK 96): a raw hex word `asm("0x00150513")` = `addi a0,a0,1` bound
-# to a variable via in()/out() constraints (rv_reg_code path at ir.kr:5476/
-# 5444), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
+# to a variable via in()/out() constraints (asm_reg_try's riscv32 table, in
+# the kind-43 lowering of ir.kr), plus a `csrr t0,mhartid` intrinsic. NON-VACUOUS on two counts: the
 # raw word is a COMPRESSIBLE encoding (rd==rs1, simm6 imm) so its objdump
 # survival as a full 4-byte `addi a0,a0,1` proves the handler marked the range
 # non-compressible; and the boot proves in/out constraint binding actually

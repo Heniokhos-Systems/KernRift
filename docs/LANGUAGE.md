@@ -1384,9 +1384,16 @@ block is read again after it), and flags are never live across one. Writing
 **Limitations** (V1):
 - Clauses must come immediately after the closing `)` or `}` of the
   asm form, before any other statement.
-- `clobbers()` adds no save/restore code: the callee-saved integer
-  registers of a function that contains asm are already saved by its
-  prologue, so naming one costs nothing but the variable that had to move.
+- `clobbers()` adds no save/restore code. On the IR backends (the
+  default, `--O0` included) a function that contains asm already saves the
+  whole callee-saved integer file in its prologue, so naming one costs
+  nothing but the variable that had to move. **On x86_64 `--legacy`, `-c`/
+  `--emit=obj` and `--emit=lkm` it does not** — the prologue saves only
+  `rbx` and `r12` — and an arm64 `--legacy`/`-c` leaf function saves nothing:
+  there a block that writes another callee-saved register (`rbp`,
+  `r13`–`r15`; arm64 `x19`–`x28`) changes it for the caller, even when it is
+  listed in `clobbers()` (#235). Use the IR backend, or save and restore
+  the register in the block.
 - Only integer GPRs are accepted; no SSE/NEON register constraints.
 - No memory-operand constraints (Rust's `in("rax") [ptr]` — not yet).
 - On x86_64 `--legacy`, `--emit=obj` and `--emit=lkm`, parameter 0 is kept

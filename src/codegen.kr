@@ -14778,8 +14778,12 @@ fn gen_stmt(uint64 node) {
     // Inline assembly: asm("instruction") or asm { "instr1"; "instr2"; }
     // Optional constraint list in data3: in(var -> reg), out(reg -> var),
     // clobbers(reg). Inputs are loaded before the body, outputs stored
-    // after. Clobbers are currently advisory (V1 — users must list any
-    // input/output register that their block touches explicitly).
+    // after. Every variable lives in its stack slot here (but parameter 0,
+    // which gen_function pins in rbx only when no block names rbx, #214), so
+    // clobbers() needs no register ban; its names are checked like the
+    // others. No save/restore is added (#235: this backend's prologue saves
+    // only rbx/r12, so a block writing another callee-saved register
+    // changes it for the caller).
     if kind == 43 {
         win_asm_refuse(node)
         asm_check_constraints(node, 0)     // #214/#218: located, every clause
