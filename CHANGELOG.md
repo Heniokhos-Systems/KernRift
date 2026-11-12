@@ -18,6 +18,37 @@ programs and modules after upgrading. Code without unused reads compiles to the 
 compiler itself, the benchmarks and every ApexRift image are byte-identical).
 Bootstrap fixed point 1501560 bytes.
 
+**`unsafe { *(p as T) -> s }` now writes a `static` `s` (#203).** The default IR backend bound the
+loaded value to a hidden local named `s` instead of storing it (unless a local or parameter `s`
+existed): the function saw the value, every other function — and the next call — read the
+static's old value. Also `volatile { … -> s }`, every architecture, `--O0` included; `--legacy`,
+`--emit=obj` and `--emit=lkm` were correct. The destination now resolves like `s = …`. In `main`
+the bug was usually hidden by the inliner (#189).
+
+### Correctness fixes that stop a program from building
+
+Emergency correctness breakage (ABI_POLICY.md), no deprecation period:
+
+- **Assigning to a `const` is an error (#206)** — `C = v`, `C OP= v`, `*(p as T) -> C` and asm
+  `out(r -> C)`. It used to write the constant's storage, so runtime reads changed while folded
+  uses (e.g. `static u64 s = C + 1`) kept the old value. Migration: declare it `static`.
+- **Storing into a whole static array or struct by name is an error (#207)** — `ga = v`,
+  `ga OP= v`, `gp = q`, `-> gp`. It wrote the first word (`gp = struct_value` crashed on
+  `--legacy`). Migration: assign elements/fields; whole-aggregate assignment is planned.
+- **arm64 `--legacy`, `--emit=obj` and `--emit=lkm`: an inline-asm `in()`/`out()` operand that is
+  not a local variable, or a register name other than `x0`–`x30`, is an error (#204)**, as on
+  every other backend; it used to be dropped silently.
+- **IR: `asm … out(r -> s)` after `*(p as T) -> s` in the same function** is now the
+  "constraint variable not found" error that `out(r -> s)` with a static `s` always was; it used
+  to write the hidden local of #203.
+
+The two new errors name the store's location (`file:line:col`). Like every code-generation error
+they fire in each function the build compiles: the default executable build skips functions
+nothing calls, `-c`, `--emit=lkm`, `--emit=asm` and `--emit=ir` compile all of them. No KernRift
+program in the surveyed trees (KernRift, ApexRift ×4, CarRift, Morgana_VM, Comp_in_KernRift) and
+no compiler output changes; one test fixture (`asmin.kr`, x86 asm) no longer builds for arm64
+`--legacy`/`-c`, which nothing does. Bootstrap fixed point 1503600 bytes.
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF

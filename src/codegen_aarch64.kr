@@ -5323,6 +5323,9 @@ fn gen_stmt_a64(uint64 node) {
     // Assignment
     if kind == 11 {
         uint32 name_tok = ast_data1(node)
+        // A store by name into a const or a whole static array/struct is
+        // refused here, before the value or the struct-copy path (#206/#207).
+        if var_lookup(name_tok) == 0xFFFFFFFF && static_lookup(name_tok) != 0xFFFFFFFF { static_write_check(name_tok) }
         uint32 val_child = ast_child(node)
         uint64 wvc = val_child
         gen_expr_a64(wvc)
@@ -5840,6 +5843,8 @@ fn gen_stmt_a64(uint64 node) {
         if doff == 0xFFFFFFFF {
             uint64 soff = static_lookup(dest_tok)
             if soff != 0xFFFFFFFF {
+                // A static: refused if it is a const or a whole array/struct (#206/#207).
+                static_write_check(dest_tok)
                 emit_a64_static_store(soff)
                 return
             }
@@ -6248,6 +6253,9 @@ fn gen_stmt_a64(uint64 node) {
                 uint64 wvtok2 = vtok2
                 uint64 rcode2 = a64_reg_code_strict(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
+                // A const or a whole static array/struct gets its own message
+                // before asm_require_local's (#206/#207).
+                if voff2 == 0xFFFFFFFF && static_lookup(wvtok2) != 0xFFFFFFFF { static_write_check(wvtok2) }
                 asm_require_local(wvtok2, voff2)
                 if rcode2 != 0xFFFF && voff2 != 0xFFFFFFFF {
                     emit_a64_str(rcode2, 31, a64_var_base + voff2)

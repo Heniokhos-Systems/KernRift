@@ -1165,6 +1165,10 @@ fn ir_var_get(uint64 name_tok) -> uint64 {
 // narrowing f64 -> f32 / widening f32 -> f64 to the static's declared kind.
 // Shared by `s = expr` and `*(p as T) -> s` (#203).
 fn ir_static_store_conv(uint64 name_tok, uint64 st_off, uint64 val_in) {
+    // The one IR check point for by-name stores into a static (#206/#207):
+    // a const or a whole static array/struct is refused here, so every IR
+    // write site that stores through this helper is checked.
+    static_write_check(name_tok)
     uint64 val = val_in
     uint64 val_fk = ir_vreg_fkind_get(val)
     uint64 st_fk = static_fkind_of(name_tok)
@@ -5526,7 +5530,13 @@ fn ir_lower_stmt(uint64 node) {
                 uint32 vtok2 = ast_data3(wco)
                 // ir_var_set below would happily CREATE a map entry for a name
                 // that is not a declared local, so the write went nowhere.
-                asm_require_local(vtok2, ir_var_get(vtok2))
+                // A static here is refused by asm_require_local; a const or a
+                // whole static array/struct gets its own message first (#206/
+                // #207). asm never stores to a static, so it never reaches
+                // ir_static_store_conv's check.
+                uint64 ao_v = ir_var_get(vtok2)
+                if ao_v == 0xFFFFFFFF && static_lookup(vtok2) != 0xFFFFFFFF { static_write_check(vtok2) }
+                asm_require_local(vtok2, ao_v)
                 // Same arch-gated dispatch as the IN site above: riscv32
                 // rv_reg_code, arm64 a64_reg_code_strict, x86 x86_reg_code.
                 uint64 rcode2 = 0

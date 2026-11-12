@@ -8699,6 +8699,135 @@ sys.exit(1)'; then SDD_OBJ=yes; fi
 fi
 rm -rf "$SDD_T"
 
+# --- stores by name into a const or a whole static array/struct (#206/#207) --
+# `C = v`, `C OP= v`, `*(p as T) -> C` and asm `out(r -> C)` with C a
+# `const` wrote the constant's storage (runtime reads changed, folded uses
+# kept the declared value); the same stores into a whole static array or
+# struct by its bare name (`ga = v`, `gp = q`, `-> gp`) wrote its first word
+# (`gp = struct_value` crashed on --legacy). Both are now an error at the
+# name, on every backend. Field and element stores are unchanged.
+# Refusal rows: exit 1, the exact `file:line:col: error: ...` line, no
+# output; x86_64 and arm64 on IR, --legacy and -c (--emit=obj), riscv32 on
+# IR (riscv32 programs use u32).
+SDD_T=$(mktemp -d)
+SDD_CMSG="error: cannot assign to const 'C' (a const is a compile-time constant; declare it \`static\` to change it)"
+# sdd_amsg struct|array NAME: the whole-aggregate message
+sdd_amsg() {
+    if [ $1 = struct ]; then
+        printf "error: cannot assign to the whole static struct '%s' (not supported yet; assign a field: %s.field = v)" $2 $2
+    else
+        printf "error: cannot assign to the whole static array '%s' (not supported yet; assign an element: %s[i] = v)" $2 $2
+    fi
+}
+# sdd_wsrc FORM ARCH: the program of one refusal form, `@W@` the word type,
+# and "<line:col> <message>" of its error in SDD_LOC / SDD_MSG.
+sdd_wsrc() {
+    SDD_MSG=$SDD_CMSG
+    case $1 in
+        assign) SDD_LOC=2:10; printf 'const @W@ C = 3\nfn f() { C = 5 }\nfn main() { f()\n exit(C) }\n' ;;
+        compound) SDD_LOC=2:10; printf 'const @W@ C = 3\nfn f() { C += 2 }\nfn main() { f()\n exit(C) }\n' ;;
+        ptrload) SDD_LOC=2:39; printf 'const @W@ C = 3\nfn f(@W@ b) { unsafe { *(b as @W@) -> C } }\nfn main() { @W@ b = alloc(8)\n store32(b, 5)\n f(b)\n exit(C) }\n' ;;
+        asm_out)
+            case $2 in
+                x86_64)  SDD_LOC=2:36; printf 'const @W@ C = 3\nfn f() { asm { "0x90" } out(rax -> C) }\nfn main() { f()\n exit(C) }\n' ;;
+                arm64)   SDD_LOC=2:41; printf 'const @W@ C = 3\nfn f() { asm { "0xD503201F" } out(x0 -> C) }\nfn main() { f()\n exit(C) }\n' ;;
+                riscv32) SDD_LOC=2:34; printf 'const @W@ C = 3\nfn f() { asm { "nop" } out(a0 -> C) }\nfn main() { f()\n exit(C) }\n' ;;
+            esac ;;
+        struct_assign) SDD_LOC=4:10; SDD_MSG=$(sdd_amsg struct gp)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nfn f() { gp = 5 }\nfn main() { f()\n exit(gp.a) }\n' ;;
+        struct_copy) SDD_LOC=7:2; SDD_MSG=$(sdd_amsg struct gp)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nfn f() { P l\n l.a = 5\n l.b = 6\n gp = l }\nfn rd() -> @W@ { @W@ r = 0\n while r < 1 { r = r + 1 }\n return gp.a + gp.b }\nfn main() { f()\n exit(rd()) }\n' ;;
+        array_assign) SDD_LOC=2:10; SDD_MSG=$(sdd_amsg array ga)
+            printf 'static @W@[4] ga\nfn f() { ga = 5 }\nfn main() { f()\n exit(ga[0]) }\n' ;;
+        array_compound) SDD_LOC=2:10; SDD_MSG=$(sdd_amsg array ga)
+            printf 'static @W@[4] ga\nfn f() { ga += 5 }\nfn main() { f()\n exit(ga[0]) }\n' ;;
+        struct_ptrload) SDD_LOC=4:43; SDD_MSG=$(sdd_amsg struct gp)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nfn setit(@W@ b) { unsafe { *(b as @W@) -> gp } }\nfn main() { @W@ b = alloc(8)\n store32(b, 5)\n setit(b)\n exit(gp.a) }\n' ;;
+        array_ptrload) SDD_LOC=2:43; SDD_MSG=$(sdd_amsg array ga)
+            printf 'static @W@[4] ga\nfn setit(@W@ b) { unsafe { *(b as @W@) -> ga } }\nfn main() { @W@ b = alloc(8)\n store32(b, 5)\n setit(b)\n exit(ga[0]) }\n' ;;
+        structarray_assign) SDD_LOC=4:10; SDD_MSG=$(sdd_amsg array gps)
+            printf 'struct P { @W@ a\n @W@ b }\nstatic P[2] gps\nfn f() { gps = 5 }\nfn main() { f()\n exit(0) }\n' ;;
+    esac
+}
+# const_write_refused_<form> <arch> / whole_static_write_refused_<form> <arch>
+for SDD_A in x86_64 arm64 riscv32; do
+    SDD_W=u64; SDD_CF="$SDD_A:IR $SDD_A:--legacy $SDD_A:-c"
+    [ $SDD_A = riscv32 ] && { SDD_W=u32; SDD_CF="$SDD_A:IR"; }
+    for SDD_K in assign compound ptrload asm_out struct_assign struct_copy array_assign array_compound struct_ptrload array_ptrload structarray_assign; do
+        sdd_wsrc $SDD_K $SDD_A > /dev/null
+        sdd_wsrc $SDD_K $SDD_A | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+        case $SDD_K in
+            assign|compound|ptrload|asm_out) SDD_ROW="const_write_refused_$SDD_K $SDD_A" ;;
+            *) SDD_ROW="whole_static_write_refused_$SDD_K $SDD_A" ;;
+        esac
+        sdd_ref_row "$SDD_ROW" $SDD_T/c.kr "$SDD_T/c.kr:$SDD_LOC: $SDD_MSG" $SDD_CF
+    done
+done
+# Guards (pins): a local shadowing the const may be assigned; the const may
+# be read; field and element stores of whole statics still work. 42 on IR,
+# --O0 and --legacy.
+for SDD_A in x86_64 arm64 riscv32; do
+    SDD_W=u64; [ $SDD_A = riscv32 ] && SDD_W=u32
+    printf 'const @W@ C = 3\nfn f() -> @W@ { @W@ C = 9\n C = C + 33\n return C }\nfn main() { exit(f()) }\n' | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+    sdd_rt_row "const_shadow_local_ok $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0 --legacy
+    printf 'const @W@ C = 42\nfn main() { @W@ x = C\n exit(x) }\n' | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+    sdd_rt_row "const_read_ok $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0 --legacy
+    printf 'struct P { @W@ a\n @W@ b }\nstatic P gp\nstatic @W@[4] ga\nfn f() { gp.a = 40\n ga[1] = 2\n gp.b += 0 }\nfn main() { f()\n exit(gp.a + ga[1]) }\n' | sed "s/@W@/$SDD_W/g" > $SDD_T/c.kr
+    sdd_rt_row "whole_static_field_and_element_ok $SDD_A" $SDD_A 42 $SDD_T/c.kr IR --O0 --legacy
+done
+# Uncalled functions: the default executable build (IR or --legacy) does not
+# lower a function nothing calls, so an uncalled `-> gp` (u) or `C = 5` (q)
+# still builds there (whole_static_write_uncalled_builds, pin); -c,
+# --emit=asm, --emit=ir and --emit=lkm lower every function and refuse it
+# (static_write_uncalled_refused_obj_lkm, red before: all of them built).
+printf 'struct P { u64 a\n u64 b }\nstatic P gp\nfn setit(u64 b) { unsafe { *(b as u64) -> gp } }\nfn main() { exit(0) }\n' > $SDD_T/u.kr
+printf 'const u64 C = 3\nfn never() { C = 5 }\nfn main() { exit(C) }\n' > $SDD_T/q.kr
+printf 'const u64 C = 3\nfn never() { C = 5 }\n@module_init\nfn init() -> u64 { return 0 }\n@module_exit\nfn fini() { }\n' > $SDD_T/ql.kr
+TOTAL=$((TOTAL + 1))
+SDD_BAD=""
+for SDD_A in x86_64 arm64; do
+    for SDD_F in IR --legacy; do
+        SDD_FL=$SDD_F; [ $SDD_F = IR ] && SDD_FL=""
+        for SDD_S in u q; do
+            rm -f $SDD_T/out
+            if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$SDD_A $SDD_FL $SDD_T/$SDD_S.kr -o $SDD_T/out > $SDD_T/err 2>&1 || [ ! -f $SDD_T/out ]; then
+                SDD_BAD="$SDD_BAD $SDD_S.kr $SDD_A $SDD_F: $(grep -m1 error $SDD_T/err | cut -c1-140);"
+            fi
+        done
+    done
+done
+rm -f $SDD_T/out
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  whole_static_write_uncalled_builds: PASS (uncalled '-> gp' and 'C = 5' build on x86_64/arm64 IR and --legacy)"
+else
+    echo "FAIL: whole_static_write_uncalled_builds (want both to build:$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+SDD_BAD=""
+SDD_QW="$SDD_T/q.kr:2:14: $SDD_CMSG"
+SDD_QLW="$SDD_T/ql.kr:2:14: $SDD_CMSG"
+SDD_UW="$SDD_T/u.kr:4:43: $(sdd_amsg struct gp)"
+for SDD_A in x86_64 arm64; do
+    SDD_BAD="$SDD_BAD$(sdd_ref $SDD_A -c $SDD_T/q.kr "$SDD_QW")$(sdd_ref $SDD_A --emit=asm $SDD_T/q.kr "$SDD_QW")$(sdd_ref $SDD_A --emit=ir $SDD_T/q.kr "$SDD_QW")"
+    SDD_BAD="$SDD_BAD$(sdd_ref $SDD_A --emit=lkm $SDD_T/ql.kr "$SDD_QLW")$(sdd_ref $SDD_A -c $SDD_T/u.kr "$SDD_UW")"
+done
+if [ -z "$SDD_BAD" ]; then
+    PASS=$((PASS + 1))
+    echo "  static_write_uncalled_refused_obj_lkm: PASS (x86_64 and arm64: uncalled 'C = 5' refused at 2:14 on -c, --emit=asm, --emit=ir, --emit=lkm; uncalled '-> gp' at 4:43 on -c)"
+else
+    echo "FAIL: static_write_uncalled_refused_obj_lkm (want exit 1, no output, the located error:$SDD_BAD)"
+    FAIL=$((FAIL + 1))
+fi
+# const_write_refused_after_inner_local (IR only): a local `C` declared in an
+# inner block is out of scope after it, so `C = 5` below it is a write to the
+# const. (--legacy keeps the inner local visible after its block, #40, and
+# accepts this program; no legacy row uses this shape.)
+printf 'const u64 C = 3\nfn main() { u64 r = 0\n if r == 0 { u64 C = 1\n  r = C }\n C = 5\n exit(r) }\n' > $SDD_T/c.kr
+sdd_ref_row const_write_refused_after_inner_local $SDD_T/c.kr "$SDD_T/c.kr:5:2: $SDD_CMSG" x86_64:IR x86_64:--O0 arm64:IR arm64:--O0
+rm -rf "$SDD_T"
+
 # CSE across the ops above is not observable by a single-threaded run: they
 # write no memory the program reads back, and the second agent that a real
 # atomic_load, vload or asm orders against does not exist in a test. So count,
