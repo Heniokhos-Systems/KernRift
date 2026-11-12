@@ -6197,6 +6197,7 @@ fn gen_stmt_a64(uint64 node) {
     // Inline assembly — see x86_64 gen_stmt for the constraint contract.
     if kind == 43 {
         win_asm_refuse(node)
+        asm_check_constraints(node, 1)     // #214/#218: located, every clause
         uint32 cons_head = ast_data3(node)
         uint64 wch_a = cons_head
 
@@ -6210,10 +6211,11 @@ fn gen_stmt_a64(uint64 node) {
                 uint64 wrtok = rtok
                 uint64 wvtok = vtok
                 // Both checks as on x86_64 legacy and every IR backend
-                // (#204): an unknown register name and an operand that is not
-                // a local (a static, an undeclared name) used to be skipped
-                // here in silence, so the binding vanished.
-                uint64 rcode = a64_reg_code_strict(wrtok)
+                // (#204): an unknown register name (refused above by
+                // asm_check_constraints) and an operand that is not a local (a
+                // static, an undeclared name) used to be skipped here in
+                // silence, so the binding vanished.
+                uint64 rcode = a64_reg_code(wrtok)
                 uint64 voff  = var_lookup(wvtok)
                 asm_require_local(wvtok, voff)
                 if rcode != 0xFFFF && voff != 0xFFFFFFFF {
@@ -6251,7 +6253,7 @@ fn gen_stmt_a64(uint64 node) {
                 uint32 vtok2 = ast_data3(wco)
                 uint64 wrtok2 = rtok2
                 uint64 wvtok2 = vtok2
-                uint64 rcode2 = a64_reg_code_strict(wrtok2)
+                uint64 rcode2 = a64_reg_code(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
                 // A const or a whole static array/struct gets its own message
                 // before asm_require_local's (#206/#207).

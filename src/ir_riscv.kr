@@ -862,7 +862,7 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
 // ---------------------------------------------------------------------------
 // Inline assembly (IR_ASM_BLOCK, op 96)
 //
-// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:13112). Like it,
+// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:13237). Like it,
 // this is NOT a general assembler — it is a raw-hex-word passthrough plus a
 // small fixed intrinsic/CSR table. Accepted forms:
 //   1. "0xXXXXXXXX"       -> one 32-bit word, emitted verbatim (escape hatch).
@@ -892,7 +892,7 @@ fn rv_asm_bytes_eq(uint64 sptr, uint64 off, uint64 len, uint64 kw, uint64 kwlen)
 }
 
 // Register NAME occupying the len-byte window [off,...) in the asm string ->
-// 0..31 hardware number. Same name set as codegen.kr's rv_reg_code but over
+// 0..31 hardware number. Same name set as codegen.kr's rv_reg_try but over
 // raw string bytes rather than a source token. Unknown -> hard error.
 fn rv_asm_regnum(uint64 sptr, uint64 off, uint64 len) -> uint64 {
     if rv_asm_bytes_eq(sptr, off, len, "zero", 4) != 0 { return 0 }
@@ -1012,7 +1012,7 @@ fn asm_emit_rv(uint64 str_tok) {
     if slen == 0 { return }
 
     // ----- Raw hex word: "0xXXXXXXXX" -> one 32-bit word (LE). Primary
-    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:13119). -----
+    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:13244). -----
     uint64 fc = 0
     unsafe { *(sptr as uint8) -> fc }
     if fc == 48 && slen >= 4 {
@@ -1240,7 +1240,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_ADD_IMM (135) / IR_SUB_IMM (136): dst = src1 ± imm -----
     // Fused by ir_optimize when src2 was a known constant (src2 field is
     // 0; the constant lives in imm — same contract as the x86 LEA path,
-    // ir.kr:9529). There is no `subi` in RV32I: SUB_IMM negates and uses
+    // ir.kr:9513). There is no `subi` in RV32I: SUB_IMM negates and uses
     // addi. An immediate outside −2048..2047 (or a SUB_IMM of −2048,
     // whose negation +2048 doesn't fit) is materialized into t5 with
     // rv_li and emitted as the R-type — never truncated. The li masks to
@@ -1373,7 +1373,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // offsets are folded into a prior ADD by the IR lowering, so the
     // address is entirely in src1. Width can arrive in imm OR src2 (struct
     // field loads reuse the src2 slot the same way the x86/arm64 backends
-    // read it — ir_aarch64.kr:1693, ir.kr:10090); the float-backstop block
+    // read it — ir_aarch64.kr:1693, ir.kr:10074); the float-backstop block
     // above already skips the s2 fkind probe for this op for the same
     // reason. IR has no signed-load marking anywhere in ir.kr — x86 uses
     // movzx and arm64 uses ldrb/ldrh (never a sign-extending load) for
@@ -1794,7 +1794,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11324): dest = (memcmp(src1, src2, imm) == 0) ? 1
+    // Semantics (ir.kr:95/11308): dest = (memcmp(src1, src2, imm) == 0) ? 1
     // : 0. src1/src2 = pointers, imm = a COMPILE-TIME byte count (not a
     // vreg — struct_total_size() folded in at the one emit site,
     // ir.kr:2148). Mirrors ir_aarch64.kr:2536-2574: assume-equal result
@@ -1849,7 +1849,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_MEMCPY (72): byte copy loop -----
     // Semantics (ir.kr:79, emit sites e.g. ir.kr:2913): dest = returned dst
     // pointer, src1 = dst ptr, src2 = src ptr, imm = the COUNT VREG'S ID
-    // (not a literal — confirmed against both x86 (ir.kr:10441-10442) and
+    // (not a literal — confirmed against both x86 (ir.kr:10425-10426) and
     // arm64 (ir_aarch64.kr:2172-2181) twins' identical comment/resolution:
     // "len vreg in imm" / "Resolve len from imm (stored as vreg index)").
     // Mirrors ir_aarch64.kr:2173-2209: a0=dst(cur), a1=src(cur), a2=len,
@@ -1910,7 +1910,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // Semantics (ir.kr:83, emit sites e.g. ir.kr:2925): dest = returned dst
     // pointer, src1 = dst ptr, src2 = fill-byte VALUE, imm = the COUNT
     // VREG'S ID (same "len vreg in imm" convention as MEMCPY above —
-    // confirmed against x86 ir.kr:10685-10690 and the arm64 twin's identical
+    // confirmed against x86 ir.kr:10669-10674 and the arm64 twin's identical
     // ir_aarch64.kr:2344-2351 resolution). Mirrors ir_aarch64.kr:2344-2373:
     // a0=dst(cur), a1=val, a2=len, count-tested at the TOP of the loop
     // (CBZ x2,done before the first STRB) so a zero-length call is a
@@ -1962,7 +1962,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_FMT_UINT (74): format uint to buffer -----
     // Semantics (ir.kr:2936-2945, "fmt_uint(buf, val) -> IR_FMT_UINT"):
     // dest = digit count, src1 = output buffer pointer, src2 = value.
-    // Confirmed identical on both existing twins: x86 ir.kr:10521-10599
+    // Confirmed identical on both existing twins: x86 ir.kr:10505-10583
     // ("IR_FMT_UINT: buf in src1, val in src2" ... "rax = digit count
     // (return value)") and arm64 ir_aarch64.kr:2235-2293 ("format uint to
     // buffer" ... "Return digit count (x6)"). Mirrors arm64's two-pass
@@ -2174,7 +2174,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // interned name id and NOT the callee-name token IR_CALL's fixups use,
     // so it can't be resolved via fn_lookup(); resolve_fnaddr_fixups_riscv()
     // below strips the quotes and byte-scans fn_table, exactly like
-    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7017-7116). Lower to the
+    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7019-7118). Lower to the
     // same pcrel auipc+addi pair as STR_CONST/STATIC_ADDR (table_sel=2 =
     // fnaddr_fixup_table) — full auipc+addi, NOT arm64's ADR+NOP shortcut:
     // riscv has no single-instruction ±1 MiB pcrel-address op, and jal is a
@@ -2190,7 +2190,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // ----- IR_ROR (137): dst = right-rotate(src1, src2) mod imm(=32) -----
     // RV32IM has NO rotate instruction (Zbb's ror/rori is not in the
     // accepted ISA), so synthesize per audit §7. Produced ONLY by the shared
-    // optimizer's ir_opt_recognize_rotate (ir.kr:14881) from the canonical
+    // optimizer's ir_opt_recognize_rotate (ir.kr:14865) from the canonical
     // `OR(AND(SHR(x,n),0xFFFFFFFF), AND(SHL(x,32-n),0xFFFFFFFF))` idiom; imm
     // is always 32 today, so no 64-bit case. Contract (ir.kr:159):
     //   dst = ((x >> n) | (x << (W - n))) & ((1<<W)-1),  W = 32.
@@ -2239,8 +2239,8 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // children (data1 = single-line form; child list = multi-line form) and
     // hand each to asm_emit_rv. I/O constraints are NOT handled here — they
     // were already lowered to IR_ARG(imm=regcode+100) before this block and
-    // IR_COPY(imm=regcode+100) after it (ir.kr:5465, using rv_reg_code on
-    // arch 2), which the op 51 / op 61 handlers above already implement. The
+    // IR_COPY(imm=regcode+100) after it (ir.kr's kind-43 lowering, through
+    // asm_reg_try's riscv32 table), which the op 51 / op 61 handlers above already implement. The
     // asm text itself is opaque passthrough.
     //
     // Non-compressibility: the emitted words must survive rv_compress_function
@@ -2517,7 +2517,7 @@ fn ir_riscv_gen(uint64 fn_node) {
         // by total_frame, so argc/argv live at sp+total_frame+{0,4}. Stores go to
         // the data-segment statics via the pcrel pair (table_sel 1 = statics),
         // exactly like IR_STATIC_STORE (ir_riscv.kr:1696-1701) — NOT sp-relative.
-        // Mirror of codegen_aarch64.kr:6450-6503 (Linux branch), 4-byte words.
+        // Mirror of codegen_aarch64.kr:6452-6505 (Linux branch), 4-byte words.
         uint32 fn_name_tok_tr = ast_data1(fn_node)
         uint64 wnt_tr = fn_name_tok_tr
         if tok_matches(wnt_tr, "main", 4) != 0 && freestanding == 0 {
@@ -2716,7 +2716,7 @@ fn ir_riscv_gen(uint64 fn_node) {
     // 11. Epilogue. Auto-exit for hosted main(): a0 already holds the
     //     return value (IR_RET / IR_RET_VOID set it before jumping here).
     //     exit(93) so main does not `ret` into an undefined ra. Mirrors
-    //     codegen_aarch64.kr:6830-6836. Freestanding keeps the bare ret.
+    //     codegen_aarch64.kr:6832-6838. Freestanding keeps the bare ret.
     uint32 fn_name_tok_rv = ast_data1(fn_node)
     uint64 wnt_rv_ep = fn_name_tok_rv
     if tok_matches(wnt_rv_ep, "main", 4) != 0 && freestanding == 0 && is_naked == 0 {
@@ -2772,7 +2772,7 @@ fn ir_riscv_gen(uint64 fn_node) {
 // |disp| > 2 GiB - 2 KiB, is unreachable).
 //
 // Both words are fully re-encoded (not read-modify-OR) — the arm64
-// resolver does the same for its BL (codegen_aarch64.kr:6994).
+// resolver does the same for its BL (codegen_aarch64.kr:6996).
 fn resolve_fixups_riscv() {
     uint64 i = 0
     while i < fixup_count {
@@ -2796,7 +2796,7 @@ fn resolve_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | ((RV_RA & 0x1F) << 15) | ((RV_RA & 0x1F) << 7) | 0x67)
         } else {
             // Undefined function — mirror resolve_fixups_a64
-            // (codegen_aarch64.kr:6990): without this the placeholder
+            // (codegen_aarch64.kr:6992): without this the placeholder
             // pair would jump to its own auipc at runtime.
             diag_loc_head(wtt, 0)
             write(2, "undefined function '", 20)
@@ -2929,8 +2929,8 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // fn_lookup compares token IDENTITY against that table, not raw source
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
-// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7017-7116), identical to
-// the x86 resolver (codegen.kr:15901-15965).
+// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7019-7118), identical to
+// the x86 resolver (codegen.kr:16027-16091).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
     while i < fnaddr_fixup_count {
@@ -2942,7 +2942,7 @@ fn resolve_fnaddr_fixups_riscv() {
         unsafe { *(fe4 as uint32) -> str_tok }
 
         // str_tok's text includes the surrounding quotes; strip them to
-        // get the bare function name (mirrors codegen_aarch64.kr:7030-7031).
+        // get the bare function name (mirrors codegen_aarch64.kr:7032-7033).
         uint64 wst = str_tok
         uint64 sstart = tok_text_start(wst)
         uint64 slen = tok_text_len(wst)
@@ -2996,7 +2996,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:15960-15961, codegen_aarch64.kr:7111-7112): without
+            // (codegen.kr:16086-16087, codegen_aarch64.kr:7113-7114): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)

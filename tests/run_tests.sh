@@ -8628,12 +8628,14 @@ else
     echo "FAIL: asm_in_static_rejected_arm64_legacy (want exit 1, no output, '$SDD_NF':$SDD_BAD)"
     FAIL=$((FAIL + 1))
 fi
-# asm_bad_reg_rejected_arm64_legacy: out(rax -> r) on arm64.
+# asm_bad_reg_rejected_arm64_legacy: out(rax -> r) on arm64. Located at the
+# register since #214 (asm_check_constraints), so the lkm copy, 8 lines
+# further down, has its own location.
 SDD_BR="error: unknown arm64 inline-asm constraint register 'rax' (want x0-x30)"
 printf 'fn f() -> u64 { u64 r = 5\n asm { "mov x1, x0" } out(rax -> r)\n return r }\nfn main() { exit(f()) }\n' > $SDD_T/ba.kr
 sdd_lkm $SDD_T/ba.kr $SDD_T/bal.kr
 TOTAL=$((TOTAL + 1))
-SDD_BAD="$(sdd_ref arm64 --legacy $SDD_T/ba.kr "$SDD_BR")$(sdd_ref arm64 -c $SDD_T/ba.kr "$SDD_BR")$(sdd_ref arm64 --emit=lkm $SDD_T/bal.kr "$SDD_BR")"
+SDD_BAD="$(sdd_ref arm64 --legacy $SDD_T/ba.kr "$SDD_T/ba.kr:2:27: $SDD_BR")$(sdd_ref arm64 -c $SDD_T/ba.kr "$SDD_T/ba.kr:2:27: $SDD_BR")$(sdd_ref arm64 --emit=lkm $SDD_T/bal.kr "$SDD_T/bal.kr:10:27: $SDD_BR")"
 if [ -z "$SDD_BAD" ]; then
     PASS=$((PASS + 1))
     echo "  asm_bad_reg_rejected_arm64_legacy: PASS (refused on --legacy, -c, --emit=lkm: $SDD_BR)"
@@ -13387,9 +13389,10 @@ fi
 rm -f "$DIR/../asmreg_tmp_$$.kr" "$DIR/../asmvar_tmp_$$.kr"
 
 # Positive control for the row above: the fix must not pass by refusing
-# everything. Every accepted name (rax..rdi, rsp, rbp, r8..r15) still compiles
-# on both backends. rsp appears only as an OUTPUT -- feeding a value into rsp
-# would destroy the stack.
+# everything. Every accepted name (rax..rdi, rbp, r8..r15) still compiles on
+# both backends. rsp is no longer one of them: the stack pointer is refused in
+# every clause (#218, row asm_constraint_sp_refused_x86_64); this row used to
+# bind it as an output.
 TOTAL=$((TOTAL + 1))
 cat > "$DIR/../asmok_tmp_$$.kr" <<'ASMOKEOF'
 fn main() {
@@ -13397,7 +13400,7 @@ fn main() {
     uint64 o = 0
     asm { "nop" } in(v -> rax, v -> rcx, v -> rdx, v -> rbx, v -> rsi, v -> rdi, v -> rbp)
     asm { "nop" } in(v -> r8, v -> r9, v -> r10, v -> r11, v -> r12, v -> r13, v -> r14, v -> r15)
-    asm { "nop" } out(rsp -> o)
+    asm { "nop" } out(rbx -> o)
     exit(0)
 }
 ASMOKEOF
@@ -13412,7 +13415,7 @@ for asmok_be in "" "--legacy"; do
     rm -f /tmp/asmok_$$
 done
 if [ "$asmok_ok" = "1" ]; then
-    PASS=$((PASS + 1)); echo "  asm_constraint_accepted_names_still_bind: PASS (16 names, both backends)"
+    PASS=$((PASS + 1)); echo "  asm_constraint_accepted_names_still_bind: PASS (15 names, both backends)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: asm_constraint_accepted_names_still_bind ($asmok_note)"
 fi

@@ -1681,10 +1681,10 @@ fn xt_relax_function(uint64 code_start, uint64 line_start) {
 
 // --- Inline-asm mnemonic assembler --------------------------------------
 // Assembles ONE quoted asm string token into the code stream. Mirrors
-// asm_emit_rv (ir_riscv.kr:1007) but for Xtensa. Scope is deliberately tight
-// (audit: constraint-binding hardcodes x86 reg codes upstream, ir.kr:5506):
+// asm_emit_rv (ir_riscv.kr:1007) but for Xtensa. Scope is deliberately tight:
 // operand-less nullary mnemonics only — the register conventions the boot
-// test exercises. Xtensa has no intra-instruction compression pass, so unlike
+// test exercises. (in()/out()/clobbers() constraints name a0, a2-a15 since
+// #215; they bind through the IR_ARG / IR_COPY imm >= 100 paths, not here.) Xtensa has no intra-instruction compression pass, so unlike
 // riscv there is no non-compressible range to mark (rv_mark_noc has no analog).
 fn asm_emit_xt(uint64 str_tok) {
     uint64 tstart = tok_text_start(str_tok)
@@ -2366,7 +2366,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11324, mirror of ir_riscv.kr:1796-1847): dest =
+    // Semantics (ir.kr:95/11308, mirror of ir_riscv.kr:1796-1847): dest =
     // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
     // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
     // the one emit site, ir.kr:2148). Assume-equal result preset AFTER the
@@ -2723,8 +2723,8 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // Mirror of ir_riscv.kr:2237 / ir_aarch64.kr:2717: walk the AsmBlock node's
     // string children (data1 = single-line `asm("...")` form; child list =
     // multi-line `asm { "..."; ... }` form) and hand each to asm_emit_xt. I/O
-    // constraints are NOT handled here (the block is operand-less by scope — the
-    // upstream binding hardcodes x86 reg codes, ir.kr:5506). The asm text is
+    // constraints are NOT handled here: their moves are the IR_ARG / IR_COPY
+    // (imm >= 100) around this op, named a0, a2-a15 (#215). The asm text is
     // opaque passthrough. No non-compressible marking is needed (Xtensa has no
     // intra-instruction compression pass, so the emitted words are never
     // rewritten after the fact — unlike riscv's rv_compress_function).
@@ -2924,10 +2924,9 @@ fn ir_xtensa_gen(uint64 fn_node, uint64 xt_entry_node) {
     // epilogue. xt_fn_wide_ok only keeps such a function out of the WIDE
     // colour file; it does nothing for the save set.
     //
-    // Reachable today despite asm_emit_xt's nullary-only mnemonic scope: the
-    // constraint binder (ir.kr) only routes arch 2 through rv_reg_code, so an
-    // xtensa `in(v -> r15)` falls through to x86_reg_code, yields 15, and
-    // emits IR_ARG imm 115 -> xt_mv(15, src), i.e. a write to a15 = colour 3.
+    // Reachable today despite asm_emit_xt's nullary-only mnemonic scope: an
+    // xtensa `in(v -> a15)` constraint (asm_reg_try, #215) emits IR_ARG imm
+    // 115 -> xt_mv(15, src), i.e. a write to a15 = colour 3.
     // Force the full four, mirroring ir_aarch64.kr's a64_has_asm -> 0x3FF.
     // Set BEFORE nsaved/cs_base/total_frame derive from it.
     if ir_fn_has_asm_block() != 0 { used_mask = used_mask | 0xF }

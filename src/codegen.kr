@@ -4500,62 +4500,34 @@ fn vardecl_resolved_kind(uint64 node) -> uint64 {
     return tok_kind_at_raw(d1)
 }
 
-// Parse an x86_64 register name token into a 4-bit register code.
-// Returns 0..15 for recognised names. Recognised: rax..rdi (0..7),
-// r8..r15 (8..15).
+// ---- Inline-asm constraint registers: ONE resolver (#214, #215, #218) ------
 //
-// Fail-loud discipline (same rule as rv_reg_code below): an UNKNOWN register
-// name is a HARD ERROR. It used to return a 0xFFFF sentinel and every caller
-// then skipped the binding, so `out(eax -> v)` — the 32-bit spelling, or any
-// typo — compiled clean on BOTH backends and left the variable at its stale
-// value. Measured before this change: the program below exited 7, not 42.
+// asm_reg_try(tok, arch) is the only name -> register-number table for asm
+// in()/out()/clobbers(): arch 0 x86_64, 1 arm64, 2 riscv32, 3 xtensa. It
+// returns the hardware register number, or 0xFFFF for a name the target does
+// not have, and NEVER exits -- so the register allocator's ban scan (ir.kr),
+// the arm64/xtensa far-slot scratch choice and the legacy x86_64 parameter pin
+// decision can all ask it about any constraint without stopping the build
+// from the wrong place.
 //
-//     uint64 v = 7
-//     asm { "0xb8 0x2a 0x00 0x00 0x00" } out(eax -> v)
+// Whether a name is ALLOWED is asm_check_constraints's job: every one of the
+// three asm lowerings (ir.kr, legacy x86_64 codegen.kr, legacy arm64
+// codegen_aarch64.kr) calls it first, and it stops the build at the register
+// token -- file:line:col, the name, and a hint -- for an unknown name in any
+// clause (clobbers() included: it used to be ignored, so `clobbers(eax)` or
+// `clobbers(memory)` compiled to a block whose writes nothing knew about) and
+// for the stack pointer (#218).
 //
-// This routine is shared: arch 0 (x86), arch 1 (arm64 IR) and arch 3 (xtensa)
-// all resolve constraint registers through it (only arch 2 routes to
-// rv_reg_code). Failing loud here is therefore deliberately cross-arch. No
-// non-x86 constraint register names exist in live source, and xtensa's
-// documented `in(v -> r15)` fallthrough (src/ir_xtensa.kr:2929) resolves to
-// 15 exactly as before.
-// Resolve an AArch64 constraint register name, FAILING LOUD on an unknown one.
-//
-// WHY A WRAPPER AND NOT A PARSER. src/codegen_aarch64.kr already has
-// a64_reg_code, which parses x0..x30 for the LEGACY arm64 backend. The IR path
-// never used it: ir.kr routed arch 1 to x86_reg_code, which ir.kr's own comment
-// calls "a pre-existing bug, audit §11 -- deliberately left unchanged so the
-// bootstrap stays identical". The consequence was that inline asm on arm64
-// could not take an argument or return a value at all -- `out(x0 -> v)` was
-// rejected with a list of x86 register names -- so every sysreg reader in
-// ApexRift's arch/arm64/ passes a scratch ADDRESS in and stores through it.
-//
-// The backend needed nothing: src/ir_aarch64.kr already honours the
-// `imm >= 100` physical-register marker in both directions and uses the code as
-// an arm64 register number. Only the name lookup was missing, and it already
-// existed one file over.
-//
-// The 0xFFFF it returns is the silent-skip sentinel this family of bugs is
-// named after -- every caller used to skip the binding and leave the variable
-// at its stale value. So it is converted to a hard error here rather than
-// passed on.
-//
-// THE BOOTSTRAP IS UNAFFECTED: it is arch 0, which still routes to
-// x86_reg_code, and no non-x86 constraint register names existed in live source
-// before this.
-fn a64_reg_code_strict(uint64 name_tok) -> uint64 {
-    uint64 r = a64_reg_code(name_tok)
-    if r != 0xFFFF { return r }
-    uint64 atlen = tok_text_len(name_tok)
-    uint64 atstart = tok_text_start(name_tok)
-    write(2, "error: unknown arm64 inline-asm constraint register '", 53)
-    write(2, cg_source + atstart, atlen)
-    write(2, "' (want x0-x30)\n", 16)
-    exit(1)
-    return 0xFFFF
-}
+// History. The three per-arch lookups used to exit on an unknown name
+// themselves, unlocated, and only for in()/out(); xtensa (arch 3) fell through
+// to the x86_64 table, so `in(x -> rcx)` on xtensa wrote a1, the stack
+// pointer (#215). Measured before the located form: `out(eax -> v)` exited 7,
+// not 42, on both x86_64 backends, back when the x86_64 table returned 0xFFFF
+// and every caller skipped the binding.
 
-fn x86_reg_code(uint64 name_tok) -> uint64 {
+// x86_64: rax..rdi = 0..7, r8..r15 = 8..15 (rsp = 4 resolves, and is refused
+// by asm_check_constraints as the stack pointer).
+fn x86_reg_try(uint64 name_tok) -> uint64 {
     if tok_matches(name_tok, "rax", 3) != 0 { return 0 }
     if tok_matches(name_tok, "rcx", 3) != 0 { return 1 }
     if tok_matches(name_tok, "rdx", 3) != 0 { return 2 }
@@ -4572,14 +4544,178 @@ fn x86_reg_code(uint64 name_tok) -> uint64 {
     if tok_matches(name_tok, "r13", 3) != 0 { return 13 }
     if tok_matches(name_tok, "r14", 3) != 0 { return 14 }
     if tok_matches(name_tok, "r15", 3) != 0 { return 15 }
-    // Unknown name — fail the build loudly.
-    uint64 xtlen = tok_text_len(name_tok)
-    uint64 xtstart = tok_text_start(name_tok)
-    write(2, "error: unknown inline-asm constraint register '", 47)
-    write(2, cg_source + xtstart, xtlen)
-    write(2, "' (want rax rcx rdx rbx rsp rbp rsi rdi r8-r15)\n", 48)
-    exit(1)
     return 0xFFFF
+}
+
+// xtensa: a0..a15 -> 0..15 (#215). a1 is the stack pointer (refused by
+// asm_check_constraints).
+fn xt_reg_try(uint64 name_tok) -> uint64 {
+    uint64 tlen = tok_text_len(name_tok)
+    if tlen < 2 || tlen > 3 { return 0xFFFF }
+    uint64 ts = tok_text_start(name_tok)
+    if asm_name_byte(ts, 0) != 97 { return 0xFFFF }     // 'a'
+    uint64 n = 0
+    uint64 k = 1
+    while k < tlen {
+        uint64 ck = asm_name_byte(ts, k)
+        if ck < 48 || ck > 57 { return 0xFFFF }
+        n = n * 10 + (ck - 48)
+        k = k + 1
+    }
+    if tlen == 3 && asm_name_byte(ts, 1) == 48 { return 0xFFFF }   // "a05"
+    if n > 15 { return 0xFFFF }
+    return n
+}
+
+fn asm_name_byte(uint64 ts, uint64 k) -> uint64 {
+    uint64 p = cg_source + ts + k
+    uint64 c = 0
+    unsafe { *(p as uint8) -> c }
+    return c
+}
+
+// THE resolver. arm64 is codegen_aarch64.kr's a64_reg_code (x0..x30).
+fn asm_reg_try(uint64 name_tok, uint64 arch) -> uint64 {
+    if arch == 1 { return a64_reg_code(name_tok) }
+    if arch == 2 { return rv_reg_try(name_tok) }
+    if arch == 3 { return xt_reg_try(name_tok) }
+    return x86_reg_try(name_tok)
+}
+
+// The stack pointer's register number on `arch`, 0xFFFF for arm64 (whose
+// resolver has no name for it: `sp` is simply not one of x0..x30).
+fn asm_sp_code(uint64 arch) -> uint64 {
+    if arch == 0 { return 4 }
+    if arch == 2 { return 2 }
+    if arch == 3 { return 1 }
+    return 0xFFFF
+}
+
+// Does the name look like a floating-point / SIMD register of `arch`? Only for
+// the hint: the constraint language names integer registers only.
+fn asm_name_is_fp(uint64 name_tok, uint64 arch) -> uint64 {
+    uint64 tlen = tok_text_len(name_tok)
+    uint64 ts = tok_text_start(name_tok)
+    if tlen < 2 { return 0 }
+    uint64 c0 = asm_name_byte(ts, 0)
+    uint64 c1 = asm_name_byte(ts, 1)
+    uint64 d1 = 0
+    if c1 >= 48 && c1 <= 57 { d1 = 1 }
+    if arch == 0 {
+        if tlen >= 3 && (c0 == 120 || c0 == 121 || c0 == 122) && c1 == 109 && asm_name_byte(ts, 2) == 109 { return 1 }   // xmm ymm zmm
+        if c0 == 115 && c1 == 116 { return 1 }     // st, st0..
+        if c0 == 109 && c1 == 109 { return 1 }     // mm0..
+        if c0 == 107 && d1 != 0 { return 1 }       // k0.. (AVX-512 masks)
+        return 0
+    }
+    if arch == 1 {
+        if d1 == 0 { return 0 }
+        if c0 == 118 || c0 == 100 || c0 == 113 || c0 == 115 || c0 == 104 || c0 == 98 { return 1 }   // v d q s h b
+        return 0
+    }
+    // riscv32 f0-f31, ft*, fs*, fa*; xtensa f0-f15
+    if c0 == 102 && (d1 != 0 || c1 == 116 || c1 == 115 || c1 == 97) { return 1 }
+    return 0
+}
+
+// Does the name look like an x86 sub-register (eax, ax, al, ah, r8d, r8w,
+// r8b, sil, ...)? Only for the hint.
+fn asm_x86_subreg(uint64 tok) -> uint64 {
+    uint64 tlen = tok_text_len(tok)
+    uint64 ts = tok_text_start(tok)
+    if tlen < 2 || tlen > 4 { return 0 }
+    uint64 c0 = asm_name_byte(ts, 0)
+    uint64 c1 = asm_name_byte(ts, 1)
+    uint64 cl = asm_name_byte(ts, tlen - 1)
+    if tlen == 3 && c0 == 101 { return 1 }                                            // eax ...
+    if tlen == 2 && (c1 == 120 || c1 == 108 || c1 == 104 || c1 == 105 || c1 == 112) { return 1 }   // ax al ah si sp
+    if c0 == 114 && c1 >= 48 && c1 <= 57 && (cl == 100 || cl == 119 || cl == 98) { return 1 }      // r8d r8w r8b
+    if tlen == 3 && cl == 108 && (c1 == 105 || c1 == 112) { return 1 }               // sil dil spl bpl
+    return 0
+}
+
+// diag_fatal_at with the register's own name quoted inside the message:
+// "<pre>'<name>'<post>".
+fn asm_reg_fatal(uint64 tok, uint64 pre, uint64 post) {
+    diag_loc_head(tok, 0)
+    write(2, pre, str_len(pre))
+    write(2, "'", 1)
+    write(2, cg_source + tok_text_start(tok), tok_text_len(tok))
+    write(2, "'", 1)
+    write(2, post, str_len(post))
+    write(2, "\n", 1)
+    diag_span_of(tok)
+    exit(1)
+}
+
+// Stops the build at an unknown constraint register: names it, lists the
+// target's names, and adds the one hint that applies.
+fn asm_reg_unknown(uint64 tok, uint64 arch) {
+    uint64 pre = "unknown inline-asm constraint register "
+    uint64 want = " (want rax rcx rdx rbx rbp rsi rdi r8-r15"
+    if arch == 1 {
+        pre = "unknown arm64 inline-asm constraint register "
+        want = " (want x0-x30"
+    }
+    if arch == 2 {
+        pre = "unknown riscv32 inline-asm constraint register "
+        want = " (want x0-x31 or zero/ra/gp/tp/t0-t6/s0-s11/a0-a7/fp"
+    }
+    if arch == 3 {
+        pre = "unknown xtensa inline-asm constraint register "
+        want = " (want a0 or a2-a15"
+    }
+    uint64 hint = ")"
+    if tok_matches(tok, "memory", 6) != 0 || tok_matches(tok, "cc", 2) != 0 {
+        hint = "; drop it: an asm block is already ordered with the memory accesses around it, and flags are never live across one)"
+    } else if asm_name_is_fp(tok, arch) != 0 {
+        hint = "; only integer registers can be constraints)"
+    } else if arch == 0 {
+        if asm_x86_subreg(tok) != 0 { hint = "; there are no 32-, 16- or 8-bit names)" }
+    } else if arch == 1 {
+        uint64 c0 = asm_name_byte(tok_text_start(tok), 0)
+        if tok_matches(tok, "lr", 2) != 0 {
+            hint = "; the link register is x30)"
+        } else if tok_matches(tok, "fp", 2) != 0 {
+            hint = "; the frame pointer is x29)"
+        } else if c0 == 119 && tok_text_len(tok) >= 2 {
+            hint = "; there are no 32-bit (w) names)"
+        }
+    }
+    diag_loc_head(tok, 0)
+    write(2, pre, str_len(pre))
+    write(2, "'", 1)
+    write(2, cg_source + tok_text_start(tok), tok_text_len(tok))
+    write(2, "'", 1)
+    write(2, want, str_len(want))
+    write(2, hint, str_len(hint))
+    write(2, "\n", 1)
+    diag_span_of(tok)
+    exit(1)
+}
+
+// Validate every register of one asm block's in()/out()/clobbers(), at the
+// register token. Called by each asm lowering right after win_asm_refuse.
+fn asm_check_constraints(uint64 node, uint64 arch) {
+    uint32 ch = ast_data3(node)
+    uint64 wc = ch
+    while wc != 0 {
+        uint32 rt = ast_data2(wc)
+        uint64 wrt = rt
+        uint64 code = asm_reg_try(wrt, arch)
+        // The stack pointer by any name (#218): rsp, riscv sp/x2, xtensa a1;
+        // arm64 `sp` and xtensa `sp` are not register names of their
+        // resolvers, so they are caught by name before the unknown-name path.
+        if arch == 3 && tok_matches(wrt, "sp", 2) != 0 {
+            diag_fatal_at(wrt, "the xtensa stack pointer is a1, and the stack pointer cannot be an inline-asm in()/out()/clobbers() register")
+        }
+        if (code != 0xFFFF && code == asm_sp_code(arch)) || (arch == 1 && (tok_matches(wrt, "sp", 2) != 0 || tok_matches(wrt, "wsp", 3) != 0)) {
+            asm_reg_fatal(wrt, "the stack pointer (", ") cannot be an inline-asm in()/out()/clobbers() register")
+        }
+        if code == 0xFFFF { asm_reg_unknown(wrt, arch) }
+        uint32 nx = ast_next(wc)
+        wc = nx
+    }
 }
 
 // The other half of the asm-constraint silent-skip family: the OPERAND. Both
@@ -4590,8 +4726,8 @@ fn x86_reg_code(uint64 name_tok) -> uint64 {
 // register was left holding garbage, not the global's value).
 //
 // `resolved` is the lookup result (legacy: var_lookup's 0xFFFFFFFF byte
-// offset; IR: ir_var_get's 0xFFFFFFFF vreg). Homed here beside x86_reg_code
-// because ir.kr calls it exactly like it calls x86_reg_code.
+// offset; IR: ir_var_get's 0xFFFFFFFF vreg). Homed here beside asm_reg_try
+// because every asm lowering calls both.
 fn asm_require_local(uint64 name_tok, uint64 resolved) {
     if resolved != 0xFFFFFFFF { return }
     uint64 atlen = tok_text_len(name_tok)
@@ -4602,17 +4738,11 @@ fn asm_require_local(uint64 name_tok, uint64 resolved) {
     exit(1)
 }
 
-// RISC-V inline-asm constraint register-name -> 0..31 hardware number.
-// Accepts the numeric x0-x31 form and the RV32 ABI aliases (zero, ra, sp,
-// gp, tp, t0-t6, s0-s11, a0-a7, fp=x8). Homed here beside x86_reg_code
-// because the IR constraint-binding sites (ir.kr) call it exactly like they
-// call x86_reg_code; it only needs tok_matches / tok_text_* (this file).
-//
-// Fail-loud discipline (project never-miscompile rule, audit §M2): an
-// UNKNOWN register name is a HARD ERROR, not the 0xFFFF silent-skip sentinel
-// that x86_reg_code returns. A mistyped inline-asm constraint register must
-// break the build rather than be silently dropped from the binding.
-fn rv_reg_code(uint64 name_tok) -> uint64 {
+// riscv32 constraint register name -> 0..31: the numeric x0-x31 form and the
+// RV32 ABI aliases (zero, ra, sp, gp, tp, t0-t6, s0-s11, a0-a7, fp = s0 = x8),
+// or 0xFFFF. Never exits (see asm_reg_try); sp/x2 resolve to 2 and are
+// refused by asm_check_constraints as the stack pointer.
+fn rv_reg_try(uint64 name_tok) -> uint64 {
     // ABI aliases (fp is an alias for s0/x8).
     if tok_matches(name_tok, "zero", 4) != 0 { return 0 }
     if tok_matches(name_tok, "ra", 2) != 0 { return 1 }
@@ -4669,12 +4799,7 @@ fn rv_reg_code(uint64 name_tok) -> uint64 {
             if ok != 0 && num < 32 { return num }
         }
     }
-    // Unknown name — fail the build loudly.
-    write(2, "error: riscv32: unknown inline-asm constraint register '", 56)
-    write(2, cg_source + tstart, tlen)
-    write(2, "' (want x0-x31 or zero/ra/sp/gp/tp/t0-t6/s0-s11/a0-a7/fp)\n", 58)
-    exit(1)
-    return 0
+    return 0xFFFF
 }
 
 // Emit `mov dst, src` for any two 64-bit registers (0..15).
@@ -11539,7 +11664,7 @@ fn asm_parse_num(uint64 src, uint64 off, uint64 n) -> uint64 {
 // Match a 64-bit register name spelled at src+off, exactly `n` chars long.
 // Returns 0-15, or 0xFFFF if it is not a register.
 //
-// Separate from x86_reg_code (which works on TOKENS, for in()/out() operand
+// Separate from x86_reg_try (which works on TOKENS, for in()/out()/clobbers()
 // constraints) because here the name is raw text inside an asm string literal.
 // The two must stay in step: they accept the same sixteen names.
 fn asm_x86_reg(uint64 src, uint64 off, uint64 n) -> uint64 {
@@ -14657,6 +14782,7 @@ fn gen_stmt(uint64 node) {
     // input/output register that their block touches explicitly).
     if kind == 43 {
         win_asm_refuse(node)
+        asm_check_constraints(node, 0)     // #214/#218: located, every clause
         uint32 cons_head = ast_data3(node)
         uint64 wch_x86 = cons_head
 
@@ -14669,13 +14795,13 @@ fn gen_stmt(uint64 node) {
                 uint32 vtok = ast_data3(wci)
                 uint64 wrtok = rtok
                 uint64 wvtok = vtok
-                uint64 rcode = x86_reg_code(wrtok)
+                uint64 rcode = x86_reg_try(wrtok)
                 uint64 voff  = var_lookup(wvtok)
-                // Both halves used to be a silent skip. x86_reg_code now exits
-                // on an unknown register, and an operand naming something that
-                // is not a local (a typo, or a static/global — which asm
-                // constraints have never actually supported) is an error too:
-                // it used to compile clean and bind nothing.
+                // Both halves used to be a silent skip. An unknown register is
+                // refused above (asm_check_constraints), and an operand naming
+                // something that is not a local (a typo, or a static/global —
+                // which asm constraints have never actually supported) is an
+                // error too: it used to compile clean and bind nothing.
                 asm_require_local(wvtok, voff)
                 if rcode != 0xFFFF {
                     emit_mov_reg_from_stack(rcode, voff)
@@ -14713,7 +14839,7 @@ fn gen_stmt(uint64 node) {
                 uint32 vtok2 = ast_data3(wco)
                 uint64 wrtok2 = rtok2
                 uint64 wvtok2 = vtok2
-                uint64 rcode2 = x86_reg_code(wrtok2)
+                uint64 rcode2 = x86_reg_try(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
                 // A const or a whole static array/struct gets its own message
                 // before asm_require_local's (#206/#207).

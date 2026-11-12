@@ -5466,6 +5466,11 @@ fn ir_lower_stmt(uint64 node) {
     if kind == 43 {
         // #143: on Windows, asm that writes the frame pointer (or x18) is refused.
         win_asm_refuse(node)
+        // #214/#215/#218: every in()/out()/clobbers() register is a register
+        // of this target and not the stack pointer -- or a located error here,
+        // in lowering, before anything below (or the allocator's ban scan,
+        // ir_seed_asm_bans) resolves it with asm_reg_try.
+        asm_check_constraints(node, target_arch)
         // For ASM blocks, we emit the instructions directly during x86 emission.
         // The IR_ASM_BLOCK carries the AST node index for the x86 emitter.
         // Handle I/O constraints:
@@ -5488,24 +5493,13 @@ fn ir_lower_stmt(uint64 node) {
                 // Same silent-skip family as the register-name sentinel.
                 asm_require_local(vtok, var_v)
                 // Store the vreg as src in the instruction imm (via IR_ARG).
-                // Register-name resolution is arch-specific: riscv32 (arch 2)
-                // uses rv_reg_code (a0-a7/s0-s11/x0-x31, fails loud on an
-                // unknown name), arm64 (arch 1) uses a64_reg_code_strict
-                // (fails loud on anything but x0-x30), and x86 (arch 0) uses
-                // x86_reg_code. arm64 used to inherit the x86 lookup here;
-                // IR_REFERENCE §13 item 11 records that as closed, and the
-                // second site below makes the same three-way choice.
+                // The register comes from the one per-arch resolver
+                // (asm_reg_try: x86_64, arm64 x0-x30, riscv32, xtensa a0-a15);
+                // asm_check_constraints above already refused any name it
+                // does not know. arm64 used to inherit the x86 lookup here
+                // (IR_REFERENCE §13 item 11), xtensa until #215.
                 uint32 rtok = ast_data2(wci)
-                uint64 rcode = 0
-                if target_arch == 2 {
-                    rcode = rv_reg_code(rtok)
-                } else {
-                    if target_arch == 1 {
-                        rcode = a64_reg_code_strict(rtok)
-                    } else {
-                        rcode = x86_reg_code(rtok)
-                    }
-                }
+                uint64 rcode = asm_reg_try(rtok, target_arch)
                 if rcode != 0xFFFF {
                     // Move var value to the target physical register
                     ir_emit(IR_ARG, 0, var_v, 0, rcode + 100, ir_current_bb)
@@ -5537,18 +5531,8 @@ fn ir_lower_stmt(uint64 node) {
                 uint64 ao_v = ir_var_get(vtok2)
                 if ao_v == 0xFFFFFFFF && static_lookup(vtok2) != 0xFFFFFFFF { static_write_check(vtok2) }
                 asm_require_local(vtok2, ao_v)
-                // Same arch-gated dispatch as the IN site above: riscv32
-                // rv_reg_code, arm64 a64_reg_code_strict, x86 x86_reg_code.
-                uint64 rcode2 = 0
-                if target_arch == 2 {
-                    rcode2 = rv_reg_code(rtok2)
-                } else {
-                    if target_arch == 1 {
-                        rcode2 = a64_reg_code_strict(rtok2)
-                    } else {
-                        rcode2 = x86_reg_code(rtok2)
-                    }
-                }
+                // Same resolver as the IN site above.
+                uint64 rcode2 = asm_reg_try(rtok2, target_arch)
                 if rcode2 != 0xFFFF {
                     uint64 out_v = ir_new_vreg()
                     // Use IR_COPY with a special marker: src1=0, imm=rcode+100
