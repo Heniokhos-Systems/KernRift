@@ -1389,7 +1389,8 @@ block is read again after it), and flags are never live across one. Writing
   whole callee-saved integer file in its prologue, so naming one costs
   nothing but the variable that had to move. **On x86_64 `--legacy`, `-c`/
   `--emit=obj` and `--emit=lkm` it does not** — the prologue saves only
-  `rbx` and `r12` — and an arm64 `--legacy`/`-c` leaf function saves nothing:
+  `rbx` and `r12` — and arm64 `--legacy`/`-c` saves none of `x21`–`x28` (a
+  leaf function saves nothing at all):
   there a block that writes another callee-saved register (`rbp`,
   `r13`–`r15`; arm64 `x19`–`x28`) changes it for the caller, even when it is
   listed in `clobbers()` (#235). Use the IR backend, or save and restore
