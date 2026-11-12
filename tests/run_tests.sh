@@ -26045,14 +26045,47 @@ rm -rf "$LKM_DIR"
 #
 # Discriminating mutation: change any one of the four strings, or add a
 # CHANGELOG heading without bumping them, and this fails.
+#
+# The one exception is the release being written: while 2.11.1 is under way
+# the CHANGELOG opens with `## v2.11.1 (unreleased)` (exactly that suffix)
+# and the binaries still say 2.11.0. Such a heading names no released
+# version, so the rows check the first heading WITHOUT the suffix -- but only
+# in this shape, and anything else fails all three rows with the reason:
+#   - the `(unreleased)` heading must be the FIRST version heading;
+#   - there is at most one;
+#   - its version must be above the first released heading's.
+# The release commit drops the suffix and bumps the strings in one go, and
+# from then on the rows bind to that heading again.
 echo ""
 echo "--- version consistency ---"
-# A heading that ends in ` (unreleased)` is the next release being written
-# (`## v2.11.1 (unreleased)`): it names no version yet, so the first heading
-# WITHOUT that suffix is the one the binaries must match. The release commit
-# drops the suffix and bumps the strings in one go, and from then on this
-# binds to it again.
-VER_CHANGELOG=$(grep -E "^## v[0-9]+\.[0-9]+\.[0-9]+" "$DIR/../CHANGELOG.md" | grep -vE "^## v[0-9]+\.[0-9]+\.[0-9]+ \(unreleased\)$" | head -1 | grep -oE "^## v[0-9]+\.[0-9]+\.[0-9]+" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")
+# ver_changelog FILE -> the version the binaries must match, or `!<why>`
+ver_changelog() {
+    awk '
+    function gt(a, b,   x, y, i) {
+        split(a, x, "."); split(b, y, ".")
+        for (i = 1; i <= 3; i++) { if (x[i] + 0 != y[i] + 0) return x[i] + 0 > y[i] + 0 }
+        return 0
+    }
+    /^## v[0-9]+\.[0-9]+\.[0-9]+/ {
+        n++
+        v = $2; sub(/^v/, "", v); sub(/[^0-9.].*$/, "", v)
+        if ($0 ~ /^## v[0-9]+\.[0-9]+\.[0-9]+ \(unreleased\)$/) {
+            u++
+            if (n != 1 && pos == "") pos = "an (unreleased) heading, v" v ", that is not the first version heading"
+            uv = v
+        } else if (rv == "") rv = v
+    }
+    END {
+        if (u > 1) why = u " (unreleased) headings, want at most 1"
+        else why = pos
+        if (rv == "" && why == "") why = "no released version heading"
+        if (u == 1 && why == "" && !gt(uv, rv)) why = "the (unreleased) heading v" uv " is not above the released v" rv
+        if (why != "") print "!" why; else print rv
+    }' "$1"
+}
+VER_CHANGELOG=$(ver_changelog "$DIR/../CHANGELOG.md")
+VER_CHANGELOG_WHY=""
+case $VER_CHANGELOG in "!"*) VER_CHANGELOG_WHY="; CHANGELOG headings: ${VER_CHANGELOG#!}"; VER_CHANGELOG="" ;; esac
 
 TOTAL=$((TOTAL + 1))
 VER_KRC=$($KRC --version 2>/dev/null | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
@@ -26061,7 +26094,7 @@ if [ -n "$VER_CHANGELOG" ] && [ "$VER_KRC" = "$VER_CHANGELOG" ]; then
     echo "  version_krc_matches_changelog: PASS (krc reports $VER_KRC)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: version_krc_matches_changelog (krc says '$VER_KRC', CHANGELOG says '$VER_CHANGELOG')"
+    echo "FAIL: version_krc_matches_changelog (krc says '$VER_KRC', CHANGELOG says '$VER_CHANGELOG'$VER_CHANGELOG_WHY)"
 fi
 
 # All three runner strings must agree with each other AND with the changelog.
@@ -26074,7 +26107,7 @@ if [ "$VER_RUNNER_COUNT" = "1" ] && [ "$VER_RUNNER_SET" = "$VER_CHANGELOG" ]; th
     echo "  version_runner_matches_changelog: PASS (all 3 kr strings say $VER_RUNNER_SET)"
 else
     FAIL=$((FAIL + 1))
-    echo "FAIL: version_runner_matches_changelog (kr strings: $(printf '%s' "$VER_RUNNER_SET" | tr '\n' ' '); CHANGELOG: $VER_CHANGELOG)"
+    echo "FAIL: version_runner_matches_changelog (kr strings: $(printf '%s' "$VER_RUNNER_SET" | tr '\n' ' '); CHANGELOG: $VER_CHANGELOG$VER_CHANGELOG_WHY)"
 fi
 
 # --- every citation in the doc must be present in the manifest --------------
@@ -26175,7 +26208,7 @@ if [ -x "$DIR/../build/kr-bin" ]; then
         echo "  version_kr_binary_matches: PASS (kr binary reports $VER_KRBIN)"
     else
         FAIL=$((FAIL + 1))
-        echo "FAIL: version_kr_binary_matches (kr binary says '$VER_KRBIN', CHANGELOG says '$VER_CHANGELOG')"
+        echo "FAIL: version_kr_binary_matches (kr binary says '$VER_KRBIN', CHANGELOG says '$VER_CHANGELOG'$VER_CHANGELOG_WHY)"
     fi
 else
     FAIL=$((FAIL + 1))

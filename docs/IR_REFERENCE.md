@@ -1011,7 +1011,10 @@ What they cover exactly (`tests/run_tests.sh`, the block under "THE GUARD"):
   riscv32 under `qemu-riscv32 -R 0x20000000`; the listing rows on x86_64 and
   arm64; `get_module_path` under `--target=windows`. A missing qemu makes
   that arch's rows a SKIP, and a SKIP on a full run is red (README gate).
-  xtensa, freestanding images and the legacy backends are not covered.
+  xtensa, freestanding images and the legacy backends are not covered,
+  except for the plain reads (#199): their `unused_load_kept_*` rows below
+  cover `--legacy`, `--emit=obj`/`--emit=lkm`, riscv32 `--freestanding` and
+  xtensa `--freestanding` by listing.
 - `side_effect_runs_*` (S, L, B; exit code 50 when the op was CSE'd across,
   hoisted past or deleted): calls (50, with `ARG` 51), `call_ptr` (87) with
   and without arguments, `g = 9` (78), `read` (52), `syscall_raw` (85), the
@@ -1042,7 +1045,34 @@ What they cover exactly (`tests/run_tests.sh`, the block under "THE GUARD"):
   must show a `clock_gettime`; `exec_process`/`exec_process_argv` (113/114)
   exec `/bin/true`; `set_executable` (115) makes a scratch file executable;
   `--debug`'s `ARR_CHECK` (131) traps. On riscv32: the vloads but `vload64`,
-  the volatile and device reads, the trap, dealloc and alloc;
+  the volatile and device reads, the trap, dealloc and alloc. Since 2.11.1
+  the family also holds the 16 **plain reads** (#199), each faulting on
+  address 0 or next to it, 50 when deleted, on x86_64, arm64 and riscv32
+  (`load64` not on riscv32): `load8/16/32/64` as a statement (30),
+  `load_var` (an unused `u32 lv = load32(z)`), `load_expr` (`load32(z) + 1`),
+  `load_mulzero` (`load32(z) * 0`, used: const-fold leaves the load unused),
+  `load_overwritten`, `ptr_load` (`unsafe { *(z as u32) -> v }`),
+  `field_load` (a struct field through a pointer-holding struct variable),
+  `index_load` (a `[u32]` slice-parameter index read -- a one-byte read
+  today, #202), `load_bis` (`load32(b + i * 4)` in a helper: `IR_LOAD_BIS`
+  147 on arm64), `load_read_to_clear` (`u32 isr = load32(base + 16)` in a
+  helper), `str_len` (73), `str_eq` (75) and `struct_eq` (struct `==`,
+  `IR_MEMCMP` 88);
+- the other plain-read rows (#199): `unused_load_kept_legacy_<case> <arch>`
+  (8 of the cases above under `--legacy`, x86_64 and arm64; green before
+  2.11.1 too, the legacy backends have no DCE);
+  `unused_load_kept_riscv32_freestanding_<case>` and
+  `unused_load_kept_xtensa_<case>` (8 cases each, counted in the
+  `--freestanding` listing / code blob: case 1 real load, control twin with
+  the read removed 0); `xtensa_load_counter_selftest`, the guard of the
+  xtensa counter `tests/helpers/xtcount.py` (252 `vload` layouts whose
+  counts do not depend on the compiler); `unused_load_kept_emit_obj
+  x86_64`/`arm64` and `unused_load_kept_emit_lkm x86_64` (the legacy
+  object/module paths keep the read: one 32-bit load in `<rd>`, none in the
+  twin); and the compiler-order pins `plain_load_not_merged` (x86_64, arm64,
+  riscv32, xtensa: two reads of one address stay two),
+  `plain_load_not_merged_bis arm64` and `plain_load_not_hoisted` (the four
+  arches: one load, inside the loop's backward-branch span);
 - `side_effect_stops_static_cse_listing` (S, L, B) and
   `barrier_stops_static_cse`: CSE across 91, 95, 96, 113–115 and the barriers
   126–130 is not observable by a single-threaded run, so these count the
@@ -1116,7 +1146,8 @@ Not observed by any run:
   volatile store or compound lowered as a plain store is invisible (it
   emits the same bytes);
 - f16 and `device` fields wider than u16 are not in the width rows; xtensa
-  and freestanding images are not covered at all.
+  and freestanding images are not covered by any volatile row (the plain
+  reads are, by the listing rows above).
 
 **What the rows catch, measured.** (Measured before 2.11.1. The five plain
 reads `WANT_SE` gained in 2.11.1 — 30, 73, 75, 88, 147 — are covered by the
