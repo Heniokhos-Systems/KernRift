@@ -71,6 +71,9 @@ present, else plain `qemu-<arch>` (all Ubuntu 26.04's `qemu-user` ships). Some 5
 a host their rows skipped or quietly ran one leg. Row `qemu_resolver_single_site` keeps it that
 way.
 
+**`win_legacy_out_audit` outside a git checkout (#221).** The row counts the git-tracked corpus to
+prove it audited all of it; from a `git archive` or tarball copy it now fails at once, naming
+#221 and the reason, instead of running ~560 builds first and failing among unrelated reasons.
 
 ## v2.11.0 — 2026-11-10
 

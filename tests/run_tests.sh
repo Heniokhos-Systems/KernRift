@@ -35107,11 +35107,51 @@ fi
 # unmatched globs counted as files): the globs expand with nullglob, the
 # build count must be 4 x the .kr files git tracks in those four directories,
 # and only builds that succeeded count their functions as audited.
+# The tracked count needs git: outside a work tree (a `git archive` or tarball
+# copy, the Pi's G-ARM runs) or with no tracked corpus the row FAILs at once,
+# naming #221, and builds nothing -- it used to run all its builds first and
+# fail with "cannot list the tracked corpus" among other reasons.
+# peu_tracked_corpus ROOT -> PEU_TRK = the number of tracked corpus .kr files
+# under ROOT; status 1 with PEU_CWHY saying why it cannot be known.
+peu_tracked_corpus() {
+    PEU_TRK=0; PEU_CWHY=""
+    if ! command -v git > /dev/null 2>&1; then PEU_CWHY="no git on PATH"; return 1; fi
+    if [ "$(git -C "$1" rev-parse --is-inside-work-tree 2> /dev/null)" != "true" ]; then PEU_CWHY="$1 is not inside a git work tree"; return 1; fi
+    PEU_TRK=$(git -C "$1" ls-files -- 'tests/fixtures/*.kr' 'tests/fixtures/win_abi_frames/*.kr' 'examples/*.kr' 'tests/smoke/*.kr' 2> /dev/null \
+        | grep -cE '^(tests/fixtures|tests/fixtures/win_abi_frames|examples|tests/smoke)/[^/]+\.kr$')
+    [ "$PEU_TRK" -gt 0 ] 2> /dev/null && return 0
+    PEU_TRK=0; PEU_CWHY="git ls-files lists no tracked corpus .kr file under $1"; return 1
+}
+# out_audit_corpus_refuses_outside_git: peu_tracked_corpus on scratch
+# trees (GIT_CEILING_DIRECTORIES keeps git from finding an enclosing repo):
+# a plain directory holding a corpus file is refused as not a work tree, a
+# fresh repo with the file untracked is refused as listing none, and the same
+# repo after `git add` counts 1.
+PEU_SG=$(mktemp -d "${TMPDIR:-/tmp}/peu_sg.XXXXXX"); PEU_SGW=""
+mkdir -p "$PEU_SG/plain/tests/fixtures" "$PEU_SG/repo/tests/fixtures"
+printf 'fn main() { exit(0) }\n' > "$PEU_SG/plain/tests/fixtures/a.kr"; cp "$PEU_SG/plain/tests/fixtures/a.kr" "$PEU_SG/repo/tests/fixtures/a.kr"
+export GIT_CEILING_DIRECTORIES="$PEU_SG"
+peu_tracked_corpus "$PEU_SG/plain" && PEU_SGW="$PEU_SGW plain-dir-accepted($PEU_TRK);"
+case "$PEU_CWHY" in *"not inside a git work tree"*) ;; *) PEU_SGW="$PEU_SGW plain-dir-reason:'$PEU_CWHY';" ;; esac
+if git -C "$PEU_SG/repo" init -q > /dev/null 2>&1; then
+    peu_tracked_corpus "$PEU_SG/repo" && PEU_SGW="$PEU_SGW untracked-accepted($PEU_TRK);"
+    case "$PEU_CWHY" in *"lists no tracked corpus"*) ;; *) PEU_SGW="$PEU_SGW untracked-reason:'$PEU_CWHY';" ;; esac
+    git -C "$PEU_SG/repo" add tests/fixtures/a.kr > /dev/null 2>&1
+    peu_tracked_corpus "$PEU_SG/repo" || PEU_SGW="$PEU_SGW tracked-refused:'$PEU_CWHY';"
+    [ "$PEU_TRK" = 1 ] || PEU_SGW="$PEU_SGW tracked-count:$PEU_TRK(want 1);"
+else
+    PEU_SGW="$PEU_SGW git-init-failed;"
+fi
+unset GIT_CEILING_DIRECTORIES
+rm -rf "$PEU_SG"
+TOTAL=$((TOTAL + 1))
+if [ -z "$PEU_SGW" ]; then t10_ok out_audit_corpus_refuses_outside_git "a plain directory and a repo with nothing tracked are refused; one tracked file counts 1"
+else t10_bad out_audit_corpus_refuses_outside_git "$PEU_SGW"; fi
 PEU_AU="$T10_D/peu_audit"; rm -rf "$PEU_AU"; mkdir -p "$PEU_AU"
 PEU_WHY=""; PEU_N=0; PEU_FIX=0; PEU_OKB=0
-PEU_TRK=$(git -C "$DIR/.." ls-files -- 'tests/fixtures/*.kr' 'tests/fixtures/win_abi_frames/*.kr' 'examples/*.kr' 'tests/smoke/*.kr' 2> /dev/null \
-    | grep -cE '^(tests/fixtures|tests/fixtures/win_abi_frames|examples|tests/smoke)/[^/]+\.kr$')
-[ "$PEU_TRK" -gt 0 ] 2> /dev/null || PEU_WHY="$PEU_WHY cannot list the tracked corpus (git ls-files in $DIR/..);"
+if ! peu_tracked_corpus "$DIR/.."; then
+    pe_row_bad win_legacy_out_audit "#221: cannot enumerate the tracked corpus ($PEU_CWHY), so this run cannot prove the corpus complete; nothing was built -- run the suite in a git checkout"
+else
 for peu_a in x86_64 arm64; do
     $T10_KRC --legacy --arch=$peu_a --target=windows --emit=pe --test-out-audit "$DIR/fixtures/win_legacy_out.kr" -o "$PEU_AU/k.exe" > /dev/null 2> "$PEU_AU/k.err" \
         || PEU_WHY="$PEU_WHY win_legacy_out.kr $peu_a: build failed;"
@@ -35148,6 +35188,7 @@ done
 [ "$PEU_N" = $((4 * PEU_TRK)) ] || PEU_WHY="$PEU_WHY $PEU_N builds, want 4 x $PEU_TRK tracked .kr files = $((4 * PEU_TRK)) (corpus incomplete?);"
 if [ -z "$PEU_WHY" ] && [ "$PEU_FIX" -ge 100 ]; then pe_row_ok win_legacy_out_audit "$PEU_N builds (4 x $PEU_TRK tracked files; $PEU_OKB built), $PEU_FIX SP-fixed functions audited, 0 violations, output unchanged; known verdicts on both arches"
 else pe_row_bad win_legacy_out_audit "${PEU_WHY:-only $PEU_FIX SP-fixed functions audited (want >= 100)}"; fi
+fi
 # The identity corpus reaches the legacy SP paths shared with Linux and macOS
 # (#143 A19d(i); spec 2.5.7, finding 24): time_ns (time_basic.kr), exec
 # (sys_envp_exec.kr), and >8-argument named calls and call_ptr
