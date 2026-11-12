@@ -16,7 +16,7 @@ scalar `static` by name is the one exception. `vload*` is still what gives hardw
 `--legacy`, `--emit=obj` and `--emit=lkm` were never affected. Rebuild freestanding images, ARX
 programs and modules after upgrading. Code without unused reads compiles to the same bytes (the
 compiler itself, the benchmarks and every ApexRift image are byte-identical).
-Bootstrap fixed point 1501560 bytes.
+Bootstrap fixed point at M0: 1501560 bytes.
 
 **`unsafe { *(p as T) -> s }` now writes a `static` `s` (#203).** The default IR backend bound the
 loaded value to a hidden local named `s` instead of storing it (unless a local or parameter `s`
@@ -35,9 +35,9 @@ Emergency correctness breakage (ABI_POLICY.md), no deprecation period:
 - **Storing into a whole static array or struct by name is an error (#207)** — `ga = v`,
   `ga OP= v`, `gp = q`, `-> gp`. It wrote the first word (`gp = struct_value` crashed on
   `--legacy`). Migration: assign elements/fields; whole-aggregate assignment is planned.
-- **arm64 `--legacy`, `--emit=obj` and `--emit=lkm`: an inline-asm `in()`/`out()` operand that is
-  not a local variable, or a register name other than `x0`–`x30`, is an error (#204)**, as on
-  every other backend; it used to be dropped silently.
+- **arm64 `--legacy` and `--emit=obj` (`-c`): an inline-asm `in()`/`out()` operand that is not a
+  local variable, or a register name other than `x0`–`x30`, is an error (#204)**, as on every
+  other backend; it used to be dropped silently.
 - **IR: `asm … out(r -> s)` after `*(p as T) -> s` in the same function** is now the
   "constraint variable not found" error that `out(r -> s)` with a static `s` always was; it used
   to write the hidden local of #203.

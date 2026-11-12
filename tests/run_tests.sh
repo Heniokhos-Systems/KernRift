@@ -8308,7 +8308,9 @@ for SDD_A in x86_64 arm64; do
     done
 done
 # static_deref_dest_guard_<case> <arch>: shapes the fix must not change, on
-# IR, --O0 and --legacy (green before and after). raw_f64_to_u64 wants 9
+# IR, --O0 and --legacy (green before and after, except raw_f64_to_u64 on
+# x86_64/arm64, whose IR and --O0 configs gave 0 before the fix: the value
+# went to the hidden local of #203). raw_f64_to_u64 wants 9
 # (the raw f64 bits, as --legacy stores them); riscv32 has no float types,
 # so its raw_f64_to_u64 row pins the refusal instead (want the
 # no-hardware-FPU error on every config, no output).

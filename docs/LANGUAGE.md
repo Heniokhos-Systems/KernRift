@@ -1327,12 +1327,12 @@ fn cpuid_signature() -> u64 {
 - `in(<var> -> <reg>, ...)` — before the block runs, KernRift emits a
   `mov <reg>, <local_slot>` for each pair. Inputs are load-only; the
   named variable is not updated after the block. `<var>` must be a local
-  variable — a `static` is rejected on every backend (arm64 `--legacy`, `-c`
-  and `--emit=lkm` used to drop it silently, #204).
+  variable — a `static` is rejected on every backend (arm64 `--legacy` and
+  `-c`/`--emit=obj` used to drop it silently, #204).
 - `out(<reg> -> <var>, ...)` — after the block runs, KernRift emits a
   `mov <local_slot>, <reg>` for each pair. Outputs are store-only — a
-  `static` or `const` is rejected on every backend (arm64 `--legacy`, `-c`
-  and `--emit=lkm` used to drop it silently, #204).
+  `static` or `const` is rejected on every backend (arm64 `--legacy` and
+  `-c`/`--emit=obj` used to drop it silently, #204).
 - `clobbers(<reg>, ...)` — accepted syntactically but currently
   **advisory**. You still must list every register your block writes
   under `out(...)` if you need its value, and every register whose
@@ -1345,7 +1345,7 @@ fn cpuid_signature() -> u64 {
   `r15`. No 32-bit or 8-bit aliases yet — use the 64-bit form even if
   the instruction operates on a sub-register.
 - **ARM64**: `x0` … `x30`. No `w` (32-bit) aliases. Any other name is
-  an error on every arm64 backend (`--legacy`, `-c` and `--emit=lkm` used to
+  an error on every arm64 backend (`--legacy` and `-c`/`--emit=obj` used to
   drop it silently, #204).
 
 **Limitations** (V1):
