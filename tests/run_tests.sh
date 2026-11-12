@@ -8848,7 +8848,7 @@ rm -rf "$SDD_T"
 # for every value live across the block or its moves; the moves never use a
 # scratch the block names; f64 values live across asm get no d8-d15 home.
 #
-# asm_live_across_<shape>_<reg> <arch> <mode>: f(a, b, c, d) keeps a, b, c, d
+# asm_live_across_<shape>_<reg>_<arch>_<mode>: f(a, b, c, d) keeps a, b, c, d
 # and four values derived from them live across one block that writes <reg>:
 #   out   in(junk -> src) out(<reg> -> r)   r must be 0xBEEF (exit 110)
 #   inw   in(junk -> src, x -> <reg>)       the block writes the in() register
@@ -8978,7 +8978,7 @@ for ALR_A in x86_64 arm64 riscv32; do
             alr_gen $ALR_A $ALR_S $ALR_G > $ALR_T/m.kr
             for ALR_M in $ALR_MODES; do
                 ALR_C=IR; [ $ALR_M = O0 ] && ALR_C=--O0; [ $ALR_M = legacy ] && ALR_C=--legacy
-                alr_row "asm_live_across_${ALR_S}_$ALR_G $ALR_A $ALR_M" $ALR_A 7 $ALR_T/m.kr $ALR_C
+                alr_row "asm_live_across_${ALR_S}_${ALR_G}_${ALR_A}_$ALR_M" $ALR_A 7 $ALR_T/m.kr $ALR_C
             done
         done
     done
@@ -9592,7 +9592,7 @@ ALR_CF_riscv32="IR"
 ALR_CF_xtensa="--freestanding"
 ALR_FP_x86_64="xmm0"; ALR_FP_arm64="v8 d8"; ALR_FP_riscv32="fa0"; ALR_FP_xtensa="f0"
 ALR_SP_x86_64="rsp"; ALR_SP_arm64="sp wsp"; ALR_SP_riscv32="sp x2"; ALR_SP_xtensa="a1 sp"
-# asm_constraint_bad_name_<arch> <clause>: eax, memory, cc, xmm0, w19, lr,
+# asm_constraint_bad_name_<arch>_<clause>: eax, memory, cc, xmm0, w19, lr,
 # foo and the arch's own FP/SIMD names. Red on 2.11.0 and main: every
 # clobbers() case built (exit 0); in()/out() were refused unlocated with no
 # hint (arm64 legacy/-c/lkm and riscv32 included), xtensa refused them with
@@ -9600,7 +9600,7 @@ ALR_SP_x86_64="rsp"; ALR_SP_arm64="sp wsp"; ALR_SP_riscv32="sp x2"; ALR_SP_xtens
 for ALR_A in x86_64 arm64 riscv32 xtensa; do
     eval "ALR_CF=\$ALR_CF_$ALR_A; ALR_FP=\$ALR_FP_$ALR_A"
     for ALR_CL in in out clobbers; do
-        alr_diag_row "asm_constraint_bad_name_$ALR_A $ALR_CL" $ALR_A unk $ALR_CL "eax memory cc xmm0 w19 lr foo $ALR_FP" "$ALR_CF"
+        alr_diag_row "asm_constraint_bad_name_${ALR_A}_$ALR_CL" $ALR_A unk $ALR_CL "eax memory cc xmm0 w19 lr foo $ALR_FP" "$ALR_CF"
     done
 done
 # asm_constraint_sp_refused_<arch> (#218): the stack pointer by every name,
@@ -9613,7 +9613,7 @@ done
 # asm_xtensa_x86_names_refused (#215): x86_64 names on xtensa. Red: built.
 alr_diag_row asm_xtensa_x86_names_refused xtensa unk "in out clobbers" "rax rcx r12 r15" "--freestanding"
 
-# asm_constraint_good_names_still_build <arch> (positive control): every
+# asm_constraint_good_names_still_build_<arch> (positive control): every
 # accepted name of the arch, in in(), out() and clobbers(), builds on every
 # config (arm64/x86_64 --emit=lkm: x86_64 only, so arm64 skips it).
 ALR_OK_x86_64="rax rcx rdx rbx rbp rsi rdi r8 r9 r10 r11 r12 r13 r14 r15"
@@ -9641,9 +9641,9 @@ for ALR_A in x86_64 arm64 riscv32 xtensa; do
     rm -f $ALR_T/out
     if [ -z "$ALR_BAD" ]; then
         PASS=$((PASS + 1))
-        echo "  asm_constraint_good_names_still_build $ALR_A: PASS ($(echo $ALR_OK | wc -w) names x in/out/clobbers build on $ALR_CF)"
+        echo "  asm_constraint_good_names_still_build_$ALR_A: PASS ($(echo $ALR_OK | wc -w) names x in/out/clobbers build on $ALR_CF)"
     else
-        echo "FAIL: asm_constraint_good_names_still_build $ALR_A (want every name to build:$ALR_BAD)"
+        echo "FAIL: asm_constraint_good_names_still_build_$ALR_A (want every name to build:$ALR_BAD)"
         FAIL=$((FAIL + 1))
     fi
 done
