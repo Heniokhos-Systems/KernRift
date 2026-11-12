@@ -1383,6 +1383,39 @@ home were x3, the copy for param 3 would read a register param 0 already
 clobbered. Capping the params is enough and needs no parallel-move
 sequencing.
 
+### Inline-asm windows and register bans (#214)
+
+An asm statement lowers to an **asm window**: one `IR_ARG` (51) per `in()`
+with `imm` = register + 100 (`src1` the variable), the `IR_ASM_BLOCK` (96;
+`src1` = the AST node), and one `IR_COPY` (61) per `out()` with `src1` 0 and
+`imm` = register + 100 (`dest` the variable's new vreg). Every register in
+the window comes from `asm_reg_try` (`src/codegen.kr:4578`), after
+`asm_check_constraints` (`src/codegen.kr:4699`) has refused unknown names and
+the stack pointer in all three lowerings.
+
+`ir_seed_asm_bans` (`src/ir.kr:7207`), the first thing `ir_graph_color` does
+(`src/ir.kr:7461`), gives each vreg a **ban**: a colour mask it may not take.
+W is the colour set of every register the block names in `in()`, `out()` or
+`clobbers()` (`ir_asm_write_colours`, `src/ir.kr:7085`); at every window
+instruction except the last `out()` copy, every vreg live *after* that
+instruction is banned from W, and so is a non-last copy's own destination.
+The liveness walk mirrors the interference builder's rules exactly. Bans are
+folded onto union-find representatives right after the ceilings
+(`src/ir.kr:7899`) and OR-ed into the greedy loop's used set
+(`src/ir.kr:8013`); a vreg with nothing left spills. Bit 31 of a ban means
+"live across an asm block": `ir_a64_fpr_alloc` gives such an f64 no d8–d15
+home (`src/ir_aarch64.kr:625`, #220). The window's moves are emitted in IR
+order and use no scratch the block names: a spilled `out()` value is stored
+straight from its register (`src/ir.kr:11306`), a spilled `in()` source is
+loaded into its own target, and an arm64 far slot (> 32760 B) is addressed
+through the `in()` target itself (`src/ir_aarch64.kr:1975`) or, for an
+`out()`, through the lowest of x9–x17 the block does not name
+(`src/ir_aarch64.kr:1883`; xtensa a8–a11), else a located error
+(`ir_asm_far_scratch`, `src/ir.kr:7121`). This is what keeps a value the block
+does not name alive; a raw instruction that writes an unnamed register is
+undefined (LANGUAGE.md §14), which is why the wide-file gate above still scans
+the whole body.
+
 ### Copy coalescing
 
 Lives **inside** `ir_graph_color` (`src/ir.kr:7642`–`7894`), after the
