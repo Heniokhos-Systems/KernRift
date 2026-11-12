@@ -8981,6 +8981,514 @@ for ALR_A in x86_64 arm64 riscv32; do
         done
     done
 done
+# Named rows (#214): each program exits 7 when correct; the exit it gave on
+# krc 2.11.0 and on post-M1 main is in its comment (the same on both).
+# alr_src NAME > FILE: the program of one named row.
+alr_src() {
+    case $1 in
+        # asm_out_order_x86_64: an earlier out() destination must not live in
+        # a register a later out() copy reads. Red: IR/O0/legacy 100.
+        x_outorder) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {
+    uint64 e = a + 1
+    uint64 g = b + 2
+    uint64 h = c + 3
+    uint64 o1 = 0
+    uint64 o2 = 0
+    uint64 o3 = 0
+    uint64 p = 1
+    uint64 q = 2
+    uint64 s = 3
+    asm { "mov rbx, rax"; "mov r12, rcx"; "mov r13, rdx" } in(p -> rax, q -> rcx, s -> rdx) out(rbx -> o1, r12 -> o2, r13 -> o3)
+    if o1 != 1 { return 110 }
+    if o2 != 2 { return 111 }
+    if o3 != 3 { return 112 }
+    if a + b + c + d + e + g + h != 11+22+33+44+12+24+36 { return 100 }
+    return 7
+}
+fn main() { exit(f(11, 22, 33, 44)) }
+EOF
+        ;;
+        # asm_out_order_arm64: the same on arm64. Red: IR 100, O0 110.
+        a_outorder) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {
+    uint64 e = a + 1
+    uint64 g = b + 2
+    uint64 h = c + 3
+    uint64 o1 = 0
+    uint64 o2 = 0
+    uint64 o3 = 0
+    uint64 p = 1
+    uint64 q = 2
+    uint64 s = 3
+    asm { "mov x19, x9"; "mov x20, x10"; "mov x21, x11" } in(p -> x9, q -> x10, s -> x11) out(x19 -> o1, x20 -> o2, x21 -> o3)
+    if o1 != 1 { return 110 }
+    if o2 != 2 { return 111 }
+    if o3 != 3 { return 112 }
+    if a + b + c + d + e + g + h != 11+22+33+44+12+24+36 { return 100 }
+    return 7
+}
+fn main() { exit(f(11, 22, 33, 44)) }
+EOF
+        ;;
+        # asm_spilled_out_x86_64: with every colour taken, out(rcx -> o1) is
+        # spilled and was staged `mov rax, rcx; mov [slot], rax` -- before
+        # out(rax -> o2) read rax. Red: IR/O0 111.
+        x_spillout) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e, uint64 g) -> uint64 {
+    uint64 h = a + b
+    uint64 i = c + d
+    uint64 j = e + g
+    uint64 k = a * 3
+    uint64 l = b * 3
+    uint64 m = c * 3
+    uint64 o1 = 0
+    uint64 o2 = 0
+    uint64 o3 = 0
+    uint64 p = 0x11
+    uint64 q = 0x22
+    uint64 s = 0x33
+    asm { "mov rcx, rsi"; "mov rax, rdi"; "mov rdx, r8" } in(p -> rsi, q -> rdi, s -> r8) out(rcx -> o1, rax -> o2, rdx -> o3)
+    if o1 != 0x11 { return 110 }
+    if o2 != 0x22 { return 111 }
+    if o3 != 0x33 { return 112 }
+    if h + i + j + k + l + m != 1+2+3+4+5+6+3+6+9 { return 100 }
+    if a + b + c + d + e + g != 21 { return 101 }
+    return 7
+}
+fn main() { exit(f(1, 2, 3, 4, 5, 6)) }
+EOF
+        ;;
+        # asm_spilled_in_arm64: spilled q in in(p -> x9, q -> x10) was
+        # reloaded through x9 after p had been moved there. Red: IR/O0 111.
+        # asm_spilled_in_x86_64 (x_spillin): the x86_64 twin, a positive
+        # control (x86_64 pushes every in() source before the first pop).
+        a_spillin|x_spillin)
+            printf 'fn f(uint64 a0, uint64 a1, uint64 a2, uint64 a3) -> uint64 {\n'
+            local k
+            for k in $(seq 0 13); do printf '    uint64 v%d = a%d * %d + %d\n' $k $((k % 4)) $((k + 2)) $k; done
+            printf '    uint64 p = v0 + 1000\n    uint64 q = v1 + 2000\n    uint64 o1 = 0\n    uint64 o2 = 0\n'
+            if [ $1 = a_spillin ]; then
+                printf '    asm { "mov x11, x9"; "mov x9, x10"; "mov x10, x11" } in(p -> x9, q -> x10) out(x9 -> o1, x10 -> o2)\n'
+            else
+                printf '    asm { "mov rdx, rax"; "mov rax, rcx"; "mov rcx, rdx" } in(p -> rax, q -> rcx) out(rax -> o1, rcx -> o2)\n'
+            fi
+            printf '    if o1 != q { return 110 }\n    if o2 != p { return 111 }\n'
+            printf '    if v0 + v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8 + v9 + v10 + v11 + v12 + v13 != 375 { return 100 }\n'
+            for k in $(seq 0 13); do printf '    if v%d != %d { return %d }\n' $k $(( (k % 4 + 1) * (k + 2) + k )) $((120 + k)); done
+            printf '    return 7\n}\nfn main() { exit(f(1, 2, 3, 4)) }\n'
+        ;;
+        # asm_loop_x86_64 / asm_loop_arm64: two blocks inside a loop and one
+        # after it; the loop counter and the accumulator are live across all
+        # three. Red: x86_64 IR/O0/legacy 100; arm64 IR/O0 100.
+        x_loop|a_loop)
+            local R1=rbx R2=r12 R3=r13 S=rax
+            [ $1 = a_loop ] && { R1=x19; R2=x20; R3=x21; S=x9; }
+            cat <<EOF
+fn f(uint64 n) -> uint64 {
+    uint64 acc = 0
+    uint64 i = 0
+    uint64 t = 0
+    uint64 u = 0
+    while i < n {
+        asm { "mov $R1, $S" } in(i -> $S) out($R1 -> t)
+        asm { "mov $R2, $S" } in(t -> $S) clobbers($R2)
+        acc = acc + t
+        i = i + 1
+    }
+    asm { "mov $R3, $S" } in(acc -> $S) out($R3 -> u)
+    if u != 45 { return 100 }
+    if acc != 45 { return 101 }
+    if i != 10 { return 102 }
+    return 7
+}
+fn main() { exit(f(10)) }
+EOF
+        ;;
+        # asm_perm_x86_64: a 6-register permutation in -> out over rbx,
+        # r12-r15, rbp with every input live after. Green on 2.11.0 (guard).
+        x_perm) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {
+    uint64 e = a + 5
+    uint64 g = b + 6
+    uint64 o1 = 0
+    uint64 o2 = 0
+    uint64 o3 = 0
+    uint64 o4 = 0
+    uint64 o5 = 0
+    uint64 o6 = 0
+    asm { "nop" } in(a -> rbx, b -> r12, c -> r13, d -> r14, e -> r15, g -> rbp) out(rbp -> o1, r15 -> o2, r14 -> o3, r13 -> o4, r12 -> o5, rbx -> o6)
+    if o1 != 28 { return 121 }
+    if o2 != 16 { return 122 }
+    if o3 != 44 { return 123 }
+    if o4 != 33 { return 124 }
+    if o5 != 22 { return 125 }
+    if o6 != 11 { return 126 }
+    if a != 11 { return 100 }
+    if b != 22 { return 101 }
+    if c != 33 { return 102 }
+    if d != 44 { return 103 }
+    if e != 16 { return 104 }
+    if g != 28 { return 105 }
+    return 7
+}
+fn main() { exit(f(11, 22, 33, 44)) }
+EOF
+        ;;
+        # asm_chain_x86_64: block 2 consumes block 1's outputs in swapped
+        # registers and writes into a variable block 1 produced.
+        # Red: IR/O0 123, legacy 100.
+        x_chain) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {
+    uint64 t = 0
+    uint64 u = 0
+    uint64 w = 0
+    uint64 p = a + 100
+    uint64 q = b + 200
+    asm { "nop" } in(p -> rbx, q -> r12) out(rbx -> t, r12 -> u)
+    asm { "mov r13, rbx" } in(t -> r12, u -> rbx) out(r13 -> w, rbx -> t)
+    if w != 222 { return 120 }
+    if t != 222 { return 121 }
+    if u != 222 { return 122 }
+    if p != 111 { return 123 }
+    if q != 222 { return 124 }
+    if a != 11 { return 100 }
+    if b != 22 { return 101 }
+    if c != 33 { return 102 }
+    if d != 44 { return 103 }
+    return 7
+}
+fn main() { exit(f(11, 22, 33, 44)) }
+EOF
+        ;;
+        # asm_branch_x86_64: different blocks in the two arms of an `if` in a
+        # loop. Red: IR/O0 120, legacy 100.
+        x_branch) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {
+    uint64 r = 0
+    uint64 i = 0
+    uint64 acc = 0
+    uint64 nine = 9
+    uint64 three = 3
+    while i < 5 {
+        if (i & 1) == 0 {
+            asm { "mov rbx, rax"; "mov r12, rax"; "mov r14, rax" } in(nine -> rax, i -> r13) out(rbx -> r) clobbers(r12, r14)
+        } else {
+            asm { "mov r12, rax"; "mov rbx, rax"; "mov r13, rax" } in(three -> rax, acc -> r15) out(r12 -> r) clobbers(rbx, r13)
+        }
+        acc = acc + r
+        i = i + 1
+    }
+    if acc != 33 { return 120 }
+    if nine != 9 { return 121 }
+    if three != 3 { return 122 }
+    if a != 11 { return 100 }
+    if b != 22 { return 101 }
+    if c != 33 { return 102 }
+    if d != 44 { return 103 }
+    return 7
+}
+fn main() { exit(f(11, 22, 33, 44)) }
+EOF
+        ;;
+        # asm_legacy_pinned_in_shuffle: legacy pinned parameter 0 in rbx;
+        # in(b -> rbx, a -> rax) then read `a` from rbx. Red: legacy 100.
+        x_inshuf) cat <<'EOF'
+fn f(uint64 a, uint64 b) -> uint64 {
+    uint64 r = 0
+    asm { "mov rcx, rax" } in(b -> rbx, a -> rax) out(rcx -> r)
+    if r != 11 { return 100 }
+    return 7
+}
+fn main() { exit(f(11, 22)) }
+EOF
+        ;;
+        # asm_legacy_out_to_param0: legacy out(rcx -> a) with `a` pinned:
+        # the store went to a's slot, reads came from rbx. Red: legacy 100.
+        x_outparam) cat <<'EOF'
+fn f(uint64 a, uint64 b) -> uint64 {
+    uint64 junk = 5
+    asm { "mov rcx, rax" } in(junk -> rax) out(rcx -> a)
+    if a != 5 { return 100 }
+    if b != 22 { return 101 }
+    return 7
+}
+fn main() { exit(f(11, 22)) }
+EOF
+        ;;
+        # asm_inout_same_var_<arch>: in(a -> R) out(R -> a), a positive
+        # control (green on 2.11.0): the in() reads the old binding, out()
+        # makes the new one.
+        x_inout|a_inout)
+            local I='"0x48 0x01 0xDB" } in(a -> rbx) out(rbx -> a)'
+            [ $1 = a_inout ] && I='"add x19, x19, x19" } in(a -> x19) out(x19 -> a)'
+            cat <<EOF
+fn f(uint64 a, uint64 b) -> uint64 {
+    uint64 c = b + 1
+    asm { $I
+    if a != 22 { return 100 }
+    if b != 22 { return 101 }
+    if c != 23 { return 102 }
+    return 7
+}
+fn main() { exit(f(11, 22)) }
+EOF
+        ;;
+        # asm_cpuid_params_live: cpuid with four parameters and four derived
+        # values live across it. Red: IR/O0/legacy 100.
+        c1) cat <<'EOF'
+fn f(uint64 a, uint64 b, uint64 c, uint64 d) -> uint64 {
+    uint64 e = a + 1
+    uint64 g = b + 2
+    uint64 h = c + 3
+    uint64 i = d + 4
+    uint64 leaf = 0
+    uint64 zero = 0
+    uint64 o1 = 0
+    uint64 o2 = 0
+    uint64 o3 = 0
+    uint64 o4 = 0
+    asm { "cpuid" } in(leaf -> rax, zero -> rcx) out(rax -> o1, rbx -> o2, rcx -> o3, rdx -> o4)
+    if a != 11 { return 100 }
+    if b != 22 { return 101 }
+    if c != 33 { return 102 }
+    if d != 44 { return 103 }
+    if e != 12 { return 104 }
+    if g != 24 { return 105 }
+    if h != 36 { return 106 }
+    if i != 48 { return 107 }
+    if leaf != 0 { return 108 }
+    if zero != 0 { return 109 }
+    return 7
+}
+fn main() {
+    exit(f(11, 22, 33, 44))
+}
+EOF
+        ;;
+        # asm_cpuid_doc_example: LANGUAGE.md §14's cpuid_signature, with its
+        # inputs and a local read after the block. Red: IR/O0/legacy 110.
+        c2) cat <<'EOF'
+fn cpuid_signature(uint64 x) -> uint64 {
+    uint64 leaf = 0
+    uint64 zero = 0
+    uint64 keep = x + 5
+    uint64 a = 0
+    uint64 b = 0
+    uint64 c = 0
+    uint64 d = 0
+    asm { "cpuid" }
+        in(leaf -> rax, zero -> rcx)
+        out(rax -> a, rbx -> b, rcx -> c, rdx -> d)
+    if leaf != 0 { return 108 }
+    if zero != 0 { return 109 }
+    if keep != x + 5 { return 110 }
+    if b == 0 && c == 0 { return 111 }
+    return 7
+}
+fn main() { exit(cpuid_signature(3)) }
+EOF
+        ;;
+        # asm_dhome_live_across_arm64: f64 x and y (homed in d8-d15 by the
+        # IR) live across a raw block that writes d8-d15 (`fmov dN, x9`).
+        # Red: IR/O0 100.
+        a_dhome) cat <<'EOF'
+fn f(uint64 a) -> uint64 {
+    f64 x = 1.5
+    f64 y = 2.25
+    uint64 junk = 7
+    while a > 0 {
+        x = x + 1.0
+        y = y + 2.0
+        a = a - 1
+    }
+    asm { "0x9E670128"; "0x9E670129"; "0x9E67012A"; "0x9E67012B"; "0x9E67012C"; "0x9E67012D"; "0x9E67012E"; "0x9E67012F" } in(junk -> x9)
+    if x != 4.5 { return 100 }
+    if y != 8.25 { return 101 }
+    return 7
+}
+fn main() { exit(f(3)) }
+EOF
+        ;;
+        # asm_static_reload_across_block_<arch>: a static read before a block
+        # that writes it through an in() pointer is read again afterwards --
+        # the block orders memory accesses, so no `clobbers(memory)` exists
+        # or is needed. Green on 2.11.0 (positive control for the hint the
+        # `memory` refusal gives).
+        x_static|a_static)
+            local I='"0x48 0x89 0x08" } in(p -> rax, v -> rcx)'
+            [ $1 = a_static ] && I='"0xF9000001" } in(p -> x0, v -> x1)'
+            cat <<EOF
+static uint64[2] gs
+fn f(uint64 v) -> uint64 {
+    gs[0] = 5
+    uint64 p = gs
+    uint64 a = gs[0]
+    asm { $I
+    uint64 b = gs[0]
+    if a != 5 { return 100 }
+    if b != v { return 101 }
+    return 7
+}
+fn main() { exit(f(42)) }
+EOF
+        ;;
+    esac
+}
+for ALR_N in x_outorder:asm_out_order_x86_64 x_spillout:asm_spilled_out_x86_64 x_spillin:asm_spilled_in_x86_64 \
+             x_loop:asm_loop_x86_64 x_perm:asm_perm_x86_64 x_chain:asm_chain_x86_64 x_branch:asm_branch_x86_64 \
+             x_inout:asm_inout_same_var_x86_64 c1:asm_cpuid_params_live c2:asm_cpuid_doc_example \
+             x_static:asm_static_reload_across_block_x86_64; do
+    alr_src ${ALR_N%%:*} > $ALR_T/n.kr
+    alr_row ${ALR_N#*:} x86_64 7 $ALR_T/n.kr IR --O0 --legacy
+done
+alr_src x_inshuf > $ALR_T/n.kr
+alr_row asm_legacy_pinned_in_shuffle x86_64 7 $ALR_T/n.kr --legacy IR --O0
+alr_src x_outparam > $ALR_T/n.kr
+alr_row asm_legacy_out_to_param0 x86_64 7 $ALR_T/n.kr --legacy IR --O0
+for ALR_N in a_outorder:asm_out_order_arm64 a_spillin:asm_spilled_in_arm64 a_loop:asm_loop_arm64 \
+             a_inout:asm_inout_same_var_arm64 a_dhome:asm_dhome_live_across_arm64 \
+             a_static:asm_static_reload_across_block_arm64; do
+    alr_src ${ALR_N%%:*} > $ALR_T/n.kr
+    alr_row ${ALR_N#*:} arm64 7 $ALR_T/n.kr IR --O0 --legacy
+done
+
+# Far stack slots on arm64 (#219): past 32760 bytes a slot is addressed
+# through a register. alr_far KIND > FILE: f() with a 4300-step chain (the
+# vreg numbers, and so the slots of what spills after it, are far) and NV
+# values live across the block; KIND:
+#   out      in(p -> x0, q -> x11) out(x11 -> o1, x0 -> o0): must stay 7 (a
+#            store through x11 would write x11 to [x11])
+#   out_rev  out(x0 -> o0, x11 -> o1): o0's far store addressed through x11
+#            before out(x11) was read. Red: IR/O0 110
+#   in_rev   in(q -> x11, p -> x0): p's far reload addressed through x11
+#            after q was loaded there. Red: IR/O0 110
+#   c2_<n>   (review) q defined before the chain, 4n values live across
+#            in(a -> x19, q -> x20) out(x19 -> o1, x20 -> o2).
+#            Red: c2_0 IR 111 / O0 7, c2_2 IR 111 / O0 111
+#   order    in(a -> x19, q -> x20) with `a` homed in x20 (dead after its own
+#            move) and q in a far slot: the moves must stay in IR order, q
+#            reloaded through x20 itself. Red: IR/O0 111
+alr_far() {
+    local k nv=12 q=""
+    case $1 in c2_*) nv=$(( ${1#c2_} * 4 )); q=c2 ;; order) nv=8 ;; esac
+    printf 'fn f(uint64 a0, uint64 b, uint64 c, uint64 d) -> uint64 {\n'
+    [ -n "$q" ] && printf '    uint64 q = a0 + 5667\n'
+    printf '    uint64 s = a0\n'
+    for k in $(seq 1 4300); do printf '    s = s + %d\n' $(( (k - 1) % 7 + 1 )); done
+    for k in $(seq 0 $((nv - 1))); do printf '    uint64 v%d = s + %d\n' $k $((k * 3 + 1)); done
+    case $1 in
+        out|out_rev|in_rev)
+            printf '    uint64 o0 = 0\n    uint64 o1 = 0\n    uint64 p = 1234\n    uint64 q = 5678\n'
+            case $1 in
+                out)     printf '    asm { "nop" } in(p -> x0, q -> x11) out(x11 -> o1, x0 -> o0)\n' ;;
+                out_rev) printf '    asm { "nop" } in(p -> x0, q -> x11) out(x0 -> o0, x11 -> o1)\n' ;;
+                in_rev)  printf '    asm { "nop" } in(q -> x11, p -> x0) out(x11 -> o1, x0 -> o0)\n' ;;
+            esac
+            printf '    uint64 acc = 0\n'
+            for k in $(seq 0 $((nv - 1))); do printf '    acc = acc + v%d\n' $k; done
+            printf '    if o1 != 5678 { return 110 }\n    if o0 != 1234 { return 111 }\n' ;;
+        c2_*|order)
+            if [ $1 = order ]; then
+                printf '    uint64 q = b + 5656\n    uint64 o1 = 0\n    uint64 o2 = 0\n    uint64 t = c + 77\n    uint64 a = b + 1212\n    if t != 110 { return 120 }\n'
+            else
+                printf '    uint64 o1 = 0\n    uint64 o2 = 0\n    uint64 a = b + 1212\n'
+            fi
+            printf '    asm { "nop" } in(a -> x19, q -> x20) out(x19 -> o1, x20 -> o2)\n    uint64 acc = 1\n'
+            for k in $(seq 0 $((nv - 1))); do printf '    acc = acc + v%d\n' $k; done
+            printf '    if o1 != 1234 { return 110 }\n    if o2 != 5678 { return 111 }\n' ;;
+    esac
+    printf '    if acc == 0 { return 112 }\n    return 7\n}\nfn main() { exit(f(11, 22, 33, 44)) }\n'
+}
+for ALR_N in out out_rev in_rev c2_0 c2_2; do
+    alr_far $ALR_N > $ALR_T/far.kr
+    alr_row asm_far_${ALR_N}_arm64 arm64 7 $ALR_T/far.kr IR --O0
+done
+# asm_far_in_target_order_arm64: the run must exit 7, and the listing must
+# still show the shape the row is about -- `mov x19, x20` (a, homed in x20)
+# and then q's far reload addressing through x20 itself (movz/movk x20;
+# add x20, sp, x20; ldr x20, [x20]) right before the block. If the allocator
+# stops homing `a` in x20 the row says so (it would pass vacuously).
+alr_far order > $ALR_T/far.kr
+TOTAL=$((TOTAL + 1))
+if alr_runner arm64 asm_far_in_target_order_arm64; then
+    ALR_GOT="IR $(alr_exec arm64 "" $ALR_T/far.kr), --O0 $(alr_exec arm64 --O0 $ALR_T/far.kr)"
+    ALR_SHAPE=""
+    for ALR_C in IR --O0; do
+        ALR_F=$ALR_C; [ $ALR_C = IR ] && ALR_F=""
+        rm -f $ALR_T/far.s
+        $KRC --arch=arm64 $ALR_F --emit=asm $ALR_T/far.kr -o $ALR_T/far.s > /dev/null 2>&1
+        # the six words before the nop: mov x19, x20; movz x20; movk x20;
+        # add x20, sp, x20; ldr x20, [x20]
+        ALR_W=$(grep -B5 ': d503201f  nop$' $ALR_T/far.s 2>/dev/null | awk '{print $2}' | tr '\n' ' ')
+        case "$ALR_W" in
+            "aa1403f3 d2"??????" f2a"?????" 8b3463f4 f9400294 d503201f ") ;;
+            *) ALR_SHAPE="$ALR_SHAPE $ALR_C: [$ALR_W];" ;;
+        esac
+    done
+    if [ "$ALR_GOT" = "IR 7, --O0 7" ] && [ -z "$ALR_SHAPE" ]; then
+        PASS=$((PASS + 1))
+        echo "  asm_far_in_target_order_arm64: PASS ($ALR_GOT; a homed in x20, moved to x19 first, then q reloaded through x20 itself)"
+    elif [ "$ALR_GOT" = "IR 7, --O0 7" ]; then
+        echo "FAIL: asm_far_in_target_order_arm64 (exits 7, but VACUOUS: the listing no longer has a in x20 and q far before the block -- reshape the program:$ALR_SHAPE)"
+        FAIL=$((FAIL + 1))
+    else
+        echo "FAIL: asm_far_in_target_order_arm64 (want 7: $ALR_GOT)"
+        FAIL=$((FAIL + 1))
+    fi
+fi
+# asm_far_legacy_x16_arm64: --legacy (and -c) addressed a far variable
+# through x16 (emit_a64_ldr/str's far form): in(p -> x16, q -> x0) with q
+# far reloaded q through x16 after p was loaded there, and out(x0 -> o2)'s
+# far store wrote x16 before out(x16 -> o1) read it. Red: legacy 110.
+cat > $ALR_T/lfar.kr <<'EOF'
+fn f(uint64 a) -> uint64 {
+    uint8[40000] big
+    uint64 p = a + 1000
+    uint64 q = a + 2000
+    uint64 o1 = 0
+    uint64 o2 = 0
+    big[39999] = 5
+    asm { "nop" } in(p -> x16, q -> x0) out(x0 -> o2, x16 -> o1)
+    if o1 != 1011 { return 110 }
+    if o2 != 2011 { return 111 }
+    if big[39999] != 5 { return 112 }
+    return 7
+}
+fn main() { exit(f(11)) }
+EOF
+alr_row asm_far_legacy_x16_arm64 arm64 7 $ALR_T/lfar.kr --legacy IR --O0
+
+# asm_naked_spill_warns_x86_64 (#222, a visible decision, not a fix): an
+# @naked body whose six in() registers are the whole naked colour file. The
+# bans make its values spill (2 -> 8 slots), which is still only a warning
+# -- a naked body has no frame, so its "slots" are the caller's stack. The
+# row pins the warning; when #222 makes such a spill an error, it changes.
+cat > $ALR_T/naked.kr <<'EOF'
+@naked fn h(uint64 a, uint64 b) -> uint64 {
+    uint64 c = a + 1
+    uint64 d = b + 2
+    uint64 e = a + 3
+    uint64 g = b + 4
+    uint64 k = a + 5
+    uint64 z = 0
+    asm { "nop" } in(z -> r10, z -> r11, z -> rsi, z -> rdi, z -> r8, z -> r9)
+    return c + d + e + g + k + a + b
+}
+fn main() { exit(h(1, 2)) }
+EOF
+TOTAL=$((TOTAL + 1))
+ALR_WANT="warning: @naked function 'h' ran out of safe registers and spilled 8 value(s); a naked body has no frame, so the spill slots land on the caller's stack."
+rm -f $ALR_T/naked
+ALR_ERR=$($KRC --arch=x86_64 $ALR_T/naked.kr -o $ALR_T/naked 2>&1 >/dev/null)
+ALR_RC=$?
+if [ $ALR_RC = 0 ] && [ -f $ALR_T/naked ] && printf '%s\n' "$ALR_ERR" | grep -qxF "$ALR_WANT"; then
+    PASS=$((PASS + 1))
+    echo "  asm_naked_spill_warns_x86_64: PASS (builds; $ALR_WANT)"
+else
+    echo "FAIL: asm_naked_spill_warns_x86_64 (want exit 0 and '$ALR_WANT': exit $ALR_RC, $(printf '%s' "$ALR_ERR" | grep -m1 -i 'warning\|error' | cut -c1-160))"
+    FAIL=$((FAIL + 1))
+fi
 rm -rf "$ALR_T"
 
 # CSE across the ops above is not observable by a single-threaded run: they
