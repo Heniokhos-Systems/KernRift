@@ -12,6 +12,7 @@
 // check stayed green). Pinning the read to the file offset the tutorial
 // promises (8 KiB pages) is what makes the stride observable at all.
 import "pager.kr"
+import "../../std/args.kr"
 
 // "KRBTEER1" in the big-endian reading; stored little-endian these bytes
 // land as "1REETBRK" on disk. A magic number is a bit pattern, not a string.
@@ -19,9 +20,27 @@ const u64 MAGIC = 0x4B52425445455231
 const u64 PAGE1_MARK = 0x50414745314F4B21
 const u64 DBSIZE = 65536
 
+static u8[4096] pathbuf
+
+// The database file: argv[1] when given; else, on Windows, a relative
+// kr_tutorial_btree.db (there is no /tmp); else $TMPDIR/kr_tutorial_btree.db
+// when TMPDIR is set; else /tmp/kr_tutorial_btree.db.
+fn db_path() -> u64 {
+    if sys_argc() >= 2 { return sys_arg(1) }
+    if get_target_os() == 2 { return "kr_tutorial_btree.db" }
+    u64 tail = "/kr_tutorial_btree.db"
+    int64 n = sys_getenv("TMPDIR", pathbuf, 4096 - 24)
+    if n <= 0 { return "/tmp/kr_tutorial_btree.db" }
+    u64 i = 0
+    while i < 22 {
+        store8(pathbuf + n + i, load8(tail + i))
+        i = i + 1
+    }
+    return pathbuf
+}
+
 fn main() -> uint32 {
-    u64 path = "/tmp/kr_tutorial_btree.db"
-    if get_target_os() == 2 { path = "kr_tutorial_btree.db" }
+    u64 path = db_path()
     u64[1] fdslot
 
     u64 base = db_open(path, DBSIZE, fdslot)

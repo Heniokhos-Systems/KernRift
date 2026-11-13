@@ -10,7 +10,7 @@
 #                    cross-compile + host-run, or "--arch=arm64 --emit=android"
 #                    for Android)
 #   SMOKE_RUNNER=<cmd>  — wrapper to invoke binaries under (e.g.
-#                         "qemu-aarch64-static" for ARM64 via emulation).
+#                         "qemu-aarch64" for ARM64 via emulation).
 #
 # Expected exit code for each test is encoded in a single-line comment at
 # the top of each .kr as "// expected: <N>". Defaults to 0.
@@ -18,6 +18,12 @@
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$DIR/../helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$REPO") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
 KRC="${KRC:-$REPO/../build/krc2}"
 # Default resolution: prefer build/krc2 if KRC wasn't explicitly set and
 # the default doesn't exist.
@@ -61,7 +67,7 @@ for src in "$DIR"/*.kr; do
     TOTAL=$((TOTAL + 1))
     expected="$(grep -oE '// expected:[[:space:]]*[0-9]+' "$src" | head -1 | grep -oE '[0-9]+$')"
     expected="${expected:-0}"
-    out="$(mktemp /tmp/krc_smoke_${name}_XXXX)"
+    out="$(mktemp "$KRT_R/krc_smoke_${name}_XXXX")"
     rm -f "$out"
     build_log="$(mktemp)"
     if ! $KRC $KRC_FLAGS "$src" -o "$out" > "$build_log" 2>&1; then

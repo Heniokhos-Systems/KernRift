@@ -13,10 +13,51 @@ Usage:  check.py <image>
 """
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+
+
+# Scratch files and the qemu child are registered here and removed / killed
+# whatever ends the run: a SystemExit, an error, or the SIGTERM the test
+# suite's `timeout` sends (the handler below turns it into SystemExit, so this
+# runs; #261 -- a TERMed check used to leave its serial log, PPM dumps and
+# socket behind). Serial logs and PPM dumps go to tempfile.gettempdir()
+# ($TMPDIR; under the suite, its private scratch directory). The QMP socket
+# stays in /tmp: AF_UNIX paths are capped at 107 bytes and a socket under a
+# deep $TMPDIR makes qemu exit 1 with no attribution.
+_SCRATCH = []
+_PROCS = []
+
+
+def _cleanup():
+    for p in _PROCS:
+        if p.poll() is None:
+            p.kill()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                pass
+    for f in _SCRATCH:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def _scratch(name):
+    path = os.path.join(tempfile.gettempdir(), name)
+    _SCRATCH.append(path)
+    return path
+
+
+def _sock(name):
+    path = "/tmp/" + name
+    _SCRATCH.append(path)
+    return path
 
 VGA = 0xB8000
 
@@ -28,7 +69,7 @@ for c in "abcdefghijklmnopqrstuvwxyz0123456789":
 
 class Qemu:
     def __init__(self, image, serial):
-        self.sock = "/tmp/bcon_%d.sock" % os.getpid()
+        self.sock = _sock("bcon_%d.sock" % os.getpid())
         for f in (serial, self.sock):
             if os.path.exists(f):
                 os.remove(f)
@@ -37,6 +78,7 @@ class Qemu:
              "-display", "none", "-no-reboot", "-serial", "file:" + serial,
              "-qmp", "unix:%s,server,nowait" % self.sock],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _PROCS.append(self.p)
         for _ in range(200):
             if os.path.exists(self.sock):
                 break
@@ -98,7 +140,7 @@ def main():
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
     image = sys.argv[1]
-    serial = "/tmp/bcon_%d.txt" % os.getpid()
+    serial = _scratch("bcon_%d.txt" % os.getpid())
     q = Qemu(image, serial)
     failures = []
     try:
@@ -148,4 +190,8 @@ def main():
     print("PASS: PS/2 input echoed, commands ran, output on BOTH vga and serial")
 
 
-main()
+signal.signal(signal.SIGTERM, lambda signo, frame: sys.exit(128 + signo))
+try:
+    main()
+finally:
+    _cleanup()

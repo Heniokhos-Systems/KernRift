@@ -28,11 +28,21 @@ first failure:
    compiles itself to a stable fixed point).
 2. **Test suite** — run it as `make test`, never as bare `bash
    tests/run_tests.sh` (which defaults `KRC` to `build/krc3` with no `--arch`
-   and reports mass failures on a healthy tree). 3837 tests on this tree.
+   and reports mass failures on a healthy tree). 3851 tests on this tree.
+   Its scratch files live in one private directory under `KR_TEST_TMP`
+   (else `TMPDIR`, else `/tmp`), which must be absolute, outside the
+   checkout and exec-capable; the suite first checks the free space there
+   against `tests/helpers/tmp_headroom_floor.txt` -- a user or group quota
+   included where the kernel lets it be read (Linux 5.14+; older kernels and
+   hosts without python3 get a warning that the headroom may be overstated) --
+   and stops
+   if it is short (`KR_TEST_MIN_FREE_GIB` / `KR_TEST_MIN_FREE_INODES` lower
+   the floor on a small host).
 3. **IR-vs-legacy differential** — `tests/diff_ir_legacy.sh` and
    `diff_ir_legacy_stdout.sh` compile+run each probe on all four backends
-   (IR/legacy × x86_64/arm64, arm64 under `qemu-aarch64-static`) and
-   compare exit codes and stdout. Any divergence fails.
+   (IR/legacy × x86_64/arm64; arm64 natively on an arm64 host, else under
+   `qemu-aarch64-static` or `qemu-aarch64`) and compare exit codes and
+   stdout. Any divergence fails.
 4. **Self-host invariants** — the token/AST arena stays under 80% of the
    524288-token cap, and the self-compile emits zero spurious
    used-before-init warnings.

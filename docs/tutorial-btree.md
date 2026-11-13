@@ -96,8 +96,10 @@ own arm built from cross-platform builtins: `alloc` for the page buffer,
 `db_sync` (these lower to `ReadFile`/`WriteFile` on Windows). The guard must be
 a literal comparison with an `else` arm: a local (`u64 o = get_target_os()`) or
 an early `return` followed by `syscall_raw` is not pruned and is refused.
-`main.kr` uses a relative database path on Windows, since `/tmp` does not
-exist there.
+`main.kr` writes its database to the path given as its first argument, else
+to `$TMPDIR/kr_tutorial_btree.db` (or `/tmp/kr_tutorial_btree.db` when TMPDIR
+is unset); on Windows, where there is no `/tmp`, the default is a relative
+`kr_tutorial_btree.db`.
 
 A raw syscall returns `-errno` in the range `[-4095, -1]`, which as an
 unsigned value is `> 0xFFFFFFFFFFFFF000` — that is the error test above, and

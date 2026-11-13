@@ -90,6 +90,59 @@ These are emergency correctness breakage under ABI_POLICY.md: an ignored or misr
 register is a silent miscompile. No surveyed program used `clobbers()`, named the stack pointer
 or used xtensa constraints.
 
+### Tests / infrastructure
+
+**The suite runs cleanly on an arm64 host and on hosts with an address that has no broadcast
+(#211, #212, #213).** One helper (`arch_runner` in `tests/run_tests.sh`) now decides how a row
+runs an x86_64 or arm64 program: natively on its own architecture, under qemu-user otherwise, and
+a counted SKIP naming the missing qemu when neither works (still a FAIL under
+`REQUIRE_FULL_RUN=1`). On an arm64 Linux host without qemu-x86_64, ~45 x86_64 rows used to FAIL
+with "Exec format error" instead of skipping, and arm64 rows needed qemu-aarch64 even there;
+they now skip and run natively respectively. The Linux `sys_net_ifaces_*_broadcast_is_directed`
+rows wanted the directed broadcast for every broadcast-capable address and failed on any address
+added without `brd`, for which Linux reports 0.0.0.0 — which is what `sys_net_ifaces` returns,
+by design. They are now `sys_net_ifaces_*_broadcast_is_the_kernels` and check against
+`ip -4 -o addr`; three new rows pin the no-`brd` case without depending on the host. No compiler
+or library change.
+
+**Every test script finds qemu under either name (#227).** `tests/helpers/qemu_bin.sh` is now
+the one place a test script turns an arch into a qemu-user binary: `qemu-<arch>-static` if
+present, else plain `qemu-<arch>` (all Ubuntu 26.04's `qemu-user` ships). Some 50 sites in
+`tests/run_tests.sh` and the IR-vs-legacy diff scripts probed the `-static` name alone, so on such
+a host their rows skipped or quietly ran one leg. `tests/perf/count_insns.sh` (the #143
+instruction-count gate) had its own probe, which also asked for `qemu-arm64` rather than
+`qemu-aarch64`; it uses the resolver too. Row `qemu_resolver_single_site` keeps it that way: no
+literal `-static` name and no other qemu-user probe in a test script.
+
+**`win_legacy_out_audit` outside a git checkout (#221).** The row counts the git-tracked corpus to
+prove it audited all of it; from a `git archive` or tarball copy it now fails at once, naming
+#221 and the reason, instead of running ~560 builds first and failing among unrelated reasons.
+
+**The README test-count gate sees the qemu-user rows' tools.** It decides whether a run had every
+tool (and so must count every row) from the `command -v <tool>` probes in `tests/run_tests.sh`;
+the rows that find qemu through `qemu_bin` named no tool, so on a host without `qemu-aarch64` the
+rows that skipped there were reported as unexplained skips of a full run instead of a partial
+toolchain. Each `qemu_bin <name>` call now counts as a probe for `qemu-<name>` (row
+`readme_count_gate_sees_qemu_bin`).
+
+**The suite keeps all its scratch in one place, and checks there is room first (#250, #261–#264).**
+`tests/run_tests.sh` wrote ~1600 literal `/tmp/<name>_<pid>` paths whatever `TMPDIR` said; on a
+host whose `/tmp` is a tmpfs with a per-user quota (which `df` does not show) a full run stopped
+with "Disk quota exceeded" part-way and lost the rows after it. Every scratch file now lives in
+the run's private directory under one root — `KR_TEST_TMP`, else `TMPDIR`, else `/tmp` — removed
+at exit and on an interrupt. The root must be absolute, outside the checkout, plain characters
+and allow running programs; anything else stops the suite with a message (#262). Before a row
+runs, the free space of the root — including a disk or user quota — is checked against
+`tests/helpers/tmp_headroom_floor.txt` (measured); `KR_TEST_MIN_FREE_GIB` /
+`KR_TEST_MIN_FREE_INODES` lower it on a small host; a filesystem without an inode limit
+(btrfs, vfat, tmpfs with `nr_inodes=0`) is not refused for "0 inodes free" (#265), and a kernel
+too old to read quotas (before 5.14) gets a warning. The `make check` / CI scripts and
+`make bootstrap` (#264: no more fixed `/tmp/krc3_bs` names) use the same root and export it as
+`TMPDIR` for their own temporary files (#266); with neither variable set, their paths are
+unchanged. The qemu example checkers clean up their logs, dumps and sockets when a
+time limit stops them (#261), and `examples/tutorial-btree` puts its database at `argv[1]`, else
+`$TMPDIR` (#263).
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF

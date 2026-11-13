@@ -14,6 +14,6 @@ check: pager_test
 	@./pager_test && echo "check: OK" || { echo "check: FAILED"; exit 1; }
 
 clean:
-	rm -f pager_test /tmp/kr_tutorial_btree.db
+	rm -f pager_test "$${TMPDIR:-/tmp}/kr_tutorial_btree.db"
 
 .PHONY: all check clean

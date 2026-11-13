@@ -15,7 +15,7 @@
 #   KRC=<path>      compiler under test (default: ../build/krc2)
 #   KRC_ARCH=...    host arch flag (backend mode only)
 #   DIFF_RUNNER=... binary wrapper for host-arch runs
-#   QEMU_RUNNER=... arm64 runner (crossarch mode; default qemu-aarch64-static)
+#   QEMU_RUNNER=... arm64 runner (crossarch mode; default: tests/helpers/qemu_bin.sh's qemu-aarch64)
 #
 # Exits non-zero on any mismatch. SKIPs don't count as failures.
 
@@ -35,7 +35,14 @@ if [ -z "${KRC_ARCH:-}" ]; then
     esac
 fi
 RUNNER="${DIFF_RUNNER:-}"
-QEMU_RUNNER="${QEMU_RUNNER:-qemu-aarch64-static}"
+. "$DIR/../helpers/qemu_bin.sh"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$DIR/../helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$REPO") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
+QEMU_RUNNER="${QEMU_RUNNER:-$(qemu_bin aarch64)}"
 
 PASS=0
 FAIL=0
@@ -56,8 +63,8 @@ run_bin() {
 if [ "$MODE" = "backend" ]; then
     for src in "$DIR"/corpus/*.kr; do
         name="$(basename "$src" .kr)"
-        leg_bin="$(mktemp /tmp/krc_diff_${name}_leg_XXXX)"; rm -f "$leg_bin"
-        ir_bin="$(mktemp /tmp/krc_diff_${name}_ir_XXXX)"; rm -f "$ir_bin"
+        leg_bin="$(mktemp "$KRT_R/krc_diff_${name}_leg_XXXX")"; rm -f "$leg_bin"
+        ir_bin="$(mktemp "$KRT_R/krc_diff_${name}_ir_XXXX")"; rm -f "$ir_bin"
         leg_log="$(mktemp)"; ir_log="$(mktemp)"
 
         $KRC --legacy $KRC_ARCH "$src" -o "$leg_bin" > "$leg_log" 2>&1
@@ -97,8 +104,8 @@ if [ "$MODE" = "backend" ]; then
     echo ""
     echo "=== diff (backend): $PASS passed, $FAIL failed, $SKIP skipped ($KRC_ARCH) ==="
 elif [ "$MODE" = "crossarch" ]; then
-    if ! command -v "$QEMU_RUNNER" > /dev/null 2>&1; then
-        echo "diff: $QEMU_RUNNER not found; install qemu-user-static" >&2
+    if [ -z "$QEMU_RUNNER" ] || ! command -v "$QEMU_RUNNER" > /dev/null 2>&1; then
+        echo "diff: no qemu-aarch64 runner ('$QEMU_RUNNER'); install qemu-user (or qemu-user-static)" >&2
         exit 2
     fi
     # crossarch walks BOTH corpus/ (legacy-compatible) and ir-only/
@@ -106,8 +113,8 @@ elif [ "$MODE" = "crossarch" ]; then
     # to behave identically across x86_64 and arm64 IR.
     for src in "$DIR"/corpus/*.kr "$DIR"/ir-only/*.kr; do
         name="$(basename "$src" .kr)"
-        x64_bin="$(mktemp /tmp/krc_diff_${name}_x64_XXXX)"; rm -f "$x64_bin"
-        a64_bin="$(mktemp /tmp/krc_diff_${name}_a64_XXXX)"; rm -f "$a64_bin"
+        x64_bin="$(mktemp "$KRT_R/krc_diff_${name}_x64_XXXX")"; rm -f "$x64_bin"
+        a64_bin="$(mktemp "$KRT_R/krc_diff_${name}_a64_XXXX")"; rm -f "$a64_bin"
         blog="$(mktemp)"
 
         if ! $KRC --arch=x86_64 "$src" -o "$x64_bin" > "$blog" 2>&1; then

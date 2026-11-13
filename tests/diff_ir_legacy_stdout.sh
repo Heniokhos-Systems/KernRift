@@ -4,8 +4,16 @@
 # diverge: printing, float formatting, signed-negative arithmetic, struct
 # return-by-value, nested structs, defer, fstrings.
 KRC="${KRC:-./build/krc3}"
-QEMU="$(command -v qemu-aarch64-static || true)"
-TMP=/tmp/diffo_$$
+. "$(dirname "$0")/helpers/qemu_bin.sh"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$(dirname "$0")/helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$(dirname "$0")/..") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
+# arm64 natively on an aarch64 host ("env" is a no-op prefix), else qemu (#227).
+if [ "$(uname -m)" = aarch64 ]; then QEMU=env; else QEMU="$(qemu_bin aarch64)"; fi
+TMP=$KRT_R/diffo_$$
 DIV=0; TOTAL=0
 out_one() {
     local arch="$1"; local flags="$2"; local o="$TMP.$3"
