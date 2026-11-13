@@ -4048,7 +4048,7 @@ fn parse_module() -> uint64 {
                             if fexp_val > 18 {
                                 uint64 wmsg_2463 = "error: float exponent too large (max 1e18)\n"
                                 write(2, wmsg_2463, str_len(wmsg_2463))
-                                exit(1)
+                                fatal_exit()
                             }
                             uint64 fpow10 = 1
                             uint64 fei = 0
@@ -4430,7 +4430,7 @@ fn parse_module() -> uint64 {
         uint64 elen = fmt_uint(ebuf, p_err_count)
         write(2, ebuf, elen)
         write(2, " parse error(s)\n", 16)
-        exit(1)
+        fatal_exit()
     }
 
     return mod_node

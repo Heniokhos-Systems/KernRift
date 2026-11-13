@@ -503,7 +503,7 @@ fn cg_alloc_or_die(uint64 n, uint64 what) -> uint64 {
         write(2, oom_m, str_len(oom_m))
         write(2, what, str_len(what))
         write(2, "\n", 1)
-        exit(1)
+        fatal_exit()
     }
     return p
 }
@@ -524,7 +524,7 @@ fn cg_alloc(uint64 n) -> uint64 {
         uint64 nl = fmt_uint(nb, n)
         write(2, nb, nl)
         write(2, " bytes)\n", 8)
-        exit(1)
+        fatal_exit()
     }
     return p
 }
@@ -809,7 +809,7 @@ fn bare_metal_trap_refused(uint64 insn, uint64 what) {
     write(2, what, str_len(what))
     uint64 bmt3 = "': there is no operating system to trap into on bare metal. This builtin must refuse, or be lowered for --target=none, before it can be used in a freestanding image.\n"
     write(2, bmt3, str_len(bmt3))
-    exit(1)
+    fatal_exit()
 }
 
 // The single x86_64 SYSCALL (0F 05) emitter, shared by BOTH x86 backends --
@@ -1037,7 +1037,7 @@ fn bare_metal_builtin_refused(uint64 name, uint64 fix) {
     write(2, fix, str_len(fix))
     uint64 bm3 = "\n"
     write(2, bm3, str_len(bm3))
-    exit(1)
+    fatal_exit()
 }
 
 // syscall_raw reached on a Windows build (target_os == 2: --target=windows,
@@ -1096,7 +1096,7 @@ fn win_syscall_raw_refused(uint64 tok, uint64 no_prune) {
         write(2, wsr3, str_len(wsr3))
     }
     diag_span_of(tok)
-    exit(1)
+    fatal_exit()
 }
 
 // The three shared remedies, spelled once so every builtin in a family gives
@@ -1178,7 +1178,7 @@ fn bm_provider_shape_error(uint64 name, uint64 got, uint64 want, uint64 reached_
     write(2, shape, str_len(shape))
     uint64 pa6 = "`.\n"
     write(2, pa6, str_len(pa6))
-    exit(1)
+    fatal_exit()
 }
 
 fn bm_provider_return_error(uint64 name, uint64 reached_by, uint64 shape) {
@@ -1193,7 +1193,7 @@ fn bm_provider_return_error(uint64 name, uint64 reached_by, uint64 shape) {
     write(2, shape, str_len(shape))
     uint64 pr4 = "`.\n"
     write(2, pr4, str_len(pr4))
-    exit(1)
+    fatal_exit()
 }
 
 // Validate one provider against the shape its lowering will synthesise.
@@ -1592,7 +1592,7 @@ fn char_literal_not_one(uint64 tok_idx) {
     uint64 m = "a character literal holds exactly one character or one escape (for more than one byte, use a string)\n"
     write(2, m, str_len(m))
     diag_span_of(tok_idx)
-    exit(1)
+    fatal_exit()
 }
 
 // An integer literal that does not fit 64 bits: located error, exit 1.
@@ -1601,7 +1601,7 @@ fn int_literal_too_big(uint64 tok_idx) {
     uint64 m = "integer literal does not fit in 64 bits (the largest is 18446744073709551615, 0xFFFFFFFFFFFFFFFF)\n"
     write(2, m, str_len(m))
     diag_span_of(tok_idx)
-    exit(1)
+    fatal_exit()
 }
 
 // Compare two token texts for equality
@@ -1887,7 +1887,7 @@ fn var_type_register(uint64 name_tok, uint64 type_kind) {
     }
     if var_type_count >= 1024 {
         cap_overflow("too many typed locals", 1024, 1)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = var_type_table + var_type_count * 8
     uint32 nt = name_tok
@@ -2119,7 +2119,7 @@ fn var_declare(uint64 name_tok) -> uint64 {
     }
     if var_table_size >= 4096 {
         cap_overflow("too many locals", 4096, 1)
-        exit(1)
+        fatal_exit()
     }
     uint64 offset = cg_slot_off(var_count)
     uint64 entry = var_table + var_table_size * 8
@@ -2268,7 +2268,7 @@ fn struct_add_field(uint64 struct_idx, uint64 field_tok, uint64 field_size, uint
     unsafe { *(fc_addr as uint32) = new_fc }
     if wts + field_size > 65535 {
         write(2, "error: struct size overflow (max 65535)\n", 40)
-        exit(1)
+        fatal_exit()
     }
     uint16 new_ts = wts + field_size
     unsafe { *(ts_addr as uint16) = new_ts }
@@ -2470,7 +2470,7 @@ fn struct_abi_flags(uint64 struct_idx) -> uint64 {
 fn struct_var_register(uint64 var_tok, uint64 struct_idx) {
     if struct_var_count >= 1024 {
         cap_overflow("too many struct locals", 1024, 1)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = struct_var_table + struct_var_count * 8
     uint32 vt = var_tok
@@ -2565,7 +2565,7 @@ fn static_struct_lookup(uint64 name_tok) -> uint64 {
 fn enum_register(uint64 enum_tok, uint64 field_tok, uint64 value) {
     if enum_count >= 512 {
         cap_overflow("too many enum members", 512, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = enum_table + enum_count * 16
     uint32 et = enum_tok
@@ -2746,7 +2746,7 @@ fn static_write_check(uint64 name_tok) {
     }
     write(2, "\n", 1)
     diag_span_of(name_tok)
-    exit(1)
+    fatal_exit()
 }
 
 @export
@@ -2847,7 +2847,7 @@ fn static_fkind_of(uint64 name_tok) -> uint64 {
 fn device_register(uint64 name_tok, uint64 base_addr) -> uint64 {
     if device_count >= 64 {
         cap_overflow("too many devices", 64, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = device_table + device_count * 16
     uint32 nt = name_tok
@@ -2863,7 +2863,7 @@ fn device_register(uint64 name_tok, uint64 base_addr) -> uint64 {
 fn device_add_field(uint64 dev_idx, uint64 field_tok, uint64 offset, uint64 size) {
     if device_field_count >= 256 {
         cap_overflow("too many device fields", 256, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = device_field_table + device_field_count * 16
     uint32 di = dev_idx
@@ -2956,7 +2956,7 @@ fn device_field_size_of(uint64 dev_idx, uint64 field_tok) -> uint64 {
 fn slice_len_register(uint64 ptr_off, uint64 len_off) {
     if slice_len_count >= 32 {
         cap_overflow("too many slice locals", 32, 1)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = slice_len_table + slice_len_count * 8
     uint32 po = ptr_off
@@ -3228,7 +3228,7 @@ fn static_lookup_by_name(uint64 name_str, uint64 name_len) -> uint64 {
 fn type_alias_register(uint64 name_tok, uint64 target_size) {
     if type_alias_count >= 64 {
         cap_overflow("too many type aliases", 64, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = type_alias_table + type_alias_count * 8
     uint32 nt = name_tok
@@ -3285,7 +3285,7 @@ fn type_tok_elem_size(uint64 type_tok) -> uint64 {
 fn arr_elem_register(uint64 name_tok, uint64 elem_size) {
     if arr_elem_count >= 512 {
         cap_overflow("too many local arrays", 512, 1)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = arr_elem_table + arr_elem_count * 16
     uint32 nt = name_tok
@@ -3539,7 +3539,7 @@ fn fn_register(uint64 name_tok, uint64 code_offset) {
     uw_fn_name(name_tok)
     if fn_count >= 16777216 {
         write(2, "error: fn_table exceeded 16777216 functions (compiler bug?)\n", 60)
-        exit(1)
+        fatal_exit()
     }
     if fn_count >= fn_table_cap {
         fn_table = grow_buf(fn_table, fn_table_cap * 8, fn_table_cap * 16)
@@ -3561,7 +3561,7 @@ fn fn_register(uint64 name_tok, uint64 code_offset) {
 fn export_fn_register(uint64 name_tok) {
     if export_fn_count >= 4096 {
         cap_overflow("too many exported functions", 4096, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = export_fn_table + export_fn_count * 8
     uint32 nt = name_tok
@@ -3779,7 +3779,7 @@ fn fn_lookup(uint64 name_tok) -> uint64 {
 fn extern_fn_register(uint64 name_tok) -> uint64 {
     if extern_fn_count >= 256 {
         cap_overflow("too many extern functions", 256, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 idx = extern_fn_count
     uint64 entry = extern_fn_table + extern_fn_count * 8
@@ -3795,7 +3795,7 @@ fn extern_fn_register(uint64 name_tok) -> uint64 {
 fn builtin_override_register(uint64 name_tok) {
     if builtin_override_count >= 64 {
         cap_overflow("too many builtin overrides", 64, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = builtin_override_table + builtin_override_count * 8
     uint32 nt = name_tok
@@ -3926,12 +3926,12 @@ fn fnaddr_undefined_error(uint64 name_ptr, uint64 name_len) {
         write(2, name_ptr, name_len)
         uint64 fe_msg = "' is a Windows import bound through the IAT; its address is not a KernRift function\n"
         write(2, fe_msg, str_len(fe_msg))
-        exit(1)
+        fatal_exit()
     }
     write(2, "error: fn_addr: undefined function '", 36)
     write(2, name_ptr, name_len)
     write(2, "'\n", 2)
-    exit(1)
+    fatal_exit()
 }
 
 // A body-less `extern fn` declaration (FnDecl, data4 bit 3) that a Windows
@@ -3976,7 +3976,7 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
         uint64 rf_msg = "' has a float parameter or return type; routed Windows imports take integer/pointer arguments only\n"
         write(2, rf_msg, str_len(rf_msg))
         diag_span_of(wrn)
-        exit(1)
+        fatal_exit()
     }
     return 1
 }
@@ -3988,7 +3988,7 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
 fn extern_call_record(uint64 code_off, uint64 extern_idx) {
     if extern_call_count >= 1024 {
         cap_overflow("too many extern call sites", 1024, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = extern_call_sites + extern_call_count * 16
     uint32 co = code_off
@@ -4296,7 +4296,7 @@ fn fn_ret_float_register(uint64 name_tok, uint64 float_kind) {
     if fn_ret_float_lookup(name_tok) != 0 { return }
     if fn_ret_float_count >= 512 {
         cap_overflow("too many float-returning functions", 512, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = fn_ret_float_table + fn_ret_float_count * 8
     uint32 nt = name_tok
@@ -4331,7 +4331,7 @@ fn fn_ret_float_lookup(uint64 name_tok) -> uint64 {
 fn fn_ret_signed_register(uint64 name_tok) {
     if fn_ret_signed_count >= 512 {
         cap_overflow("too many signed-returning functions", 512, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = fn_ret_signed_table + fn_ret_signed_count * 8
     uint32 nt = name_tok
@@ -4362,7 +4362,7 @@ fn fn_ret_signed_lookup(uint64 name_tok) -> uint64 {
 fn fn_ret_struct_register(uint64 name_tok, uint64 struct_idx) {
     if fn_ret_struct_count >= 512 {
         cap_overflow("too many struct-returning functions", 512, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = fn_ret_struct_table + fn_ret_struct_count * 8
     uint32 nt = name_tok
@@ -4398,7 +4398,7 @@ fn fn_method_register(uint64 name_tok) {
     if fn_method_table == 0 { fn_method_table = cg_alloc(512 * 4) }
     if fn_method_count >= 512 {
         cap_overflow("too many methods", 512, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = fn_method_table + fn_method_count * 4
     uint32 nt = name_tok
@@ -4645,7 +4645,7 @@ fn asm_reg_fatal(uint64 tok, uint64 pre, uint64 post) {
     write(2, post, str_len(post))
     write(2, "\n", 1)
     diag_span_of(tok)
-    exit(1)
+    fatal_exit()
 }
 
 // Stops the build at an unknown constraint register: names it, lists the
@@ -4691,7 +4691,7 @@ fn asm_reg_unknown(uint64 tok, uint64 arch) {
     write(2, hint, str_len(hint))
     write(2, "\n", 1)
     diag_span_of(tok)
-    exit(1)
+    fatal_exit()
 }
 
 // Validate every register of one asm block's in()/out()/clobbers(), at the
@@ -4735,7 +4735,7 @@ fn asm_require_local(uint64 name_tok, uint64 resolved) {
     write(2, "error: inline-asm constraint variable not found: '", 50)
     write(2, cg_source + atstart, atlen)
     write(2, "' (asm in()/out() operands must be local variables)\n", 52)
-    exit(1)
+    fatal_exit()
 }
 
 // riscv32 constraint register name -> 0..31: the numeric x0-x31 form and the
@@ -4982,7 +4982,7 @@ fn emit_mov_rdx_rax() {
 fn win_fixup_add(uint64 patch_off, uint64 slot) {
     if win_iat_fixup_count >= 4096 {
         cap_overflow("too many Windows import fixups", 4096, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = win_iat_fixups + win_iat_fixup_count * 8
     uint32 po = patch_off
@@ -5329,7 +5329,7 @@ fn cg_win_fold_site(uint64 need) {
         uint64 m2 = "; #143 option C: the pre-scan and the emitter disagree)\n"
         write(2, m2, str_len(m2))
         diag_span_of(cg_win_ps_name)
-        exit(1)
+        fatal_exit()
     }
     rax_cache = 0
     if uw_sp_log_path != 0 {
@@ -5424,7 +5424,7 @@ fn win_patch_rel8(uint64 pos) {
     uint64 dist = out_len - pos - 1
     if dist > 127 {
         write(2, "internal error: Windows I/O arm rel8 branch out of range\n", 57)
-        exit(1)
+        fatal_exit()
     }
     uint8 d = dist
     uint64 p = out_buf + pos
@@ -6799,7 +6799,7 @@ fn gen_expr(uint64 node) {
                     diag_sugg_print()
                     write(2, "\n", 1)
                     diag_span_of(tok)
-                    exit(1)
+                    fatal_exit()
                 }
             }
         }
@@ -7857,7 +7857,7 @@ fn gen_expr(uint64 node) {
                     if pat_k == 52 {
                         uint64 wmsg_5585 = "error: range patterns require the IR backend (drop --legacy)\n"
                         write(2, wmsg_5585, str_len(wmsg_5585))
-                        exit(1)
+                        fatal_exit()
                     }
                     gen_expr(pat)
                     emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)   // mov rcx, rax
@@ -7868,7 +7868,7 @@ fn gen_expr(uint64 node) {
                     emit_u32_le(0)
                     if je_count >= 8 {
                         cap_overflow("too many match arms", 8, 1)
-                        exit(1)
+                        fatal_exit()
                     }
                     uint64 slot = je_bodies + je_count * 8
                     unsafe { *(slot as uint64) = je_p }
@@ -7898,7 +7898,7 @@ fn gen_expr(uint64 node) {
             gen_expr(wbody)
             if match_end_fixup_count >= 256 {
                 cap_overflow("too many match arms", 256, 1)
-                exit(1)
+                fatal_exit()
             }
             emit_byte(0xE9)
             uint64 end_patch = out_len
@@ -9342,7 +9342,7 @@ fn gen_expr(uint64 node) {
             if arg_count > 64 {
                 uint64 cpe2 = "error: too many call_ptr arguments on the legacy backend (max 64)\n"
                 write(2, cpe2, str_len(cpe2))
-                exit(1)
+                fatal_exit()
             }
             // Windows x64 passes four arguments in registers and requires 32
             // bytes of shadow space the caller must reserve, plus a stack slot
@@ -11034,7 +11034,7 @@ fn gen_expr(uint64 node) {
         // instead of one crashing where the other diagnoses.
         if arg_count > 64 {
             write(2, "error: too many call arguments (max 64)\n", 40)
-            exit(1)
+            fatal_exit()
         }
         // Evaluate all args and store to temp slots.
         // Track which args are float (0=int, 1=f64, 2=f32) in a local array.
@@ -11713,7 +11713,7 @@ fn asm_x86_hexerr(uint64 sptr, uint64 slen) {
     write(2, m2, str_len(m2))
     uint64 m3 = "    asm { \"0x0F 0x01 0xD0\" }\n"
     write(2, m3, str_len(m3))
-    exit(1)
+    fatal_exit()
 }
 
 
@@ -11946,7 +11946,7 @@ fn win_asm_refuse_msg(uint64 tok, uint64 what) {
         write(2, m2, str_len(m2))
     }
     diag_span_of(tok)
-    exit(1)
+    fatal_exit()
 }
 
 // One asm instruction string.
@@ -12584,7 +12584,7 @@ fn asm_emit_x86(uint64 str_tok) {
     uint64 wmsg_9001 = "  hint: use raw hex bytes instead, e.g. asm(\"0x48 0xD3 0xE0\")\n"
     write(2, wmsg_9001, str_len(wmsg_9001))
     asm_arch_hint(sptr, slen)
-    exit(1)
+    fatal_exit()
 }
 
 // Emit ARM64 assembly from a string literal token
@@ -12729,7 +12729,7 @@ fn asm_a64_operr(uint64 sptr, uint64 slen) {
     uint64 m3 = "  registers are x0-x30, sp, xzr; immediates are #N, #-N or #0xN\n"
     write(2, m3, str_len(m3))
     asm_arch_hint(sptr, slen)
-    exit(1)
+    fatal_exit()
 }
 
 // MOVZ / MOVK: `movz xD, #imm` with an optional `, lsl #0|16|32|48`.
@@ -13189,7 +13189,7 @@ fn asm_a64_sysreg_err(uint64 sptr, uint64 slen) {
     write(2, sptr, slen)
     uint64 m2 = "'\n  add it to asm_a64_sysreg in src/codegen.kr, or use a raw hex word.\n"
     write(2, m2, str_len(m2))
-    exit(1)
+    fatal_exit()
 }
 
 
@@ -13201,7 +13201,7 @@ fn asm_a64_hexerr(uint64 sptr, uint64 slen) {
     write(2, m2, str_len(m2))
     uint64 m3 = "  one word per asm string -- write a second string for a second instruction\n"
     write(2, m3, str_len(m3))
-    exit(1)
+    fatal_exit()
 }
 
 // `SYS`-alias emitter for the DC/IC/TLBI forms that take a register operand.
@@ -13503,7 +13503,7 @@ fn asm_emit_a64(uint64 str_tok) {
     uint64 wmsg_9170 = "  hint: use raw hex word instead, e.g. asm(\"0xD503201F\")\n"
     write(2, wmsg_9170, str_len(wmsg_9170))
     asm_arch_hint(sptr, slen)
-    exit(1)
+    fatal_exit()
 }
 
 // Generate code for a statement
@@ -14113,7 +14113,7 @@ fn gen_stmt(uint64 node) {
         // Record fixup
         if ret_fixup_count >= 256 {
             cap_overflow("too many returns", 256, 1)
-            exit(1)
+            fatal_exit()
         }
         uint64 rentry = ret_fixups + ret_fixup_count * 4
         uint32 rp32 = ret_patch
@@ -14253,7 +14253,7 @@ fn gen_stmt(uint64 node) {
         // Push loop context
         if loop_depth >= 16 {
             cap_overflow("too many nested loops", 16, 1)
-            exit(1)
+            fatal_exit()
         }
         uint64 lentry = loop_stack + loop_depth * 16
         unsafe { *(lentry as uint64) = loop_start }
@@ -14320,7 +14320,7 @@ fn gen_stmt(uint64 node) {
         if loop_depth == 0 { return }
         if break_fixup_count >= 256 {
             cap_overflow("too many break/continue statements", 256, 1)
-            exit(1)
+            fatal_exit()
         }
         emit_byte(0xE9)
         uint64 brk_off = out_len
@@ -14390,7 +14390,7 @@ fn gen_stmt(uint64 node) {
                     if pat_k == 52 {
                         uint64 wmsg_9994 = "error: range patterns require the IR backend (drop --legacy)\n"
                         write(2, wmsg_9994, str_len(wmsg_9994))
-                        exit(1)
+                        fatal_exit()
                     }
                     gen_expr(pat)
                     emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)   // mov rcx, rax
@@ -14402,7 +14402,7 @@ fn gen_stmt(uint64 node) {
                     emit_u32_le(0)
                     if je_count >= 8 {
                         cap_overflow("too many match arms", 8, 1)
-                        exit(1)
+                        fatal_exit()
                     }
                     uint64 slot = je_bodies + je_count * 8
                     unsafe { *(slot as uint64) = je_p }
@@ -14436,7 +14436,7 @@ fn gen_stmt(uint64 node) {
             // jmp end_match (stored in match_end_fixups)
             if match_end_fixup_count >= 256 {
                 cap_overflow("too many match arms", 256, 1)
-                exit(1)
+                fatal_exit()
             }
             emit_byte(0xE9)
             uint64 end_patch = out_len
@@ -14874,7 +14874,7 @@ fn gen_stmt(uint64 node) {
     if kind == 51 {
         uint64 wmsg_10344 = "error: `defer` requires the IR backend (drop --legacy)\n"
         write(2, wmsg_10344, str_len(wmsg_10344))
-        exit(1)
+        fatal_exit()
     }
 }
 
@@ -15716,7 +15716,7 @@ fn gen_function(uint64 fn_node) {
                         emit_u32_le(0) // placeholder -- patched later
                         if stack_pidx >= 64 {
                             write(2, "error: too many stack parameters (max 64)\n", 42)
-                            exit(1)
+                            fatal_exit()
                         }
                         uint64 fop_entry = overflow_patches + stack_pidx * 8
                         uint32 fpl32 = fpatch_loc
@@ -15755,7 +15755,7 @@ fn gen_function(uint64 fn_node) {
                         uint64 opi = pidx - 4
                         if opi >= 64 {
                             write(2, "error: too many stack parameters (max 64)\n", 42)
-                            exit(1)
+                            fatal_exit()
                         }
                         uint64 op_entry = overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
@@ -15811,7 +15811,7 @@ fn gen_function(uint64 fn_node) {
                         uint64 opi = stack_pidx
                         if opi >= 64 {
                             write(2, "error: too many stack parameters (max 64)\n", 42)
-                            exit(1)
+                            fatal_exit()
                         }
                         uint64 op_entry = overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
@@ -16076,7 +16076,7 @@ fn resolve_fixups() {
             diag_sugg_print()
             write(2, "\n", 1)
             diag_span_of(wtt)
-            exit(1)
+            fatal_exit()
         }
         i = i + 1
     }
@@ -16189,7 +16189,7 @@ static uint64 DCE_MAX_ENTRIES = 4194304
 fn dce_die_too_big(uint64 which) {
     if which == 0 { write(2, "error: DCE live set exceeded 4194304 entries (compiler bug?)\n", 61) }
     else { write(2, "error: DCE function map exceeded 4194304 entries (compiler bug?)\n", 65) }
-    exit(1)
+    fatal_exit()
 }
 
 // Mark every slot of a freshly allocated hash table as empty.
@@ -16837,7 +16837,7 @@ fn refuse_unresolved_externs(uint64 check) {
             uint64 em2 = "' is never defined and this emit mode produces\n  an executable; nothing will resolve it at run time. Provide a definition, or\n  use --emit=obj.\n"
             write(2, em2, str_len(em2))
             diag_span_of(wnt)
-            exit(1)
+            fatal_exit()
         }
         i = i + 1
     }
@@ -17803,7 +17803,7 @@ fn _lkm_modinfo_kv_lit(uint64 buf, uint64 off,
 fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     if arch != 0 {
         write(2, "krc: --emit=lkm currently supports x86_64 only\n", 47)
-        exit(1)
+        fatal_exit()
     }
 
     uint64 init_fn_tok = module_info_init_fn_tok()
@@ -17825,12 +17825,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         if ioctl_handler_tok == 0 {
             uint64 wmsg_12868 = "krc: @module_register_misc_device requires an @lkm_ioctl_handler\n"
             write(2, wmsg_12868, str_len(wmsg_12868))
-            exit(1)
+            fatal_exit()
         }
         if init_fn_tok != 0 {
             uint64 wmsg_12872 = "krc: @module_init conflicts with @module_register_misc_device (init is auto-generated)\n"
             write(2, wmsg_12872, str_len(wmsg_12872))
-            exit(1)
+            fatal_exit()
         }
         // @module_exit is ALLOWED in misc-device mode: it becomes an
         // optional teardown hook that cleanup_module calls before
@@ -17840,12 +17840,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         if init_fn_tok == 0 {
             uint64 wmsg_12881 = "krc: --emit=lkm requires a @module_init function (or use @module_register_misc_device)\n"
             write(2, wmsg_12881, str_len(wmsg_12881))
-            exit(1)
+            fatal_exit()
         }
         if exit_fn_tok == 0 {
             uint64 wmsg_12885 = "krc: --emit=lkm requires a @module_exit function (or use @module_register_misc_device)\n"
             write(2, wmsg_12885, str_len(wmsg_12885))
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -17856,11 +17856,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         exit_code_off = fn_lookup(exit_fn_tok)
         if init_code_off == 0xFFFFFFFF {
             write(2, "krc: @module_init function not found in fn_table\n", 49)
-            exit(1)
+            fatal_exit()
         }
         if exit_code_off == 0xFFFFFFFF {
             write(2, "krc: @module_exit function not found in fn_table\n", 49)
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -17870,7 +17870,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         ioctl_handler_code_off = fn_lookup(ioctl_handler_tok)
         if ioctl_handler_code_off == 0xFFFFFFFF {
             write(2, "krc: @lkm_ioctl_handler function not found in fn_table\n", 55)
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -17882,7 +17882,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
     if has_mmap_handler != 0 {
         if fn_lookup(mmap_handler_tok) == 0xFFFFFFFF {
             write(2, "krc: @lkm_mmap_handler function not found in fn_table\n", 54)
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -17898,7 +17898,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
             exit_hook_code_off = fn_lookup(exit_fn_tok)
             if exit_hook_code_off == 0xFFFFFFFF {
                 write(2, "krc: @module_exit teardown function not found in fn_table\n", 58)
-                exit(1)
+                fatal_exit()
             }
         }
     }
@@ -17923,12 +17923,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         pci_probe_code_off = fn_lookup(module_info_pci_probe_fn())
         if pci_probe_code_off == 0xFFFFFFFF {
             write(2, "krc: @pci_probe_handler function not found in fn_table\n", 55)
-            exit(1)
+            fatal_exit()
         }
         pci_remove_code_off = fn_lookup(module_info_pci_remove_fn())
         if pci_remove_code_off == 0xFFFFFFFF {
             write(2, "krc: @pci_remove_handler function not found in fn_table\n", 56)
-            exit(1)
+            fatal_exit()
         }
         // The PCI cleanup_module relocations sit at fixed offsets
         // (misc_exit_text_off+19/+24) that assume cleanup has NO prepended
@@ -17937,7 +17937,7 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         // silently corrupt the .ko.
         if has_exit_hook != 0 {
             write(2, "krc: @module_register_pci_driver conflicts with @module_exit (cleanup reloc offsets assume no hook)\n", 100)
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -17967,12 +17967,12 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         if found_reg == 0 {
             uint64 wmsg_13006 = "krc: misc-device mode requires `extern fn misc_register(uint64 dev) -> int32`\n"
             write(2, wmsg_13006, str_len(wmsg_13006))
-            exit(1)
+            fatal_exit()
         }
         if found_dereg == 0 {
             uint64 wmsg_13010 = "krc: misc-device mode requires `extern fn misc_deregister(uint64 dev) -> int32`\n"
             write(2, wmsg_13010, str_len(wmsg_13010))
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -18003,11 +18003,11 @@ fn emit_elf_lkm(uint64 text_len, uint64 data_len, uint64 arch) {
         if found_preg == 0 {
             uint64 wmsg_13040 = "krc: pci-driver mode requires `extern fn __pci_register_driver(uint64 drv, uint64 owner, uint64 name) -> int32`\n"
             write(2, wmsg_13040, str_len(wmsg_13040))
-            exit(1)
+            fatal_exit()
         }
         if found_punreg == 0 {
             write(2, "krc: pci-driver mode requires `extern fn pci_unregister_driver(uint64 drv)`\n", 76)
-            exit(1)
+            fatal_exit()
         }
     }
 
@@ -20844,15 +20844,15 @@ static uint64 import_failed = 0
 // produced NO FILE. A release script that writes into a dist/ it has not
 // created yet therefore got a green build and no artifact.
 //
-// Checked HERE, not in codegen_write_output: main.kr:1955 (asm listing) and
-// main.kr:5659 (esp32 image) call this directly and bypass
+// Checked HERE, not in codegen_write_output: main.kr:1967 (asm listing) and
+// main.kr:5671 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {
     if import_failed != 0 {
         uint64 imp_err = "error: compilation aborted: one or more imports could not be opened\n"
         write(2, imp_err, str_len(imp_err))
-        exit(1)
+        fatal_exit()
     }
     uint64 fd = file_open(output_path, 1)
     if fd >= 0xFFFFFFFF {
@@ -20860,7 +20860,7 @@ fn open_output_or_die(uint64 output_path) -> uint64 {
         write(2, oerr, str_len(oerr))
         write(2, output_path, str_len(output_path))
         write(2, "\n", 1)
-        exit(1)
+        fatal_exit()
     }
     return fd
 }
@@ -20892,7 +20892,7 @@ fn write_all_or_die(uint64 fd, uint64 buf, uint64 len, uint64 output_path) {
             write(2, wnb, wl)
             write(2, "\n", 1)
             file_close(fd)
-            exit(1)
+            fatal_exit()
         }
         off = off + n
     }

@@ -89,6 +89,18 @@ CFGS=(
   "irna|--target=none --arch=arm64 --emit=ir"
 )
 if [ "$EXT" = kr ]; then CFGS+=("fatnw|--peu-fat-nonwin-slices"); fi
+# C1 (#244): a --targets= build compiles only the slices it ships. One
+# single-slice list per non-Windows slice, compared slice-wise (every slice
+# the list builds, by sha256, like fatnw; the Windows lists are in the windows
+# set below). Measured against a base compiler that compiled every slice,
+# these also show #244's intended moves -- a program the base refused because
+# of a slice the list does not ship now builds -- which a C1-era report
+# declares; between two compilers that both skip, every pair must match.
+if [ "$EXT" = kr ]; then
+    for s1 in linux-x64 linux-arm64 mac-x64 mac-arm64 android-arm64 android-x64; do
+        CFGS+=("fatsingle_$s1|--peu-fat-slices --targets=$s1")
+    done
+fi
 
 # PEU_IDENTITY_SET=windows swaps in the Windows configurations instead: the
 # refactor tasks that must leave Windows output byte-identical too (plan A4,
@@ -110,6 +122,9 @@ if [ "${PEU_IDENTITY_SET:-nonwin}" = windows ]; then
       "woa|--arch=arm64 --target=windows --emit=obj"
       "fat|"
       "fatw|--targets=win-x64,win-arm64"
+      "fatsingle_win-x64|--peu-fat-slices --targets=win-x64"
+      "fatsingle_win-arm64|--peu-fat-slices --targets=win-arm64"
+      "fatskip0|--peu-fat-slices --targets=linux-arm64,win-x64"
     )
 elif [ "${PEU_IDENTITY_SET:-nonwin}" != nonwin ]; then
     echo "PEU_IDENTITY_SET must be nonwin or windows" >&2; exit 2
@@ -153,8 +168,9 @@ one_side() {
     local cc="$1" d="$2" src="$3"; shift 3
     rm -rf "$d"; mkdir -p "$d"
     local rc
-    local fatnw=0
+    local fatnw=0 fatsl=0
     if [ "${1:-}" = "--peu-fat-nonwin-slices" ]; then fatnw=1; shift; fi
+    if [ "${1:-}" = "--peu-fat-slices" ]; then fatsl=1; shift; fi
     if [ "$src" = "-" ]; then
         # source-less emitter: the flag value is the output path
         ( cd "$d" && ulimit -v 2000000 && timeout "$TMO" "$cc" "${1}out" > so 2> se ); rc=$?
@@ -165,6 +181,16 @@ one_side() {
         if [ "$rc" = 0 ]; then
             python3 -B "$ROOT/tests/helpers/krbo_slices.py" "$d/out.krbo" "$d/slices" > /dev/null 2>> "$d/se" || rc=99
             rm -f "$d/out.krbo" "$d/slices/win-x64" "$d/slices/win-arm64"
+            for x in "$d"/slices/*; do [ -f "$x" ] && mv "$x" "$d/slice-$(basename "$x")"; done
+            rmdir "$d/slices" 2> /dev/null
+        fi
+    elif [ "$fatsl" = 1 ]; then
+        # a --targets= fat build: keep every slice it holds, by name (C1)
+        ( cd "$d" && ulimit -v 2000000 && timeout "$TMO" "$cc" "$@" "$src" -o out.krbo > so.raw 2> se ); rc=$?
+        grep -v '^fat binary: ' "$d/so.raw" > "$d/so"; rm -f "$d/so.raw"
+        if [ "$rc" = 0 ]; then
+            python3 -B "$ROOT/tests/helpers/krbo_slices.py" "$d/out.krbo" "$d/slices" > /dev/null 2>> "$d/se" || rc=99
+            rm -f "$d/out.krbo"
             for x in "$d"/slices/*; do [ -f "$x" ] && mv "$x" "$d/slice-$(basename "$x")"; done
             rmdir "$d/slices" 2> /dev/null
         fi

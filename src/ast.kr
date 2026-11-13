@@ -150,7 +150,7 @@ fn ast_alloc(uint64 kind) -> uint64 {
         // Fatal: returning 0 here let parsing continue against a truncated
         // AST (node 0 also writes 32 bytes before the arena). Fail loud.
         write(2, "error: AST node arena exhausted\n", 32)
-        exit(1)
+        fatal_exit()
     }
     ast_count = ast_count + 1
     uint64 idx = ast_count
@@ -182,7 +182,7 @@ fn node_base(uint64 idx) -> uint64 {
         // catastrophic for a compiler that must self-compile bit-identically.
         // Same loud-fail convention as emit_token (lexer.kr).
         write(2, "error: AST accessor on null node (idx 0)\n", 41)
-        exit(1)
+        fatal_exit()
     }
     return ast_buf + (idx - 1) * 32
 }

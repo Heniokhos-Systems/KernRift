@@ -8,7 +8,7 @@ fn fmt_file(uint64 path) {
         write(2, "fmt: cannot open '", 18)
         write(2, path, str_len(path))
         write(2, "'\n", 2)
-        exit(1)
+        fatal_exit()
     }
     uint64 size = file_size(fd)
     uint64 src = cg_alloc(size + 1)
@@ -17,7 +17,7 @@ fn fmt_file(uint64 path) {
     if fgot != size {
         uint64 fe = "error: short read: the file ended before the size it reported; refusing to format a truncated file\n"
         write(2, fe, str_len(fe))
-        exit(1)
+        fatal_exit()
     }
 
     // Null-terminate

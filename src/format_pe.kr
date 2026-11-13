@@ -281,7 +281,7 @@ fn pe_idata_fail(uint64 msg) {
     write(2, pre, str_len(pre))
     write(2, msg, str_len(msg))
     write(2, "\n", 1)
-    exit(1)
+    fatal_exit()
 }
 
 // Emit the ILT or IAT region (identical bytes): one qword per slot -- the RVA
@@ -678,7 +678,7 @@ fn emit_uefi_headers(uint64 machine) -> uint64 {
     if out_len != 0x1000 {
         uint64 uhz_e = "error: internal: emit_uefi_headers wrote a region that does not match the reserved size\n"
         write(2, uhz_e, str_len(uhz_e))
-        exit(1)
+        fatal_exit()
     }
     return out_len
 }
@@ -714,12 +714,12 @@ fn patch_uefi_headers(uint64 entry_rva, uint64 payload_size, uint64 data_start) 
     if (data_start & 0xFFF) != 0 {
         uint64 uda_e = "error: internal: --emit=uefi static data does not start on a page boundary, so .text and .data cannot both keep PointerToRawData == VirtualAddress\n"
         write(2, uda_e, str_len(uda_e))
-        exit(1)
+        fatal_exit()
     }
     if data_start < 0x1000 || data_start > 0x1000 + payload_size {
         uint64 udr_e = "error: internal: --emit=uefi static data starts outside the payload\n"
         write(2, udr_e, str_len(udr_e))
-        exit(1)
+        fatal_exit()
     }
     uint64 text_raw = data_start - 0x1000
     uint64 data_raw = raw - text_raw
@@ -864,7 +864,7 @@ fn pe_check_header_room(uint64 nsec, uint64 header_size) {
     if 0x148 + 40 * nsec > header_size {
         uint64 m = "error: internal: PE section table (0x148 + 40 * NumberOfSections) overruns SizeOfHeaders\n"
         write(2, m, str_len(m))
-        exit(1)
+        fatal_exit()
     }
 }
 

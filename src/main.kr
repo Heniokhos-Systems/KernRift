@@ -284,9 +284,21 @@ fn diag_span_of(uint64 tok_idx) {
     diag_print_source_line(tok_start, tok_text_len(tok_idx), srcmap_line(tok_start))
 }
 
-// The compiler's one fatal exit (C1): a command line or a program the
-// compiler refuses ends here, with exit status 1.
+// The compiler's ONE fatal exit (C1, #244): every `exit(1)` of the compiler
+// is a call to this (row fatal_exit_single_site). While a fat build runs a
+// slice's backend (fat_slice_label set by compile_fat) it adds a note naming
+// that slice, so an error from code only some targets accept says which
+// slice rejected it -- once, last, after every message and summary line:
+// the backend's first fatal exit ends the run. Front-end errors, the CLI and
+// single builds have no label and print nothing extra.
 fn fatal_exit() {
+    if fat_slice_label != 0 {
+        uint64 fe_a = "note: the error above is in the "
+        write(2, fe_a, str_len(fe_a))
+        write(2, fat_slice_label, str_len(fat_slice_label))
+        uint64 fe_b = " slice of the fat binary; a fat build compiles every slice it ships, so code only some targets accept must be guarded (`if get_arch_id() == N`, `if get_target_os() == N`) or that slice left out of --targets=\n"
+        write(2, fe_b, str_len(fe_b))
+    }
     exit(1)
 }
 
@@ -298,7 +310,7 @@ fn diag_fatal_at(uint64 tok_idx, uint64 msg) {
     write(2, msg, str_len(msg))
     write(2, "\n", 1)
     diag_span_of(tok_idx)
-    exit(1)
+    fatal_exit()
 }
 
 @export
@@ -569,7 +581,7 @@ fn import_scan_error(uint64 file_path, uint64 buf, uint64 at_off, uint64 msg) {
     write(2, ": error: ", 9)
     write(2, msg, str_len(msg))
     write(2, "\n", 1)
-    exit(1)
+    fatal_exit()
 }
 
 // The import path between the quotes, as the scanner will open it. Returns the
@@ -887,7 +899,7 @@ fn import_check_file(uint64 path) {
         write(2, "error: cannot open '", 20)
         write(2, path, str_len(path))
         write(2, "': file not found\n", 18)
-        exit(1)
+        fatal_exit()
     }
     file_close(fd)
 }
@@ -1931,7 +1943,7 @@ fn riscv32_nyi(uint64 what) {
     write(2, what, str_len(what))
     uint64 post = " not yet implemented (stage 3)\n"
     write(2, post, str_len(post))
-    exit(1)
+    fatal_exit()
 }
 
 // xtensa (arch==3) backend is a stub during Milestone 1: every arch-dispatch
@@ -1943,7 +1955,7 @@ fn xtensa_nyi(uint64 what) {
     write(2, what, str_len(what))
     uint64 post = " not yet implemented\n"
     write(2, post, str_len(post))
-    exit(1)
+    fatal_exit()
 }
 
 // Nonzero: where the listing's code ends (a --test-listing of a PE/COFF build,
@@ -3685,7 +3697,7 @@ fn entry_missing_die() {
     // on its own.
     em_msg = "Nothing calls into this output for you: name the first function to run either '_start' or 'main'\n"
     write(2, em_msg, str_len(em_msg))
-    exit(1)
+    fatal_exit()
 }
 
 // ---------------------------------------------------------------------------
@@ -4384,7 +4396,7 @@ fn pe_finalize_a64(uint64 header_size, uint64 text_start, uint64 text_size) {
     if header_size != PE_A64_HEADER_SIZE {
         uint64 hm = "error: internal: arm64 PE header size disagrees with PE_A64_HEADER_SIZE\n"
         write(2, hm, str_len(hm))
-        exit(1)
+        fatal_exit()
     }
     uint64 data_va_base = data_rva - (0x1000 - header_size)
     resolve_static_fixups_a64(data_va_base)
@@ -4477,7 +4489,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         uint64 elen = fmt_uint(ebuf, total_errs)
         write(2, ebuf, elen)
         write(2, " error(s) found\n", 16)
-        exit(1)
+        fatal_exit()
     }
 
     // --asm-strict only: arch-check every asm block, reachable or not. See the
@@ -4832,7 +4844,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         } else {
             uint64 ufm_e = "error: internal: --emit=uefi reached header emission with an arch that has no PE Machine value\n"
             write(2, ufm_e, str_len(ufm_e))
-            exit(1)
+            fatal_exit()
         }
         header_size = emit_uefi_headers(uf_machine)
     } else if emit_mode == 10 {
@@ -5080,7 +5092,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         if rv_entry_node == 0 {
             uint64 rve_msg = "error: freestanding riscv32 needs an entry function ('_start' or 'main')\n"
             write(2, rve_msg, str_len(rve_msg))
-            exit(1)
+            fatal_exit()
         }
         uint32 rve_ename = ast_data1(rv_entry_node)
         uint64 rve_wen = rve_ename
@@ -5113,7 +5125,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         if xt_entry_node == 0 {
             uint64 xte_msg = "error: freestanding xtensa needs an entry function ('_start' or 'main')\n"
             write(2, xte_msg, str_len(xte_msg))
-            exit(1)
+            fatal_exit()
         }
         // Assign the __xt_pcbase name token BEFORE the emit loop so every
         // `call0 __xt_pcbase` fixup recorded during PIC emission carries the
@@ -5416,7 +5428,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         if img_stub_off > 134217724 {
             uint64 ih_far = "error: --image-header cannot reach the entry stub: the header's first word is a `b` with a signed 26-bit word displacement (+/-128 MiB) and this image places the stub past that. The image is too large to be prefixed with an arm64 Image header\n"
             write(2, ih_far, str_len(ih_far))
-            exit(1)
+            fatal_exit()
         }
         // Every subexpression parenthesised on purpose: in this dialect `&`,
         // `|` and `^` bind TIGHTER than `+` and `<<`.
@@ -5461,7 +5473,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // been wrong even if the report were right.
             uint64 xsx_msg = "error: internal: entry function was selected but never registered in the code image\n"
             write(2, xsx_msg, str_len(xsx_msg))
-            exit(1)
+            fatal_exit()
         }
         patch_u64(x86stub_entry_site, load_addr + xsb_off)
         // The reported entry is the TRAMPOLINE's first instruction (D2) --
@@ -5527,7 +5539,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // the emit loop emits exactly those.
             uint64 rvp_msg = "error: internal: entry function was selected but never registered in the code image\n"
             write(2, rvp_msg, str_len(rvp_msg))
-            exit(1)
+            fatal_exit()
         }
         rvstage_kentoff = rvp_off - rvstage_payoff
         patch_u32(rvstage_kentoff_site, 1048576 + rvstage_kentoff)
@@ -5575,7 +5587,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         uint64 xt_entry_code = fn_lookup(xt_wen)
         if xt_entry_code == 0xFFFFFFFF {
             write(2, "error: xtensa: entry function has no code offset\n", 49)
-            exit(1)
+            fatal_exit()
         }
 
         // ===== ESP32 (--target=esp32): two-segment esp-image finalize =====
@@ -6030,7 +6042,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // so rather than emitting an image whose entry points nowhere.
             uint64 imx_msg = "error: internal: entry function was selected but never registered in the code image\n"
             write(2, imx_msg, str_len(imx_msg))
-            exit(1)
+            fatal_exit()
         }
         // With a stub emitted, THE STUB is what `entry` reports, and the entry
         // function reached through it would fault on a garbage SP.
@@ -6067,7 +6079,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             write(2, "error: no 'main' function found\n", 32)
             uint64 wmsg_3090 = "Every KernRift program needs: fn main() { ... }\n"
             write(2, wmsg_3090, str_len(wmsg_3090))
-            exit(1)
+            fatal_exit()
         }
     }
     if emit_mode == 0 && rv_raw == 0 && (arch == 0 || arch == 1) {
@@ -6233,7 +6245,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                 write(2, rvf_em, str_len(rvf_em))
                 rvf_em = "The file size is fixed by the -bios geometry and is not settable: shrink the program's code and static data\n"
                 write(2, rvf_em, str_len(rvf_em))
-                exit(1)
+                fatal_exit()
             }
             // THE PAYLOAD-OVERLAP REFUSAL -- the design spec's second
             // disjunct, shipped three commits late (whole-branch review,
@@ -6280,7 +6292,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                 write(2, rvo_b, rvo_l)
                 rvo_m = " decimal, and the stack grows down so the first push writes the eight bytes below the stack top -- it would overwrite the program's own bytes before the stage calls into it. Put the stack at or below 0x100000 (0x90000 clears both this region and the page tables), or at least eight bytes above the payload's end\n"
                 write(2, rvo_m, str_len(rvo_m))
-                exit(1)
+                fatal_exit()
             }
             // PAYLEN, the seventh and last patch site. The stage copies with
             // `rep movsl`, so the immediate is a DWORD COUNT and the `+ 3`
@@ -6404,7 +6416,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             if arch == 0 && img_end > 1073741824 {
                 uint64 ie_1g = "error: the image does not fit under the x86_64 self-boot trampoline's identity map: the map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, and this image ends past it. Lower --load-addr, or drop --stack-top and boot it with a loader of your own\n"
                 write(2, ie_1g, str_len(ie_1g))
-                exit(1)
+                fatal_exit()
             }
             // The stack grows DOWN from --stack-top, so the FIRST push writes
             // the eight bytes [stack_top-8, stack_top) and that band is what
@@ -6422,7 +6434,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             if stack_top > load_addr && stack_top < img_end + 8 {
                 uint64 st_in = "error: --stack-top= starts inside the image: the stack grows down from it and the first push would overwrite the program's own bytes. Put the stack below --load-addr, or above the end of the image\n"
                 write(2, st_in, str_len(st_in))
-                exit(1)
+                fatal_exit()
             }
         }
         uint8[64] ib
@@ -6574,7 +6586,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // loud rather than left to a boot to discover.
             uint64 ufz_e = "error: internal: --emit=uefi SizeOfImage does not match the bytes emitted\n"
             write(2, ufz_e, str_len(ufz_e))
-            exit(1)
+            fatal_exit()
         }
         uint8[64] uf_b
         uint64 uf_m = "uefi: arch="
@@ -6632,7 +6644,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             // loader reports as a bounds failure with no hint of the cause.
             uint64 axe_e = "error: internal: --emit=arx entry offset lies inside the header region\n"
             write(2, axe_e, str_len(axe_e))
-            exit(1)
+            fatal_exit()
         }
         // data_start is a FILE offset; the container speaks in payload-relative
         // offsets, exactly as it does for the entry.
@@ -7086,17 +7098,61 @@ fn c1_r8_emit_die() {
     fatal_exit()
 }
 
-// compile_fat compiles ALL 8 (OS, arch) slices on every run and only then
-// packs the ones --targets selected (the custom-subset pass below the slice
-// blocks); an unselected slice's code is generated and thrown away. So a
-// per-slice REFUSAL must ask whether its slice actually ships, or a slice
-// the user never asked for refuses the build: measured before this existed,
+// A per-slice REFUSAL asks whether its slice ships, so that a slice the user
+// never asked for cannot refuse the build. compile_fat used to compile all 8
+// slices on every run and only then pack the ones --targets= selected -- so
 // `--targets=win-x64` refused an unguarded routed import (WSAStartup) from
-// the discarded linux-x64 slice, and `--targets=linux-x64` refused an
-// unguarded syscall_raw from the discarded win-x64 slice. 1 outside
-// compile_fat (a single-target build always ships), 1 for every slice of a
-// default/`all` fat build, else the slice's --targets bit (see target_mask).
+// the discarded linux-x64 slice, and `--targets=linux-x64` an unguarded
+// syscall_raw from the discarded win-x64 slice. Since C1 (#244) a slice that
+// does not ship is not compiled at all (fat_slice_wanted, below), so for
+// every slice that reaches a refusal this is 1; it stays as the refusals'
+// own statement of the rule. 1 outside compile_fat (a single-target build
+// always ships), 1 for every slice of a default/`all` fat build, else the
+// slice's --targets bit (see target_mask).
 static uint64 in_compile_fat = 0
+
+// The slice whose BACKEND compile_fat is running ("linux-x64", ...), or 0:
+// fatal_exit() names it in a note. 0 everywhere else -- the front end, the
+// CLI, every single-target build -- so their diagnostics are unchanged.
+static uint64 fat_slice_label = 0
+
+// Does the (os, arch) slice ship (#244, C1)? os: 0 linux, 1 macos,
+// 2 windows, 3 android; arch: 0 x86_64, 1 arm64. A default or `all` fat build
+// (target_mask 0 or 0xFF) ships all 8, so its output is byte-identical by
+// construction; else the slice's --targets bit, the mapping fat_slice_ships
+// uses (bit i = KrboFat arch id i+1).
+fn fat_slice_wanted(uint64 os, uint64 arch) -> uint64 {
+    if target_mask == 0 || target_mask == 0xFF { return 1 }
+    uint64 bit = 0
+    if os == 2 { bit = 2 }
+    if os == 1 { bit = 4 }
+    if os == 3 {
+        // android-arm64 is bit 6 and android-x64 bit 7 (the reverse of the
+        // other three OS pairs).
+        if arch == 1 { return (target_mask >> 6) & 1 }
+        return (target_mask >> 7) & 1
+    }
+    bit = bit + arch
+    return (target_mask >> bit) & 1
+}
+
+// Does the module define a top-level `fn main` (imports are already merged
+// into it)? compile_fat's front-end check (#244, C1).
+fn module_has_main(uint64 root) -> uint64 {
+    uint32 mh_child = ast_child(root)
+    uint64 w = mh_child
+    while w != 0 {
+        uint32 k = ast_kind(w)
+        if k == 2 {
+            uint32 nt = ast_data1(w)
+            uint64 wnt = nt
+            if tok_matches(wnt, "main", 4) != 0 { return 1 }
+        }
+        uint32 nx = ast_next(w)
+        w = nx
+    }
+    return 0
+}
 
 // The start of every compile_fat pass, right after set_target_arch (#254,
 // #256, C1). Each pass re-parses the program, and parsing re-registers
@@ -7338,100 +7394,126 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint64 elen2 = fmt_uint(ebuf2, total_errs)
         write(2, ebuf2, elen2)
         write(2, " error(s) found\n", 16)
-        exit(1)
+        fatal_exit()
     }
 
-    // Function inlining: must run before DCE so inlined-out helpers
-    // become unreachable and get pruned.
-    inline_pass(root)
+    // `main` is checked ONCE, here in the shared front end (#244, C1). The
+    // linux-x64 backend below has always checked it, but it may now be
+    // skipped (--targets= without linux-x64), and every other pass patches
+    // its entry from find_main_offset() unchecked -- a main-less program
+    // would build at exit 0 with an entry computed from 0xFFFFFFFF. Same
+    // text as the slice-0 check, unlabelled (a front-end error).
+    if module_has_main(root) == 0 {
+        write(2, "error: no 'main' function found\n", 32)
+        uint64 nomain_msg = "Every KernRift program needs: fn main() { ... }\n"
+        write(2, nomain_msg, str_len(nomain_msg))
+        fatal_exit()
+    }
 
-    // Dead code elimination
-    dce_init()
-    dce_scan(root)
-
-    // Every compile_fat slice is a directly-executable artifact (ELF/
-    // Mach-O/PE/Android; fat mode has no --emit=obj/asm/ir/lkm variant), so
-    // pass 1 rather than deriving it from a mode number -- see
-    // refuse_unresolved_externs (codegen.kr) for what this refuses and why.
-    // Repeated after each of this function's 8 dce_scan calls, one per
-    // (OS, arch) slice, since each re-parses into its own fresh AST and
-    // extern_fn_table.
-    refuse_unresolved_externs(1)
-
-    // Generate x86_64 ELF into temp buffer.
-    // The per-slice buffer is allocated AFTER codegen (same pattern as the
-    // arm64 / pe / macho / android slices below) because the 1 MB upfront
-    // allocation the code used to make silently overflowed once the slice
-    // grew past that size — harmlessly on Linux (the overflow lands in
-    // mapped heap pages) but as a SIGSEGV on Windows, where VirtualAlloc
-    // leaves guard pages between reservations.
+    // From here on each pass runs its BACKEND (inline_pass onward, down to
+    // the copy of its output) only if its slice ships (#244, C1):
+    // fat_slice_wanted. The front ends are unchanged, so diagnostics are
+    // reported once, by the first pass, exactly as before. A skipped slice
+    // leaves its *_buf/*_len at 0; nothing reads them (the custom packer
+    // takes only selected slices, the paired packer runs only when all 8
+    // were built, the BCJ filters are no-ops at size 0). fat_slice_label
+    // names the slice whose backend is running, for fatal_exit()'s note.
     uint64 x86_len = 0
+    uint64 x86_buf = 0
+    if fat_slice_wanted(0, 0) != 0 {
+        fat_slice_label = "linux-x64"
+        // Function inlining: must run before DCE so inlined-out helpers
+        // become unreachable and get pruned.
+        inline_pass(root)
 
-    emit_elf_header()
-    emit_program_header(0)
-    uint64 text_start = codegen_output_len()
+        // Dead code elimination
+        dce_init()
+        dce_scan(root)
 
-    uint32 child = ast_child(root)
-    uint64 wchild = child
-    while wchild != 0 {
-        uint32 ck = ast_kind(wchild)
-        if ck == 2 {
-            uint32 fn_name = ast_data1(wchild)
-            // IR is the default for every slice. `--legacy` (emit_ir_mode==0)
-            // opts a release build back onto the direct-walking codegen if a
-            // downstream issue is ever traced to the IR path; the old codegen
-            // is kept intact for that reason.
-            if dce_is_live(fn_name) != 0 && decl_is_routed_win_import(wchild) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name, out_len)
-                    ir_init()
-                    ir_emit_x86_function(wchild)
-                } else {
-                    gen_function(wchild)
+        // Every compile_fat slice is a directly-executable artifact (ELF/
+        // Mach-O/PE/Android; fat mode has no --emit=obj/asm/ir/lkm variant), so
+        // pass 1 rather than deriving it from a mode number -- see
+        // refuse_unresolved_externs (codegen.kr) for what this refuses and why.
+        // Repeated after each of this function's 8 dce_scan calls, one per
+        // (OS, arch) slice, since each re-parses into its own fresh AST and
+        // extern_fn_table.
+        refuse_unresolved_externs(1)
+
+        // Generate x86_64 ELF into temp buffer.
+        // The per-slice buffer is allocated AFTER codegen (same pattern as the
+        // arm64 / pe / macho / android slices below) because the 1 MB upfront
+        // allocation the code used to make silently overflowed once the slice
+        // grew past that size — harmlessly on Linux (the overflow lands in
+        // mapped heap pages) but as a SIGSEGV on Windows, where VirtualAlloc
+        // leaves guard pages between reservations.
+
+        emit_elf_header()
+        emit_program_header(0)
+        uint64 text_start = codegen_output_len()
+
+        uint32 child = ast_child(root)
+        uint64 wchild = child
+        while wchild != 0 {
+            uint32 ck = ast_kind(wchild)
+            if ck == 2 {
+                uint32 fn_name = ast_data1(wchild)
+                // IR is the default for every slice. `--legacy` (emit_ir_mode==0)
+                // opts a release build back onto the direct-walking codegen if a
+                // downstream issue is ever traced to the IR path; the old codegen
+                // is kept intact for that reason.
+                if dce_is_live(fn_name) != 0 && decl_is_routed_win_import(wchild) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name, out_len)
+                        ir_init()
+                        ir_emit_x86_function(wchild)
+                    } else {
+                        gen_function(wchild)
+                    }
                 }
             }
+            uint32 nxt = ast_next(wchild)
+            wchild = nxt
         }
-        uint32 nxt = ast_next(wchild)
-        wchild = nxt
-    }
-    resolve_fixups()
-    resolve_fnaddr_fixups()
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups(data_start)
-    uint64 str_start = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups(str_start)
-    uint64 text_size = codegen_output_len() - text_start
-    uint64 entry_off = find_main_offset()
-    if entry_off == 0xFFFFFFFF {
-        write(2, "error: no 'main' function found\n", 32)
-        uint64 wmsg_3710 = "Every KernRift program needs: fn main() { ... }\n"
-        write(2, wmsg_3710, str_len(wmsg_3710))
-        exit(1)
-    }
-    uint64 entry_va = 0x400000 + entry_off
-    patch_u32(24, entry_va & 0xFFFFFFFF)
-    patch_u32(28, (entry_va >> 32) & 0xFFFFFFFF)
-    uint64 total_size_x86 = 120 + text_size
-    patch_u32(96, total_size_x86 & 0xFFFFFFFF)
-    patch_u32(100, (total_size_x86 >> 32) & 0xFFFFFFFF)
-    patch_u32(104, total_size_x86 & 0xFFFFFFFF)
-    patch_u32(108, (total_size_x86 >> 32) & 0xFFFFFFFF)
+        resolve_fixups()
+        resolve_fnaddr_fixups()
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups(data_start)
+        uint64 str_start = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups(str_start)
+        uint64 text_size = codegen_output_len() - text_start
+        uint64 entry_off = find_main_offset()
+        if entry_off == 0xFFFFFFFF {
+            write(2, "error: no 'main' function found\n", 32)
+            uint64 wmsg_3710 = "Every KernRift program needs: fn main() { ... }\n"
+            write(2, wmsg_3710, str_len(wmsg_3710))
+            fatal_exit()
+        }
+        uint64 entry_va = 0x400000 + entry_off
+        patch_u32(24, entry_va & 0xFFFFFFFF)
+        patch_u32(28, (entry_va >> 32) & 0xFFFFFFFF)
+        uint64 total_size_x86 = 120 + text_size
+        patch_u32(96, total_size_x86 & 0xFFFFFFFF)
+        patch_u32(100, (total_size_x86 >> 32) & 0xFFFFFFFF)
+        patch_u32(104, total_size_x86 & 0xFFFFFFFF)
+        patch_u32(108, (total_size_x86 >> 32) & 0xFFFFFFFF)
 
-    // Copy x86_64 output to temp buffer
-    x86_len = codegen_output_len()
-    uint64 x86_buf = cg_alloc(x86_len)
-    uint64 xi = 0
-    while xi < x86_len {
-        uint64 sp = out_buf + xi
-        uint64 dp = x86_buf + xi
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        xi = xi + 1
+        // Copy x86_64 output to temp buffer
+        x86_len = codegen_output_len()
+        x86_buf = cg_alloc(x86_len)
+        uint64 xi = 0
+        while xi < x86_len {
+            uint64 sp = out_buf + xi
+            uint64 dp = x86_buf + xi
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            xi = xi + 1
+        }
+        fat_slice_label = 0
     }
 
     // === Compile ARM64 ===
@@ -7445,70 +7527,76 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     uint64 root2 = parse_module()
     resolve_inferred_types(root2)
 
-    // Re-run DCE for fresh AST
-    inline_pass(root2)
-    dce_init()
-    dce_scan(root2)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 a64_len = 0
+    uint64 a64_buf = 0
+    if fat_slice_wanted(0, 1) != 0 {
+        fat_slice_label = "linux-arm64"
+        // Re-run DCE for fresh AST
+        inline_pass(root2)
+        dce_init()
+        dce_scan(root2)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    emit_elf_header_a64()
-    emit_program_header_a64(0)
-    uint64 text_start_a64 = codegen_output_len()
+        emit_elf_header_a64()
+        emit_program_header_a64(0)
+        uint64 text_start_a64 = codegen_output_len()
 
-    uint32 child2 = ast_child(root2)
-    uint64 wchild2 = child2
-    while wchild2 != 0 {
-        uint32 ck2 = ast_kind(wchild2)
-        if ck2 == 2 {
-            uint32 fn_name2 = ast_data1(wchild2)
-            if dce_is_live(fn_name2) != 0 && decl_is_routed_win_import(wchild2) == 0 {
-                // ARM64 slices go through IR by default (R1 is fixed — the
-                // IR ARM64 backend handles compile_fat itself correctly). The
-                // legacy path is retained behind `--legacy` as an explicit
-                // opt-out, not a silent fallback.
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name2, out_len)
-                    ir_init()
-                    ir_emit_arm64_function(wchild2)
-                } else {
-                    gen_function_a64(wchild2)
+        uint32 child2 = ast_child(root2)
+        uint64 wchild2 = child2
+        while wchild2 != 0 {
+            uint32 ck2 = ast_kind(wchild2)
+            if ck2 == 2 {
+                uint32 fn_name2 = ast_data1(wchild2)
+                if dce_is_live(fn_name2) != 0 && decl_is_routed_win_import(wchild2) == 0 {
+                    // ARM64 slices go through IR by default (R1 is fixed — the
+                    // IR ARM64 backend handles compile_fat itself correctly). The
+                    // legacy path is retained behind `--legacy` as an explicit
+                    // opt-out, not a silent fallback.
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name2, out_len)
+                        ir_init()
+                        ir_emit_arm64_function(wchild2)
+                    } else {
+                        gen_function_a64(wchild2)
+                    }
                 }
             }
+            uint32 nxt2 = ast_next(wchild2)
+            wchild2 = nxt2
         }
-        uint32 nxt2 = ast_next(wchild2)
-        wchild2 = nxt2
-    }
-    resolve_fixups_a64()
-    resolve_fnaddr_fixups_a64()
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start_a64 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups_a64(data_start_a64)
-    uint64 str_start_a64 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups_a64(str_start_a64)
-    uint64 text_size_a64 = codegen_output_len() - text_start_a64
-    uint64 entry_off_a64 = find_main_offset()
-    uint64 entry_va_a64 = 0x400000 + entry_off_a64
-    patch_u32(24, entry_va_a64 & 0xFFFFFFFF)
-    patch_u32(28, (entry_va_a64 >> 32) & 0xFFFFFFFF)
-    uint64 total_a64 = 120 + text_size_a64
-    patch_u32(96, total_a64 & 0xFFFFFFFF)
-    patch_u32(100, (total_a64 >> 32) & 0xFFFFFFFF)
-    patch_u32(104, total_a64 & 0xFFFFFFFF)
-    patch_u32(108, (total_a64 >> 32) & 0xFFFFFFFF)
+        resolve_fixups_a64()
+        resolve_fnaddr_fixups_a64()
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start_a64 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups_a64(data_start_a64)
+        uint64 str_start_a64 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups_a64(str_start_a64)
+        uint64 text_size_a64 = codegen_output_len() - text_start_a64
+        uint64 entry_off_a64 = find_main_offset()
+        uint64 entry_va_a64 = 0x400000 + entry_off_a64
+        patch_u32(24, entry_va_a64 & 0xFFFFFFFF)
+        patch_u32(28, (entry_va_a64 >> 32) & 0xFFFFFFFF)
+        uint64 total_a64 = 120 + text_size_a64
+        patch_u32(96, total_a64 & 0xFFFFFFFF)
+        patch_u32(100, (total_a64 >> 32) & 0xFFFFFFFF)
+        patch_u32(104, total_a64 & 0xFFFFFFFF)
+        patch_u32(108, (total_a64 >> 32) & 0xFFFFFFFF)
 
-    uint64 a64_len = codegen_output_len()
-    uint64 a64_buf = cg_alloc(a64_len)
-    uint64 ai = 0
-    while ai < a64_len {
-        uint64 sp = out_buf + ai
-        uint64 dp = a64_buf + ai
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        ai = ai + 1
+        a64_len = codegen_output_len()
+        a64_buf = cg_alloc(a64_len)
+        uint64 ai = 0
+        while ai < a64_len {
+            uint64 sp = out_buf + ai
+            uint64 dp = a64_buf + ai
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            ai = ai + 1
+        }
+        fat_slice_label = 0
     }
 
     // === Compile x86_64 PE (Windows) ===
@@ -7518,7 +7606,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     // #143 A12: this slice is a Windows PE -- record and write its unwind
     // tables (unless --test-no-unwind); cleared again after pe_finalize_x64.
     uw_emit_tables = 0
-    if uw_test_no_unwind == 0 { uw_emit_tables = 1 }
+    if uw_test_no_unwind == 0 && fat_slice_wanted(2, 0) != 0 { uw_emit_tables = 1 }
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -7526,62 +7614,68 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     asm_seen_reset()
     uint64 root3 = parse_module()
     resolve_inferred_types(root3)
-    inline_pass(root3)
-    dce_init()
-    dce_scan(root3)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 pe_x86_len = 0
+    uint64 pe_x86_buf = 0
+    if fat_slice_wanted(2, 0) != 0 {
+        fat_slice_label = "win-x64"
+        inline_pass(root3)
+        dce_init()
+        dce_scan(root3)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    uint64 header3 = emit_pe_headers_x64(0)
-    uint64 text_start3 = codegen_output_len()
+        uint64 header3 = emit_pe_headers_x64(0)
+        uint64 text_start3 = codegen_output_len()
 
-    uint32 child3 = ast_child(root3)
-    uint64 wchild3 = child3
-    while wchild3 != 0 {
-        uint32 ck3 = ast_kind(wchild3)
-        if ck3 == 2 {
-            uint32 fn_name3 = ast_data1(wchild3)
-            if dce_is_live(fn_name3) != 0 && decl_is_routed_win_import(wchild3) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name3, out_len)
-                    ir_init()
-                    ir_emit_x86_function(wchild3)
-                } else {
-                    gen_function(wchild3)
+        uint32 child3 = ast_child(root3)
+        uint64 wchild3 = child3
+        while wchild3 != 0 {
+            uint32 ck3 = ast_kind(wchild3)
+            if ck3 == 2 {
+                uint32 fn_name3 = ast_data1(wchild3)
+                if dce_is_live(fn_name3) != 0 && decl_is_routed_win_import(wchild3) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name3, out_len)
+                        ir_init()
+                        ir_emit_x86_function(wchild3)
+                    } else {
+                        gen_function(wchild3)
+                    }
                 }
             }
+            uint32 nxt3 = ast_next(wchild3)
+            wchild3 = nxt3
         }
-        uint32 nxt3 = ast_next(wchild3)
-        wchild3 = nxt3
-    }
-    resolve_fixups()
-    resolve_fnaddr_fixups()
-    uw_fn_end(codegen_output_len())     // #143 A12: end of code, before data (Mi1)
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start3 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups(data_start3)
-    uint64 str_start3 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups(str_start3)
-    uint64 text_size3 = codegen_output_len() - text_start3
+        resolve_fixups()
+        resolve_fnaddr_fixups()
+        uw_fn_end(codegen_output_len())     // #143 A12: end of code, before data (Mi1)
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start3 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups(data_start3)
+        uint64 str_start3 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups(str_start3)
+        uint64 text_size3 = codegen_output_len() - text_start3
 
-    pe_finalize_x64(header3, text_start3, text_size3)
-    if uw_test_listing_path != 0 {
-        uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-x64"), 0, text_start3, source)
-    }
-    uw_emit_tables = 0
+        pe_finalize_x64(header3, text_start3, text_size3)
+        if uw_test_listing_path != 0 {
+            uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-x64"), 0, text_start3, source)
+        }
+        uw_emit_tables = 0
 
-    uint64 pe_x86_len = codegen_output_len()
-    uint64 pe_x86_buf = cg_alloc(pe_x86_len)
-    uint64 pxi = 0
-    while pxi < pe_x86_len {
-        uint64 sp = out_buf + pxi
-        uint64 dp = pe_x86_buf + pxi
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        pxi = pxi + 1
+        pe_x86_len = codegen_output_len()
+        pe_x86_buf = cg_alloc(pe_x86_len)
+        uint64 pxi = 0
+        while pxi < pe_x86_len {
+            uint64 sp = out_buf + pxi
+            uint64 dp = pe_x86_buf + pxi
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            pxi = pxi + 1
+        }
+        fat_slice_label = 0
     }
 
     // === Compile ARM64 PE (Windows) ===
@@ -7590,7 +7684,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     uw_reset()
     // #143 A12: the arm64 Windows slice records and writes its tables too.
     uw_emit_tables = 0
-    if uw_test_no_unwind == 0 { uw_emit_tables = 1 }
+    if uw_test_no_unwind == 0 && fat_slice_wanted(2, 1) != 0 { uw_emit_tables = 1 }
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -7598,62 +7692,68 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     asm_seen_reset()
     uint64 root4 = parse_module()
     resolve_inferred_types(root4)
-    inline_pass(root4)
-    dce_init()
-    dce_scan(root4)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 pe_a64_len = 0
+    uint64 pe_a64_buf = 0
+    if fat_slice_wanted(2, 1) != 0 {
+        fat_slice_label = "win-arm64"
+        inline_pass(root4)
+        dce_init()
+        dce_scan(root4)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    uint64 header4 = emit_pe_headers_a64(0)
-    uint64 text_start4 = codegen_output_len()
+        uint64 header4 = emit_pe_headers_a64(0)
+        uint64 text_start4 = codegen_output_len()
 
-    uint32 child4 = ast_child(root4)
-    uint64 wchild4 = child4
-    while wchild4 != 0 {
-        uint32 ck4 = ast_kind(wchild4)
-        if ck4 == 2 {
-            uint32 fn_name4 = ast_data1(wchild4)
-            if dce_is_live(fn_name4) != 0 && decl_is_routed_win_import(wchild4) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name4, out_len)
-                    ir_init()
-                    ir_emit_arm64_function(wchild4)
-                } else {
-                    gen_function_a64(wchild4)
+        uint32 child4 = ast_child(root4)
+        uint64 wchild4 = child4
+        while wchild4 != 0 {
+            uint32 ck4 = ast_kind(wchild4)
+            if ck4 == 2 {
+                uint32 fn_name4 = ast_data1(wchild4)
+                if dce_is_live(fn_name4) != 0 && decl_is_routed_win_import(wchild4) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name4, out_len)
+                        ir_init()
+                        ir_emit_arm64_function(wchild4)
+                    } else {
+                        gen_function_a64(wchild4)
+                    }
                 }
             }
+            uint32 nxt4 = ast_next(wchild4)
+            wchild4 = nxt4
         }
-        uint32 nxt4 = ast_next(wchild4)
-        wchild4 = nxt4
-    }
-    resolve_fixups_a64()
-    resolve_fnaddr_fixups_a64()
-    uw_fn_end(codegen_output_len())     // #143 A12: end of code (Mi1)
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start4 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups_a64(data_start4)
-    uint64 str_start4 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups_a64(str_start4)
-    uint64 text_size4 = codegen_output_len() - text_start4
+        resolve_fixups_a64()
+        resolve_fnaddr_fixups_a64()
+        uw_fn_end(codegen_output_len())     // #143 A12: end of code (Mi1)
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start4 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups_a64(data_start4)
+        uint64 str_start4 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups_a64(str_start4)
+        uint64 text_size4 = codegen_output_len() - text_start4
 
-    pe_finalize_a64(header4, text_start4, text_size4)
-    if uw_test_listing_path != 0 {
-        uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-arm64"), 1, text_start4, source)
-    }
-    uw_emit_tables = 0
+        pe_finalize_a64(header4, text_start4, text_size4)
+        if uw_test_listing_path != 0 {
+            uw_maybe_write_listing(uw_suffixed_path(uw_test_listing_path, ".win-arm64"), 1, text_start4, source)
+        }
+        uw_emit_tables = 0
 
-    uint64 pe_a64_len = codegen_output_len()
-    uint64 pe_a64_buf = cg_alloc(pe_a64_len)
-    uint64 pai = 0
-    while pai < pe_a64_len {
-        uint64 sp = out_buf + pai
-        uint64 dp = pe_a64_buf + pai
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        pai = pai + 1
+        pe_a64_len = codegen_output_len()
+        pe_a64_buf = cg_alloc(pe_a64_len)
+        uint64 pai = 0
+        while pai < pe_a64_len {
+            uint64 sp = out_buf + pai
+            uint64 dp = pe_a64_buf + pai
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            pai = pai + 1
+        }
+        fat_slice_label = 0
     }
 
     // === Compile x86_64 Mach-O (macOS) ===
@@ -7666,67 +7766,73 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     asm_seen_reset()
     uint64 root5 = parse_module()
     resolve_inferred_types(root5)
-    inline_pass(root5)
-    dce_init()
-    dce_scan(root5)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 macho_x86_len = 0
+    uint64 macho_x86_buf = 0
+    if fat_slice_wanted(1, 0) != 0 {
+        fat_slice_label = "mac-x64"
+        inline_pass(root5)
+        dce_init()
+        dce_scan(root5)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    uint64 header5 = emit_macho_headers_x64(0)
-    uint64 text_start5 = codegen_output_len()
+        uint64 header5 = emit_macho_headers_x64(0)
+        uint64 text_start5 = codegen_output_len()
 
-    uint32 child5 = ast_child(root5)
-    uint64 wchild5 = child5
-    while wchild5 != 0 {
-        uint32 ck5 = ast_kind(wchild5)
-        if ck5 == 2 {
-            uint32 fn_name5 = ast_data1(wchild5)
-            if dce_is_live(fn_name5) != 0 && decl_is_routed_win_import(wchild5) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name5, out_len)
-                    ir_init()
-                    ir_emit_x86_function(wchild5)
-                } else {
-                    gen_function(wchild5)
+        uint32 child5 = ast_child(root5)
+        uint64 wchild5 = child5
+        while wchild5 != 0 {
+            uint32 ck5 = ast_kind(wchild5)
+            if ck5 == 2 {
+                uint32 fn_name5 = ast_data1(wchild5)
+                if dce_is_live(fn_name5) != 0 && decl_is_routed_win_import(wchild5) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name5, out_len)
+                        ir_init()
+                        ir_emit_x86_function(wchild5)
+                    } else {
+                        gen_function(wchild5)
+                    }
                 }
             }
+            uint32 nxt5 = ast_next(wchild5)
+            wchild5 = nxt5
         }
-        uint32 nxt5 = ast_next(wchild5)
-        wchild5 = nxt5
-    }
-    resolve_fixups()
-    resolve_fnaddr_fixups()
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start5 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups(data_start5)
-    uint64 str_start5 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups(str_start5)
+        resolve_fixups()
+        resolve_fnaddr_fixups()
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start5 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups(data_start5)
+        uint64 str_start5 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups(str_start5)
 
-    // Mach-O patching: page-align, patch __TEXT vmsize/filesize and entry point
-    uint64 total_file5 = codegen_output_len()
-    uint64 total_aligned5 = (total_file5 + 4095) & ~4095
-    while codegen_output_len() < total_aligned5 { emit_byte(0) }
-    patch_u32(136, total_aligned5 & 0xFFFFFFFF)
-    patch_u32(140, (total_aligned5 >> 32) & 0xFFFFFFFF)
-    patch_u32(152, total_aligned5 & 0xFFFFFFFF)
-    patch_u32(156, (total_aligned5 >> 32) & 0xFFFFFFFF)
-    uint64 main_off5 = find_main_offset()
-    uint64 entry_va5 = 0x100000000 + main_off5
-    patch_u32(320, entry_va5 & 0xFFFFFFFF)
-    patch_u32(324, (entry_va5 >> 32) & 0xFFFFFFFF)
+        // Mach-O patching: page-align, patch __TEXT vmsize/filesize and entry point
+        uint64 total_file5 = codegen_output_len()
+        uint64 total_aligned5 = (total_file5 + 4095) & ~4095
+        while codegen_output_len() < total_aligned5 { emit_byte(0) }
+        patch_u32(136, total_aligned5 & 0xFFFFFFFF)
+        patch_u32(140, (total_aligned5 >> 32) & 0xFFFFFFFF)
+        patch_u32(152, total_aligned5 & 0xFFFFFFFF)
+        patch_u32(156, (total_aligned5 >> 32) & 0xFFFFFFFF)
+        uint64 main_off5 = find_main_offset()
+        uint64 entry_va5 = 0x100000000 + main_off5
+        patch_u32(320, entry_va5 & 0xFFFFFFFF)
+        patch_u32(324, (entry_va5 >> 32) & 0xFFFFFFFF)
 
-    uint64 macho_x86_len = codegen_output_len()
-    uint64 macho_x86_buf = cg_alloc(macho_x86_len)
-    uint64 mxi = 0
-    while mxi < macho_x86_len {
-        uint64 sp = out_buf + mxi
-        uint64 dp = macho_x86_buf + mxi
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        mxi = mxi + 1
+        macho_x86_len = codegen_output_len()
+        macho_x86_buf = cg_alloc(macho_x86_len)
+        uint64 mxi = 0
+        while mxi < macho_x86_len {
+            uint64 sp = out_buf + mxi
+            uint64 dp = macho_x86_buf + mxi
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            mxi = mxi + 1
+        }
+        fat_slice_label = 0
     }
     // === Compile ARM64 Mach-O (macOS) ===
     set_target_arch(1)
@@ -7738,102 +7844,108 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     asm_seen_reset()
     uint64 root6 = parse_module()
     resolve_inferred_types(root6)
-    inline_pass(root6)
-    dce_init()
-    dce_scan(root6)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 macho_a64_len = 0
+    uint64 macho_a64_buf = 0
+    if fat_slice_wanted(1, 1) != 0 {
+        fat_slice_label = "mac-arm64"
+        inline_pass(root6)
+        dce_init()
+        dce_scan(root6)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    uint64 header6 = emit_macho_headers_a64(0)
-    uint64 text_start6 = codegen_output_len()
+        uint64 header6 = emit_macho_headers_a64(0)
+        uint64 text_start6 = codegen_output_len()
 
-    uint32 child6 = ast_child(root6)
-    uint64 wchild6 = child6
-    while wchild6 != 0 {
-        uint32 ck6 = ast_kind(wchild6)
-        if ck6 == 2 {
-            uint32 fn_name6 = ast_data1(wchild6)
-            if dce_is_live(fn_name6) != 0 && decl_is_routed_win_import(wchild6) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name6, out_len)
-                    ir_init()
-                    ir_emit_arm64_function(wchild6)
-                } else {
-                    gen_function_a64(wchild6)
+        uint32 child6 = ast_child(root6)
+        uint64 wchild6 = child6
+        while wchild6 != 0 {
+            uint32 ck6 = ast_kind(wchild6)
+            if ck6 == 2 {
+                uint32 fn_name6 = ast_data1(wchild6)
+                if dce_is_live(fn_name6) != 0 && decl_is_routed_win_import(wchild6) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name6, out_len)
+                        ir_init()
+                        ir_emit_arm64_function(wchild6)
+                    } else {
+                        gen_function_a64(wchild6)
+                    }
                 }
             }
+            uint32 nxt6 = ast_next(wchild6)
+            wchild6 = nxt6
         }
-        uint32 nxt6 = ast_next(wchild6)
-        wchild6 = nxt6
-    }
-    resolve_fixups_a64()
-    resolve_fnaddr_fixups_a64()
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start6 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups_a64(data_start6)
-    uint64 str_start6 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups_a64(str_start6)
+        resolve_fixups_a64()
+        resolve_fnaddr_fixups_a64()
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start6 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups_a64(data_start6)
+        uint64 str_start6 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups_a64(str_start6)
 
-    // Mach-O ARM64: separate __TEXT (RX) + __DATA (RW)
-    uint64 total_file6 = codegen_output_len()
-    uint64 total_aligned6 = (total_file6 + 16383) & ~16383
-    while codegen_output_len() < total_aligned6 { emit_byte(0) }
-    // Emit __DATA segment
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 dfoff6 = codegen_output_len()
-    emit_static_data()
-    uint64 draw6 = codegen_output_len() - dfoff6
-    uint64 dal6 = (draw6 + 16383) & ~16383
-    if dal6 == 0 { dal6 = 16384 }
-    while codegen_output_len() < dfoff6 + dal6 { emit_byte(0) }
-    resolve_static_fixups_a64(dfoff6)
-    patch_u32(136, total_aligned6 & 0xFFFFFFFF)
-    patch_u32(140, (total_aligned6 >> 32) & 0xFFFFFFFF)
-    patch_u32(152, total_aligned6 & 0xFFFFFFFF)
-    patch_u32(156, (total_aligned6 >> 32) & 0xFFFFFFFF)
-    // __text section size at offset 216
-    uint64 textsz6 = total_aligned6 - 16384
-    patch_u32(216, textsz6 & 0xFFFFFFFF)
-    patch_u32(220, (textsz6 >> 32) & 0xFFFFFFFF)
-    uint64 dva6 = 0x100000000 + total_aligned6
-    patch_u32(280, dva6 & 0xFFFFFFFF)
-    patch_u32(284, (dva6 >> 32) & 0xFFFFFFFF)
-    patch_u32(288, dal6 & 0xFFFFFFFF)
-    patch_u32(292, (dal6 >> 32) & 0xFFFFFFFF)
-    patch_u32(296, total_aligned6 & 0xFFFFFFFF)
-    patch_u32(300, (total_aligned6 >> 32) & 0xFFFFFFFF)
-    patch_u32(304, dal6 & 0xFFFFFFFF)
-    patch_u32(308, (dal6 >> 32) & 0xFFFFFFFF)
-    // __LINKEDIT: chained fixups + symtab + strtab via helper
-    uint64 lva6 = dva6 + dal6
-    uint64 lfoff6 = dfoff6 + dal6
-    uint64 main_off6 = find_main_offset()
-    emit_macho_linkedit_a64(lfoff6, main_off6)
-    uint64 lraw6 = codegen_output_len() - lfoff6
-    uint64 lsize6 = (lraw6 + 16383) & ~16383
-    if lsize6 == 0 { lsize6 = 16384 }
-    while codegen_output_len() < lfoff6 + lsize6 { emit_byte(0) }
-    patch_u32(352, lva6 & 0xFFFFFFFF)
-    patch_u32(356, (lva6 >> 32) & 0xFFFFFFFF)
-    patch_u32(360, lsize6 & 0xFFFFFFFF)
-    patch_u32(364, (lsize6 >> 32) & 0xFFFFFFFF)
-    patch_u32(368, lfoff6 & 0xFFFFFFFF)
-    patch_u32(372, (lfoff6 >> 32) & 0xFFFFFFFF)
-    patch_u32(376, lraw6 & 0xFFFFFFFF)
-    patch_u32(380, (lraw6 >> 32) & 0xFFFFFFFF)
+        // Mach-O ARM64: separate __TEXT (RX) + __DATA (RW)
+        uint64 total_file6 = codegen_output_len()
+        uint64 total_aligned6 = (total_file6 + 16383) & ~16383
+        while codegen_output_len() < total_aligned6 { emit_byte(0) }
+        // Emit __DATA segment
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 dfoff6 = codegen_output_len()
+        emit_static_data()
+        uint64 draw6 = codegen_output_len() - dfoff6
+        uint64 dal6 = (draw6 + 16383) & ~16383
+        if dal6 == 0 { dal6 = 16384 }
+        while codegen_output_len() < dfoff6 + dal6 { emit_byte(0) }
+        resolve_static_fixups_a64(dfoff6)
+        patch_u32(136, total_aligned6 & 0xFFFFFFFF)
+        patch_u32(140, (total_aligned6 >> 32) & 0xFFFFFFFF)
+        patch_u32(152, total_aligned6 & 0xFFFFFFFF)
+        patch_u32(156, (total_aligned6 >> 32) & 0xFFFFFFFF)
+        // __text section size at offset 216
+        uint64 textsz6 = total_aligned6 - 16384
+        patch_u32(216, textsz6 & 0xFFFFFFFF)
+        patch_u32(220, (textsz6 >> 32) & 0xFFFFFFFF)
+        uint64 dva6 = 0x100000000 + total_aligned6
+        patch_u32(280, dva6 & 0xFFFFFFFF)
+        patch_u32(284, (dva6 >> 32) & 0xFFFFFFFF)
+        patch_u32(288, dal6 & 0xFFFFFFFF)
+        patch_u32(292, (dal6 >> 32) & 0xFFFFFFFF)
+        patch_u32(296, total_aligned6 & 0xFFFFFFFF)
+        patch_u32(300, (total_aligned6 >> 32) & 0xFFFFFFFF)
+        patch_u32(304, dal6 & 0xFFFFFFFF)
+        patch_u32(308, (dal6 >> 32) & 0xFFFFFFFF)
+        // __LINKEDIT: chained fixups + symtab + strtab via helper
+        uint64 lva6 = dva6 + dal6
+        uint64 lfoff6 = dfoff6 + dal6
+        uint64 main_off6 = find_main_offset()
+        emit_macho_linkedit_a64(lfoff6, main_off6)
+        uint64 lraw6 = codegen_output_len() - lfoff6
+        uint64 lsize6 = (lraw6 + 16383) & ~16383
+        if lsize6 == 0 { lsize6 = 16384 }
+        while codegen_output_len() < lfoff6 + lsize6 { emit_byte(0) }
+        patch_u32(352, lva6 & 0xFFFFFFFF)
+        patch_u32(356, (lva6 >> 32) & 0xFFFFFFFF)
+        patch_u32(360, lsize6 & 0xFFFFFFFF)
+        patch_u32(364, (lsize6 >> 32) & 0xFFFFFFFF)
+        patch_u32(368, lfoff6 & 0xFFFFFFFF)
+        patch_u32(372, (lfoff6 >> 32) & 0xFFFFFFFF)
+        patch_u32(376, lraw6 & 0xFFFFFFFF)
+        patch_u32(380, (lraw6 >> 32) & 0xFFFFFFFF)
 
-    uint64 macho_a64_len = codegen_output_len()
-    uint64 macho_a64_buf = cg_alloc(macho_a64_len)
-    uint64 mai = 0
-    while mai < macho_a64_len {
-        uint64 sp = out_buf + mai
-        uint64 dp = macho_a64_buf + mai
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        mai = mai + 1
+        macho_a64_len = codegen_output_len()
+        macho_a64_buf = cg_alloc(macho_a64_len)
+        uint64 mai = 0
+        while mai < macho_a64_len {
+            uint64 sp = out_buf + mai
+            uint64 dp = macho_a64_buf + mai
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            mai = mai + 1
+        }
+        fat_slice_label = 0
     }
     // === Compile x86_64 Android PIE ELF ===
     set_target_arch(0)
@@ -7845,85 +7957,91 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     asm_seen_reset()
     uint64 root8 = parse_module()
     resolve_inferred_types(root8)
-    inline_pass(root8)
-    dce_init()
-    dce_scan(root8)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 androidx_len = 0
+    uint64 androidx_buf = 0
+    if fat_slice_wanted(3, 0) != 0 {
+        fat_slice_label = "android-x64"
+        inline_pass(root8)
+        dce_init()
+        dce_scan(root8)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    emit_elf_header_android_x86_64()
-    uint64 text_start8 = codegen_output_len()
+        emit_elf_header_android_x86_64()
+        uint64 text_start8 = codegen_output_len()
 
-    uint32 child8 = ast_child(root8)
-    uint64 wchild8 = child8
-    while wchild8 != 0 {
-        uint32 ck8 = ast_kind(wchild8)
-        if ck8 == 2 {
-            uint32 fn_name8 = ast_data1(wchild8)
-            if dce_is_live(fn_name8) != 0 && decl_is_routed_win_import(wchild8) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name8, out_len)
-                    ir_init()
-                    ir_emit_x86_function(wchild8)
-                } else {
-                    gen_function(wchild8)
+        uint32 child8 = ast_child(root8)
+        uint64 wchild8 = child8
+        while wchild8 != 0 {
+            uint32 ck8 = ast_kind(wchild8)
+            if ck8 == 2 {
+                uint32 fn_name8 = ast_data1(wchild8)
+                if dce_is_live(fn_name8) != 0 && decl_is_routed_win_import(wchild8) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name8, out_len)
+                        ir_init()
+                        ir_emit_x86_function(wchild8)
+                    } else {
+                        gen_function(wchild8)
+                    }
                 }
             }
+            uint32 nxt8 = ast_next(wchild8)
+            wchild8 = nxt8
         }
-        uint32 nxt8 = ast_next(wchild8)
-        wchild8 = nxt8
-    }
-    resolve_fixups()
-    resolve_fnaddr_fixups()
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start8 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups(data_start8)
-    uint64 str_start8 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups(str_start8)
+        resolve_fixups()
+        resolve_fnaddr_fixups()
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start8 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups(data_start8)
+        uint64 str_start8 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups(str_start8)
 
-    // Android PIE ELF: separate RX code + RW data segments
-    uint64 androidx_entry = find_main_offset()
-    patch_u32(24, androidx_entry & 0xFFFFFFFF)
-    patch_u32(28, (androidx_entry >> 32) & 0xFFFFFFFF)
-    uint64 androidx_rx = codegen_output_len()
-    patch_u32(208, androidx_rx & 0xFFFFFFFF)
-    patch_u32(212, (androidx_rx >> 32) & 0xFFFFFFFF)
-    patch_u32(216, androidx_rx & 0xFFFFFFFF)
-    patch_u32(220, (androidx_rx >> 32) & 0xFFFFFFFF)
-    uint64 androidx_rx_aligned = (androidx_rx + 0xFFFF) & ~0xFFFF
-    while codegen_output_len() < androidx_rx_aligned { emit_byte(0) }
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 ax_dfoff = codegen_output_len()
-    emit_static_data()
-    uint64 ax_draw = codegen_output_len() - ax_dfoff
-    uint64 ax_dal = (ax_draw + 0xFFFF) & ~0xFFFF
-    if ax_dal == 0 { ax_dal = 0x10000 }
-    while codegen_output_len() < ax_dfoff + ax_dal { emit_byte(0) }
-    resolve_static_fixups(ax_dfoff)
-    patch_u32(296, ax_dfoff & 0xFFFFFFFF)
-    patch_u32(300, (ax_dfoff >> 32) & 0xFFFFFFFF)
-    patch_u32(304, androidx_rx_aligned & 0xFFFFFFFF)
-    patch_u32(308, (androidx_rx_aligned >> 32) & 0xFFFFFFFF)
-    patch_u32(312, androidx_rx_aligned & 0xFFFFFFFF)
-    patch_u32(316, (androidx_rx_aligned >> 32) & 0xFFFFFFFF)
-    patch_u32(320, ax_draw & 0xFFFFFFFF)
-    patch_u32(324, (ax_draw >> 32) & 0xFFFFFFFF)
-    // p_memsz = page-aligned size: bionic SIGBUSes on p_memsz=0.
-    patch_u32(328, ax_dal & 0xFFFFFFFF)
-    patch_u32(332, (ax_dal >> 32) & 0xFFFFFFFF)
+        // Android PIE ELF: separate RX code + RW data segments
+        uint64 androidx_entry = find_main_offset()
+        patch_u32(24, androidx_entry & 0xFFFFFFFF)
+        patch_u32(28, (androidx_entry >> 32) & 0xFFFFFFFF)
+        uint64 androidx_rx = codegen_output_len()
+        patch_u32(208, androidx_rx & 0xFFFFFFFF)
+        patch_u32(212, (androidx_rx >> 32) & 0xFFFFFFFF)
+        patch_u32(216, androidx_rx & 0xFFFFFFFF)
+        patch_u32(220, (androidx_rx >> 32) & 0xFFFFFFFF)
+        uint64 androidx_rx_aligned = (androidx_rx + 0xFFFF) & ~0xFFFF
+        while codegen_output_len() < androidx_rx_aligned { emit_byte(0) }
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 ax_dfoff = codegen_output_len()
+        emit_static_data()
+        uint64 ax_draw = codegen_output_len() - ax_dfoff
+        uint64 ax_dal = (ax_draw + 0xFFFF) & ~0xFFFF
+        if ax_dal == 0 { ax_dal = 0x10000 }
+        while codegen_output_len() < ax_dfoff + ax_dal { emit_byte(0) }
+        resolve_static_fixups(ax_dfoff)
+        patch_u32(296, ax_dfoff & 0xFFFFFFFF)
+        patch_u32(300, (ax_dfoff >> 32) & 0xFFFFFFFF)
+        patch_u32(304, androidx_rx_aligned & 0xFFFFFFFF)
+        patch_u32(308, (androidx_rx_aligned >> 32) & 0xFFFFFFFF)
+        patch_u32(312, androidx_rx_aligned & 0xFFFFFFFF)
+        patch_u32(316, (androidx_rx_aligned >> 32) & 0xFFFFFFFF)
+        patch_u32(320, ax_draw & 0xFFFFFFFF)
+        patch_u32(324, (ax_draw >> 32) & 0xFFFFFFFF)
+        // p_memsz = page-aligned size: bionic SIGBUSes on p_memsz=0.
+        patch_u32(328, ax_dal & 0xFFFFFFFF)
+        patch_u32(332, (ax_dal >> 32) & 0xFFFFFFFF)
 
-    uint64 androidx_len = codegen_output_len()
-    uint64 androidx_buf = cg_alloc(androidx_len)
-    uint64 axi = 0
-    while axi < androidx_len {
-        uint64 sp = out_buf + axi
-        uint64 dp = androidx_buf + axi
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        axi = axi + 1
+        androidx_len = codegen_output_len()
+        androidx_buf = cg_alloc(androidx_len)
+        uint64 axi = 0
+        while axi < androidx_len {
+            uint64 sp = out_buf + axi
+            uint64 dp = androidx_buf + axi
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            axi = axi + 1
+        }
+        fat_slice_label = 0
     }
 
     // === Compile ARM64 Android PIE ELF ===
@@ -7936,93 +8054,99 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     asm_seen_reset()
     uint64 root7 = parse_module()
     resolve_inferred_types(root7)
-    inline_pass(root7)
-    dce_init()
-    dce_scan(root7)
-    refuse_unresolved_externs(1)  // see the compile_fat comment above
+    uint64 android_len = 0
+    uint64 android_buf = 0
+    if fat_slice_wanted(3, 1) != 0 {
+        fat_slice_label = "android-arm64"
+        inline_pass(root7)
+        dce_init()
+        dce_scan(root7)
+        refuse_unresolved_externs(1)  // see the compile_fat comment above
 
-    emit_elf_header_android_a64()
-    uint64 text_start7 = codegen_output_len()
+        emit_elf_header_android_a64()
+        uint64 text_start7 = codegen_output_len()
 
-    uint32 child7 = ast_child(root7)
-    uint64 wchild7 = child7
-    while wchild7 != 0 {
-        uint32 ck7 = ast_kind(wchild7)
-        if ck7 == 2 {
-            uint32 fn_name7 = ast_data1(wchild7)
-            if dce_is_live(fn_name7) != 0 && decl_is_routed_win_import(wchild7) == 0 {
-                if emit_ir_mode != 0 {
-                    fn_register(fn_name7, out_len)
-                    ir_init()
-                    ir_emit_arm64_function(wchild7)
-                } else {
-                    gen_function_a64(wchild7)
+        uint32 child7 = ast_child(root7)
+        uint64 wchild7 = child7
+        while wchild7 != 0 {
+            uint32 ck7 = ast_kind(wchild7)
+            if ck7 == 2 {
+                uint32 fn_name7 = ast_data1(wchild7)
+                if dce_is_live(fn_name7) != 0 && decl_is_routed_win_import(wchild7) == 0 {
+                    if emit_ir_mode != 0 {
+                        fn_register(fn_name7, out_len)
+                        ir_init()
+                        ir_emit_arm64_function(wchild7)
+                    } else {
+                        gen_function_a64(wchild7)
+                    }
                 }
             }
+            uint32 nxt7 = ast_next(wchild7)
+            wchild7 = nxt7
         }
-        uint32 nxt7 = ast_next(wchild7)
-        wchild7 = nxt7
-    }
-    resolve_fixups_a64()
-    resolve_fnaddr_fixups_a64()
-    // Align to 8 bytes on arm64 (matches direct compile() path) so static
-    // data LDR (imm12 scaled by 8) can encode any slot offset exactly.
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 data_start7 = codegen_output_len()
-    emit_static_data()
-    resolve_static_fixups_a64(data_start7)
-    uint64 str_start7 = codegen_output_len()
-    emit_string_data()
-    resolve_string_fixups_a64(str_start7)
+        resolve_fixups_a64()
+        resolve_fnaddr_fixups_a64()
+        // Align to 8 bytes on arm64 (matches direct compile() path) so static
+        // data LDR (imm12 scaled by 8) can encode any slot offset exactly.
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 data_start7 = codegen_output_len()
+        emit_static_data()
+        resolve_static_fixups_a64(data_start7)
+        uint64 str_start7 = codegen_output_len()
+        emit_string_data()
+        resolve_string_fixups_a64(str_start7)
 
-    // Android PIE ELF: separate RX code + RW data segments
-    uint64 android_entry = find_main_offset()
-    patch_u32(24, android_entry & 0xFFFFFFFF)
-    patch_u32(28, (android_entry >> 32) & 0xFFFFFFFF)
-    // PT_LOAD RX: code + strings only
-    uint64 android_rx = codegen_output_len()
-    patch_u32(208, android_rx & 0xFFFFFFFF)
-    patch_u32(212, (android_rx >> 32) & 0xFFFFFFFF)
-    patch_u32(216, android_rx & 0xFFFFFFFF)
-    patch_u32(220, (android_rx >> 32) & 0xFFFFFFFF)
-    // Pad to 64KB page boundary for PT_LOAD RW
-    uint64 android_rx_aligned = (android_rx + 0xFFFF) & ~0xFFFF
-    while codegen_output_len() < android_rx_aligned { emit_byte(0) }
-    // Emit data segment (statics)
-    while (codegen_output_len() & 7) != 0 { emit_byte(0) }
-    uint64 a7_dfoff = codegen_output_len()
-    emit_static_data()
-    uint64 a7_draw = codegen_output_len() - a7_dfoff
-    uint64 a7_dal = (a7_draw + 0xFFFF) & ~0xFFFF
-    if a7_dal == 0 { a7_dal = 0x10000 }
-    while codegen_output_len() < a7_dfoff + a7_dal { emit_byte(0) }
-    // Re-resolve static fixups to point into RW segment
-    resolve_static_fixups_a64(a7_dfoff)
-    // Patch PT_LOAD RW @288
-    patch_u32(296, a7_dfoff & 0xFFFFFFFF)
-    patch_u32(300, (a7_dfoff >> 32) & 0xFFFFFFFF)
-    patch_u32(304, android_rx_aligned & 0xFFFFFFFF)
-    patch_u32(308, (android_rx_aligned >> 32) & 0xFFFFFFFF)
-    patch_u32(312, android_rx_aligned & 0xFFFFFFFF)
-    patch_u32(316, (android_rx_aligned >> 32) & 0xFFFFFFFF)
-    patch_u32(320, a7_draw & 0xFFFFFFFF)
-    patch_u32(324, (a7_draw >> 32) & 0xFFFFFFFF)
-    // p_memsz = page-aligned size: bionic SIGBUSes on p_memsz=0.
-    patch_u32(328, a7_dal & 0xFFFFFFFF)
-    patch_u32(332, (a7_dal >> 32) & 0xFFFFFFFF)
+        // Android PIE ELF: separate RX code + RW data segments
+        uint64 android_entry = find_main_offset()
+        patch_u32(24, android_entry & 0xFFFFFFFF)
+        patch_u32(28, (android_entry >> 32) & 0xFFFFFFFF)
+        // PT_LOAD RX: code + strings only
+        uint64 android_rx = codegen_output_len()
+        patch_u32(208, android_rx & 0xFFFFFFFF)
+        patch_u32(212, (android_rx >> 32) & 0xFFFFFFFF)
+        patch_u32(216, android_rx & 0xFFFFFFFF)
+        patch_u32(220, (android_rx >> 32) & 0xFFFFFFFF)
+        // Pad to 64KB page boundary for PT_LOAD RW
+        uint64 android_rx_aligned = (android_rx + 0xFFFF) & ~0xFFFF
+        while codegen_output_len() < android_rx_aligned { emit_byte(0) }
+        // Emit data segment (statics)
+        while (codegen_output_len() & 7) != 0 { emit_byte(0) }
+        uint64 a7_dfoff = codegen_output_len()
+        emit_static_data()
+        uint64 a7_draw = codegen_output_len() - a7_dfoff
+        uint64 a7_dal = (a7_draw + 0xFFFF) & ~0xFFFF
+        if a7_dal == 0 { a7_dal = 0x10000 }
+        while codegen_output_len() < a7_dfoff + a7_dal { emit_byte(0) }
+        // Re-resolve static fixups to point into RW segment
+        resolve_static_fixups_a64(a7_dfoff)
+        // Patch PT_LOAD RW @288
+        patch_u32(296, a7_dfoff & 0xFFFFFFFF)
+        patch_u32(300, (a7_dfoff >> 32) & 0xFFFFFFFF)
+        patch_u32(304, android_rx_aligned & 0xFFFFFFFF)
+        patch_u32(308, (android_rx_aligned >> 32) & 0xFFFFFFFF)
+        patch_u32(312, android_rx_aligned & 0xFFFFFFFF)
+        patch_u32(316, (android_rx_aligned >> 32) & 0xFFFFFFFF)
+        patch_u32(320, a7_draw & 0xFFFFFFFF)
+        patch_u32(324, (a7_draw >> 32) & 0xFFFFFFFF)
+        // p_memsz = page-aligned size: bionic SIGBUSes on p_memsz=0.
+        patch_u32(328, a7_dal & 0xFFFFFFFF)
+        patch_u32(332, (a7_dal >> 32) & 0xFFFFFFFF)
 
-    uint64 android_len = codegen_output_len()
-    uint64 android_buf = cg_alloc(android_len)
-    uint64 adi = 0
-    while adi < android_len {
-        uint64 sp = out_buf + adi
-        uint64 dp = android_buf + adi
-        uint64 bv = 0
-        unsafe { *(sp as uint8) -> bv }
-        uint8 bb = bv
-        unsafe { *(dp as uint8) = bb }
-        adi = adi + 1
+        android_len = codegen_output_len()
+        android_buf = cg_alloc(android_len)
+        uint64 adi = 0
+        while adi < android_len {
+            uint64 sp = out_buf + adi
+            uint64 dp = android_buf + adi
+            uint64 bv = 0
+            unsafe { *(sp as uint8) -> bv }
+            uint8 bb = bv
+            unsafe { *(dp as uint8) = bb }
+            adi = adi + 1
+        }
+        fat_slice_label = 0
     }
 
     // Reset target_os for fat binary emission
@@ -8556,7 +8680,7 @@ fn parse_reloc_limit_arg(uint64 s) -> uint64 {
     if n == 0 || n > 6 || c != 0 || val > 0xFFFF {
         uint64 m = "error: --test-coff-reloc-limit= takes a decimal number from 0 to 65535\n"
         write(2, m, str_len(m))
-        exit(1)
+        fatal_exit()
     }
     return val
 }
@@ -8643,7 +8767,7 @@ fn arch_os_pair_supported(uint64 arch, uint64 os) -> uint64 {
 fn load_addr_die() {
     uint64 la_bad = "error: --load-addr= wants a decimal or 0x-prefixed hex address\n"
     write(2, la_bad, str_len(la_bad))
-    exit(1)
+    fatal_exit()
 }
 
 // --load-addr= value: plain decimal or 0x/0X-prefixed hex. Anything else —
@@ -8693,7 +8817,7 @@ fn parse_load_addr(uint64 s) -> uint64 {
 fn stack_top_die() {
     uint64 st_bad = "error: --stack-top= wants a decimal or 0x-prefixed hex address\n"
     write(2, st_bad, str_len(st_bad))
-    exit(1)
+    fatal_exit()
 }
 
 // --stack-top= value: same grammar as --load-addr= (parse_load_addr above)
@@ -9067,14 +9191,14 @@ fn fatimg_refuse_arch(uint64 a, uint64 flag) {
         write(2, flag, str_len(flag))
         uint64 mr = " does not accept riscv32: a fat image is a composition of BOOT PATHS, and this container has two -- the x86_64 multiboot header and the arm64 Image header. There is no riscv32 boot path in it, and a slice nothing enters is dead weight with no way to reach it. Use --arch=riscv32 --freestanding for a standalone raw boot image\n"
         write(2, mr, str_len(mr))
-        exit(1)
+        fatal_exit()
     }
     if a == 3 {
         write(2, "error: ", 7)
         write(2, flag, str_len(flag))
         uint64 mx = " does not accept xtensa: a fat image is a composition of BOOT PATHS, and this container has two -- the x86_64 multiboot header and the arm64 Image header. The chip's loader reads neither. Use --arch=xtensa --freestanding (lx60 boot ELF) or --target=esp32 (esp-image) for a standalone image\n"
         write(2, mx, str_len(mx))
-        exit(1)
+        fatal_exit()
     }
 }
 
@@ -9099,7 +9223,7 @@ fn parse_fat_arch_list(uint64 list) {
         if tlen == 0 {
             uint64 me = "error: --arch= has an empty element in its list: write the architectures separated by single commas, as --arch=x86_64,arm64\n"
             write(2, me, str_len(me))
-            exit(1)
+            fatal_exit()
         }
         uint64 a = fatimg_arch_from_name(tok, tlen)
         if a == 0xFF {
@@ -9108,7 +9232,7 @@ fn parse_fat_arch_list(uint64 list) {
             write(2, tok, tlen)
             mu = "' (use x86_64|arm64)\n"
             write(2, mu, str_len(mu))
-            exit(1)
+            fatal_exit()
         }
         fatimg_refuse_arch(a, "the --arch= list")
         uint64 bit = 1 << a
@@ -9118,7 +9242,7 @@ fn parse_fat_arch_list(uint64 list) {
             write(2, tok, tlen)
             md = "' twice: a fat image carries one slice per architecture, so a repeated name is either a typo for the other architecture or a request the container cannot express\n"
             write(2, md, str_len(md))
-            exit(1)
+            fatal_exit()
         }
         mask = mask | bit
         if c == 44 {
@@ -9145,7 +9269,7 @@ fn parse_fat_slice_arg(uint64 v) {
     if ci == 0xFFFFFFFF || ci == 0 {
         uint64 mf = "error: --slice= wants <arch>:<file>, for example --slice=arm64:build/arm64.img: the architecture has to be named because the fat image places each slice at its own file offset and enters it through that architecture's own boot header\n"
         write(2, mf, str_len(mf))
-        exit(1)
+        fatal_exit()
     }
     uint64 a = fatimg_arch_from_name(v, ci)
     if a == 0xFF {
@@ -9154,7 +9278,7 @@ fn parse_fat_slice_arg(uint64 v) {
         write(2, v, ci)
         mu = "' (use x86_64|arm64)\n"
         write(2, mu, str_len(mu))
-        exit(1)
+        fatal_exit()
     }
     fatimg_refuse_arch(a, "--slice=")
     uint64 path = v + ci + 1
@@ -9163,20 +9287,20 @@ fn parse_fat_slice_arg(uint64 v) {
     if c0 == 0 {
         uint64 mp = "error: --slice= has an empty file path after the architecture name\n"
         write(2, mp, str_len(mp))
-        exit(1)
+        fatal_exit()
     }
     if a == 0 {
         if fat_slice_x86 != 0 {
             uint64 md = "error: --slice=x86_64: was given twice: a fat image has one x86_64 slice, so the second path would silently replace the first\n"
             write(2, md, str_len(md))
-            exit(1)
+            fatal_exit()
         }
         fat_slice_x86 = path
     } else {
         if fat_slice_a64 != 0 {
             uint64 md2 = "error: --slice=arm64: was given twice: a fat image has one arm64 slice, so the second path would silently replace the first\n"
             write(2, md2, str_len(md2))
-            exit(1)
+            fatal_exit()
         }
         fat_slice_a64 = path
     }
@@ -9194,7 +9318,7 @@ fn parse_fat_addr_arg(uint64 v, uint64 ci, uint64 kind) {
         write(2, v, ci)
         mu = "' (use x86_64|arm64)\n"
         write(2, mu, str_len(mu))
-        exit(1)
+        fatal_exit()
     }
     fatimg_refuse_arch(a, "the per-architecture form of --load-addr=/--stack-top=")
     if kind == 0 {
@@ -9224,7 +9348,7 @@ fn parse_fat_uefi_arg(uint64 v) {
     if comma != 0xFFFFFFFF {
         uint64 mc = "error: --fat-uefi= takes ONE architecture, never a list: a PE's COFF header carries exactly one Machine value and firmware checks it, so a single file cannot be a UEFI application for two processors. A fat image is therefore PE for at most one architecture -- pick the one whose firmware you intend to boot under, and reach the other through its own boot path (the x86_64 multiboot header or the arm64 Image header), or pass --fat-uefi=none to leave the PE out altogether\n"
         write(2, mc, str_len(mc))
-        exit(1)
+        fatal_exit()
     }
     uint64 len = str_len(v)
     if targets_name_eq(v, len, "none") != 0 {
@@ -9238,7 +9362,7 @@ fn parse_fat_uefi_arg(uint64 v) {
             write(2, v, len)
             mu = "'\n"
             write(2, mu, str_len(mu))
-            exit(1)
+            fatal_exit()
         }
         fatimg_refuse_arch(a, "--fat-uefi=")
         fat_uefi_arch = a
@@ -9316,7 +9440,7 @@ fn fatimg_err_num(uint64 label, uint64 v) {
 
 fn fatimg_die(uint64 msg) {
     write(2, msg, str_len(msg))
-    exit(1)
+    fatal_exit()
 }
 
 // The multiboot scan, done exactly the way a multiboot LOADER does it: every
@@ -9370,7 +9494,7 @@ fn fatimg_read_slice(uint64 path) -> uint64 {
         write(2, path, str_len(path))
         mo = "': a --slice= file must already exist -- it is a prebuilt raw image the fat image adopts instead of compiling that architecture from the source on the command line\n"
         write(2, mo, str_len(mo))
-        exit(1)
+        fatal_exit()
     }
     uint64 sz = file_size(fd)
     if sz == 0 {
@@ -9380,7 +9504,7 @@ fn fatimg_read_slice(uint64 path) -> uint64 {
         write(2, path, str_len(path))
         mz = "' is empty: a zero-byte slice would be composed into the image as a boot path that enters nothing\n"
         write(2, mz, str_len(mz))
-        exit(1)
+        fatal_exit()
     }
     uint64 buf = cg_alloc(sz)
     uint64 sgot = read_exact(fd, buf, sz)
@@ -9391,7 +9515,7 @@ fn fatimg_read_slice(uint64 path) -> uint64 {
         write(2, path, str_len(path))
         ss = "': the file ended before the size it reported, so the slice is truncated and would be composed into the image as a boot path that enters half a program\n"
         write(2, ss, str_len(ss))
-        exit(1)
+        fatal_exit()
     }
     fatimg_read_len = sz
     return buf
@@ -9426,7 +9550,7 @@ fn fatimg_x86_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         mn = ") carries no multiboot header in its first 8 KiB, so there is nothing to read its entry point out of. A slice for the multiboot boot path must be built with --emit=image --stack-top=, which is the flag that emits the multiboot header and the long-mode trampoline behind it\n"
         write(2, mn, str_len(mn))
-        exit(1)
+        fatal_exit()
     }
     uint64 hdr_addr = fatimg_get_u32(buf, inner + 12)
     uint64 ent_addr = fatimg_get_u32(buf, inner + 28)
@@ -9440,7 +9564,7 @@ fn fatimg_x86_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         mb = ") has a multiboot entry_addr below its own header_addr, so its entry does not lie inside it. Either the header was never patched (entry_addr 0 is what an unpatched krc image carries) or the file is not the image it claims to be\n"
         write(2, mb, str_len(mb))
-        exit(1)
+        fatal_exit()
     }
     uint64 off = ent_addr - hdr_addr + inner
     if off >= len {
@@ -9449,7 +9573,7 @@ fn fatimg_x86_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         mp = ") puts its multiboot entry past its own last byte, so composing it would produce a boot path that jumps outside the file\n"
         write(2, mp, str_len(mp))
-        exit(1)
+        fatal_exit()
     }
     return off
 }
@@ -9472,7 +9596,7 @@ fn fatimg_a64_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         ms = ") is shorter than the 64-byte arm64 Image header it must begin with\n"
         write(2, ms, str_len(ms))
-        exit(1)
+        fatal_exit()
     }
     if fatimg_get_u32(buf, 56) != 0x644D5241 {
         uint64 mm = "error: the arm64 slice ("
@@ -9480,7 +9604,7 @@ fn fatimg_a64_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         mm = ") does not begin with an arm64 Image header (magic 0x644d5241 at offset 56). A fat image reads the slice's entry point out of that header's code0 branch, because nothing else in a raw arm64 image records where to start -- build the slice with --emit=image --image-header --stack-top=\n"
         write(2, mm, str_len(mm))
-        exit(1)
+        fatal_exit()
     }
     uint64 code0 = fatimg_get_u32(buf, 0)
     if (code0 >> 26) != 5 {
@@ -9489,7 +9613,7 @@ fn fatimg_a64_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         mb = ") has an Image header whose code0 is not an unconditional branch, so its entry point cannot be read out of it. krc writes `b <entry stub>` there only when --stack-top= asked for a stub; a header on a stub-less image points at nothing\n"
         write(2, mb, str_len(mb))
-        exit(1)
+        fatal_exit()
     }
     uint64 off = (code0 & 0x03FFFFFF) * 4
     if off >= len {
@@ -9498,7 +9622,7 @@ fn fatimg_a64_entry_offset(uint64 buf, uint64 len, uint64 what) -> uint64 {
         write(2, what, str_len(what))
         mp = ") has an Image header branching past its own last byte, so composing it would produce a boot path that jumps outside the file\n"
         write(2, mp, str_len(mp))
-        exit(1)
+        fatal_exit()
     }
     return off
 }
@@ -9943,7 +10067,7 @@ fn stk_fault(uint64 sig, uint64 info, uint64 uctx) {
     if addr < stk_top && stk_top - addr <= stk_reach {
         uint64 m = "krc: out of stack: the source nests too deeply for the stack this process may use (raise `ulimit -s`, or `ulimit -v` if it is capped)\n"
         write(2, m, str_len(m))
-        exit(1)
+        fatal_exit()
     }
     // Not the stack: the default action, and the same signal again. The
     // handler runs with SA_NODEFER, so the kill is delivered at once.
@@ -10027,7 +10151,7 @@ fn c7_dump_one(uint64 arch, uint64 which, uint64 path) {
 fn c7_dump_leaves(uint64 arch) {
     if arch != 0 && arch != 1 {
         write(2, "error: --dump-argv-parser=/--dump-argv-quoter= need --arch=x86_64 or --arch=arm64\n", 82)
-        exit(1)
+        fatal_exit()
     }
     if out_buf == 0 {
         out_buf = cg_alloc_or_die(65536, "the output buffer")
@@ -10113,7 +10237,7 @@ fn main() {
                     arch = 2
                 } else if str_eq_full(arch_str, "riscv64") != 0 {
                     write(2, "error: --arch=riscv64: RV64 is not supported yet. This compiler targets RV32; use --arch=riscv32.\n", 98)
-                    exit(1)
+                    fatal_exit()
                 } else if str_eq_full(arch_str, "xtensa") != 0 {
                     arch = 3
                 } else if str_eq_full(arch_str, "x86_64") != 0 {
@@ -10126,7 +10250,7 @@ fn main() {
                     arch = 0
                 } else {
                     write(2, "error: unknown --arch (use x86_64|arm64|riscv32|xtensa)\n", 56)
-                    exit(1)
+                    fatal_exit()
                 }
             } else if str_starts_with(arg, "--emit=", 7) != 0 {
                 emit_set = 1
@@ -10277,7 +10401,7 @@ fn main() {
                     // falsifies, and --emit=uefi did falsify it.
                     uint64 evl = "valid: elfexe, elf, elf-arm64, elf-x86_64, linux, linux-x86_64, linux-arm64, linux-x86-64, macho, mac, macos, mac-x64, mac-arm64, darwin, windows, windows-x64, windows-arm64, win, win-x64, win-arm64, pe, obj, android, asm, ir, lkm, image, uefi, fatimage, arx, arxmod\n"
                     write(2, evl, str_len(evl))
-                    exit(1)
+                    fatal_exit()
                 }
             } else if str_starts_with(arg, "--mod-name=", 11) != 0 {
                 mod_name = arg + 11
@@ -10341,7 +10465,7 @@ fn main() {
                 // while looking like a request.
                 uint64 fu_bare = "error: --fat-uefi requires a value: write --fat-uefi=x86_64, --fat-uefi=arm64 or --fat-uefi=none. A PE carries one COFF Machine value, so the fat image has to be told which architecture's firmware it is for\n"
                 write(2, fu_bare, str_len(fu_bare))
-                exit(1)
+                fatal_exit()
             } else if str_eq_full(arg, "--image-header") != 0 {
                 // No value to parse -- an explicit arm is still needed for
                 // the same V7 reason --load-addr=/--stack-top= have one:
@@ -10361,7 +10485,7 @@ fn main() {
                 // the fix is to reject the `=` form outright rather than
                 // parse it.
                 write(2, "error: --image-header takes no value\n", 37)
-                exit(1)
+                fatal_exit()
             } else if str_eq_full(arg, "--reset-vector") != 0 {
                 // No value to parse -- same V7 reason --image-header's arm
                 // comments above give: without an explicit arm here,
@@ -10382,7 +10506,7 @@ fn main() {
                 // This flag takes no value, so the fix is to reject the
                 // `=` form outright rather than parse it.
                 write(2, "error: --reset-vector takes no value\n", 37)
-                exit(1)
+                fatal_exit()
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
                 emit_mode = 3
@@ -10395,7 +10519,7 @@ fn main() {
                 // 176-byte executable instead of a .o. This flag takes no
                 // value, so reject the `=` form outright.
                 write(2, "error: -c takes no value\n", 25)
-                exit(1)
+                fatal_exit()
             } else if str_starts_with(arg, "--targets=", 10) != 0 {
                 // Validated at once (R7), like an unknown --arch=; a second
                 // --targets= must repeat the first, never replace it.
@@ -10463,7 +10587,7 @@ fn main() {
                     // failure over silently emitting the wrong thing.
                     uint64 tgt_err = "error: unknown --target= value (expected: linux, macos/darwin, windows/win, android, esp32, none)\n"
                     write(2, tgt_err, str_len(tgt_err))
-                    exit(1)
+                    fatal_exit()
                 }
 
                 // A second, different --target= is a conflict, not last-wins.
@@ -10480,7 +10604,7 @@ fn main() {
                     write(2, tgt_str, str_len(tgt_str))
                     uint64 tc_msg3 = "' - pass --target= once\n"
                     write(2, tc_msg3, str_len(tc_msg3))
-                    exit(1)
+                    fatal_exit()
                 }
                 target_arg_seen = 1
                 target_arg_kind = tgt_kind
@@ -10517,7 +10641,7 @@ fn main() {
                 // --image-header/--reset-vector/-c arms above). -h takes no
                 // value, so reject the `=` form outright.
                 write(2, "error: -h takes no value\n", 25)
-                exit(1)
+                fatal_exit()
             } else if str_starts_with(arg, "--help", 6) != 0 || str_eq_full(arg, "-h") != 0 {
                 write(1, "usage: krc [options] <file.kr> [-o output]\n", 43)
                 write(1, "       krc <command> <file.kr> [options]\n\n", 42)
@@ -10865,22 +10989,22 @@ fn main() {
         if mod_name == 0 {
             uint64 mn_e = "error: --emit=arxmod requires --mod-name=NAME. The loader records the name before it enters the module, so a module that fails to initialise can still be named in the report; there is no other handle on it\n"
             write(2, mn_e, str_len(mn_e))
-            exit(1)
+            fatal_exit()
         }
         if str_len(mod_name) == 0 {
             uint64 me_e = "error: --mod-name= is empty. A module with no name cannot be listed or unloaded\n"
             write(2, me_e, str_len(me_e))
-            exit(1)
+            fatal_exit()
         }
         if str_len(mod_name) > 63 {
             uint64 ml_e = "error: --mod-name= is longer than 63 characters. The loader stores the name in a fixed field so a module can be named after its image is gone\n"
             write(2, ml_e, str_len(ml_e))
-            exit(1)
+            fatal_exit()
         }
         if mod_abi_set == 0 {
             uint64 ma_e = "error: --emit=arxmod requires --mod-abi=N, the kernel module ABI this was built against. Without it the module would load against any kernel and be correct only by luck, which is the failure the field exists to prevent\n"
             write(2, ma_e, str_len(ma_e))
-            exit(1)
+            fatal_exit()
         }
     }
     // --mod-name/--mod-abi/--mod-version OUTSIDE --emit=arxmod are refused
@@ -10891,7 +11015,7 @@ fn main() {
         if mod_name != 0 || mod_abi_set != 0 || mod_version != 0 {
             uint64 mo_e = "error: --mod-name/--mod-abi/--mod-version are only meaningful with --emit=arxmod. Emitting a plain container from a line that asked for a module would produce something that loads as a program and never as a module\n"
             write(2, mo_e, str_len(mo_e))
-            exit(1)
+            fatal_exit()
         }
     }
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
@@ -10958,7 +11082,7 @@ fn main() {
     if emit_mode == 7 && targets_arg_given != 0 {
         uint64 lkmf_msg = "error: --emit=lkm conflicts with --targets=: a loadable kernel module (.ko) is a single-target Linux/Android kernel module, not a fat binary; drop --targets= and build it with --arch=x86_64 --target=linux (or android)\n"
         write(2, lkmf_msg, str_len(lkmf_msg))
-        exit(1)
+        fatal_exit()
     }
     if emit_mode == 7 && (target_os == 2 || target_os == 1) {
         uint64 lkmw1 = "error: --emit=lkm conflicts with --target="
@@ -10970,18 +11094,18 @@ fn main() {
         write(2, lkmw_os, str_len(lkmw_os))
         uint64 lkmw3 = " cannot load\n"
         write(2, lkmw3, str_len(lkmw3))
-        exit(1)
+        fatal_exit()
     }
     if target_os == 4 {
         if emit_mode == 7 {
             uint64 lkm_msg = "error: --emit=lkm conflicts with --target=none: a loadable kernel module has no kernel to load into\n"
             write(2, lkm_msg, str_len(lkm_msg))
-            exit(1)
+            fatal_exit()
         }
         if emit_mode == 4 {
             uint64 and_msg = "error: --emit=android conflicts with --target=none: android is an OS target, not a bare-metal one\n"
             write(2, and_msg, str_len(and_msg))
-            exit(1)
+            fatal_exit()
         }
         // Mach-O and PE are OS CONTAINERS, not just byte layouts: a Mach-O
         // image is loaded by dyld through LC_MAIN and its segments are mapped
@@ -11009,12 +11133,12 @@ fn main() {
         if emit_mode == 1 {
             uint64 mo_msg = "error: --emit=macho conflicts with --target=none: a Mach-O image is an OS container (dyld, LC_MAIN, segments mapped by the macOS kernel) and nothing on bare metal loads one; use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
             write(2, mo_msg, str_len(mo_msg))
-            exit(1)
+            fatal_exit()
         }
         if emit_mode == 2 {
             uint64 pe_msg = "error: --emit=pe conflicts with --target=none: --emit=pe emits a WINDOWS PE -- it imports kernel32 and its entry instruction calls through an import-table slot that only the Windows loader fills, so on bare metal it jumps through a null pointer before your code runs. Firmware does load PE32+ images, so if that is what you want use --emit=uefi; otherwise use the default ELF, or --emit=obj for a relocatable object to link yourself\n"
             write(2, pe_msg, str_len(pe_msg))
-            exit(1)
+            fatal_exit()
         }
         // --debug inlines a per-OS `exit(1)` trap into every function that
         // indexes an array (IR_ARR_CHECK), dereferences a pointer (the
@@ -11044,7 +11168,7 @@ fn main() {
         if debug_mode != 0 {
             uint64 dbg_msg = "error: --debug conflicts with --target=none: the runtime safety checks inline a per-OS exit(1) trap into every function that indexes an array or dereferences a pointer, and bare metal has no kernel to trap into. Drop --debug until a bare-metal panic path exists.\n"
             write(2, dbg_msg, str_len(dbg_msg))
-            exit(1)
+            fatal_exit()
         }
         // The legacy backend (src/codegen.kr, src/codegen_aarch64.kr — ~220
         // target_os sites between them) has its own builtin dispatch and does
@@ -11065,7 +11189,7 @@ fn main() {
         if emit_ir_mode == 0 {
             uint64 lg_msg = "error: --legacy conflicts with --target=none: the legacy backend has no @builtin_override routing, so print/println/print_str/println_str cannot be provided on bare metal there. Drop --legacy (the IR backend is the default and supports them); --emit=obj still uses the legacy codegen and is still allowed.\n"
             write(2, lg_msg, str_len(lg_msg))
-            exit(1)
+            fatal_exit()
         }
         // --emit=obj, --emit=asm, --emit=ir and the default --emit=elfexe are
         // all ALLOWED under --target=none, and that is a decision rather than
@@ -11111,28 +11235,28 @@ fn main() {
     if fat_arch_list_set != 0 && emit_mode != 11 {
         uint64 fl_im = "error: a comma-separated --arch= list is only meaningful with --emit=fatimage: every other emit mode produces one artifact for one architecture, so the second name in the list would be silently discarded. Pass --emit=fatimage, or name a single architecture\n"
         write(2, fl_im, str_len(fl_im))
-        exit(1)
+        fatal_exit()
     }
     if fat_slice_seen != 0 && emit_mode != 11 {
         uint64 fs_im = "error: --slice= is only meaningful with --emit=fatimage: it substitutes a prebuilt image for one architecture of a multi-architecture composition, and no other emit mode composes anything for it to substitute into\n"
         write(2, fs_im, str_len(fs_im))
-        exit(1)
+        fatal_exit()
     }
     if fat_uefi_set != 0 && emit_mode != 11 {
         uint64 fu_im = "error: --fat-uefi= is only meaningful with --emit=fatimage: it chooses which architecture of a fat image gets the PE/UEFI boot path. A single-architecture UEFI application is --emit=uefi, which needs no such choice\n"
         write(2, fu_im, str_len(fu_im))
-        exit(1)
+        fatal_exit()
     }
     if emit_mode != 11 {
         if fat_load_x86_set != 0 || fat_load_a64_set != 0 {
             uint64 fla_im = "error: the per-architecture form --load-addr=<arch>:<addr> is only meaningful with --emit=fatimage: a single image has one load address, so write --load-addr=<addr> with no architecture prefix\n"
             write(2, fla_im, str_len(fla_im))
-            exit(1)
+            fatal_exit()
         }
         if fat_stack_x86_set != 0 || fat_stack_a64_set != 0 {
             uint64 fsa_im = "error: the per-architecture form --stack-top=<arch>:<addr> is only meaningful with --emit=fatimage: a single image has one entry stub, so write --stack-top=<addr> with no architecture prefix\n"
             write(2, fsa_im, str_len(fsa_im))
-            exit(1)
+            fatal_exit()
         }
     }
     // --emit=image (emit_mode 8): sub-project B1's flat-image surface.
@@ -11144,7 +11268,7 @@ fn main() {
         if target_os != 4 {
             uint64 im_tn = "error: --emit=image requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the flat blob would contain that OS's syscalls with no kernel behind them\n"
             write(2, im_tn, str_len(im_tn))
-            exit(1)
+            fatal_exit()
         }
         // No --arch at all: refuse. --emit= sets emit_set, which skips the
         // fat path AND its "pass --arch" refusal, so the arch would
@@ -11154,17 +11278,17 @@ fn main() {
         if arch_set == 0 {
             uint64 im_ar = "error: --emit=image requires an explicit --arch=x86_64 or --arch=arm64: --load-addr validation is per-arch (arm64 demands 4096-alignment, x86_64 does not), so a silently defaulted arch would validate against the wrong rule\n"
             write(2, im_ar, str_len(im_ar))
-            exit(1)
+            fatal_exit()
         }
         if arch == 2 {
             uint64 im_rv = "error: --emit=image is x86_64/arm64 only: --arch=riscv32 --freestanding already emits a raw boot image (entry hoisted to offset 0, sp preamble) and --emit=image would be a second spelling of it with different entry semantics\n"
             write(2, im_rv, str_len(im_rv))
-            exit(1)
+            fatal_exit()
         }
         if arch == 3 {
             uint64 im_xt = "error: --emit=image is x86_64/arm64 only: xtensa raw emission is --arch=xtensa --freestanding (lx60 boot ELF) or --target=esp32 (esp-image), each with its own entry semantics\n"
             write(2, im_xt, str_len(im_xt))
-            exit(1)
+            fatal_exit()
         }
         // --reset-vector (sub-project E, Task 1): three refusals of its own,
         // checked here -- ahead of --load-addr='s "requires" refusal just
@@ -11181,7 +11305,7 @@ fn main() {
             if arch != 0 {
                 uint64 rv_ar = "error: --reset-vector requires --arch=x86_64: the reset-vector form resets into 16-bit real mode and builds its own transition through 32-bit protected and 64-bit long mode; arm64 resets directly into AArch64 state, and riscv32/xtensa already have their own raw boot paths via --freestanding\n"
                 write(2, rv_ar, str_len(rv_ar))
-                exit(1)
+                fatal_exit()
             }
             // Measured meaningless (design spec S8 Q2): a plain --emit=image
             // x86_64 payload is byte-identical at --load-addr=0x100000 and
@@ -11191,7 +11315,7 @@ fn main() {
             if load_addr_set != 0 {
                 uint64 rv_la = "error: --reset-vector conflicts with --load-addr=: the reset-vector stage always copies the payload to the fixed physical address 0x100000, never to a chosen one -- measured byte-identical at --load-addr=0x100000 and --load-addr=0x20000000 for a plain --emit=image build. Drop --load-addr=\n"
                 write(2, rv_la, str_len(rv_la))
-                exit(1)
+                fatal_exit()
             }
             // No default, ever: src/main.kr's own stack_top declaration
             // states the project's rule verbatim -- "an unset stack means
@@ -11203,7 +11327,7 @@ fn main() {
             if stack_top_set == 0 {
                 uint64 rv_st = "error: --reset-vector requires --stack-top=: the reset-vector stage sets rsp from this value before calling the entry function, and there is no default -- an unset stack means 'no value', never 'guess one'\n"
                 write(2, rv_st, str_len(rv_st))
-                exit(1)
+                fatal_exit()
             }
         }
         // reset_vector_set == 0: a legal --reset-vector build never sets
@@ -11214,24 +11338,24 @@ fn main() {
         if load_addr_set == 0 && reset_vector_set == 0 {
             uint64 im_la = "error: --emit=image requires --load-addr=<addr>: nothing in a flat image records where it will run -- not even --image-header's Image header, whose text_offset is an offset from the loader's own base and never an absolute address; the value is validated (arm64) and reported, never embedded in the bytes\n"
             write(2, im_la, str_len(im_la))
-            exit(1)
+            fatal_exit()
         }
         if load_addr == 0 && reset_vector_set == 0 {
             // Zero parses cleanly and is 4096-aligned, but every consumer
             // of the report (and B2's stub) reads 0 as "unset".
             uint64 im_z = "error: --load-addr=0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
             write(2, im_z, str_len(im_z))
-            exit(1)
+            fatal_exit()
         }
         if arch == 1 && (load_addr & 4095) != 0 {
             uint64 im_al = "error: --load-addr= must be 4096-aligned on arm64: ADRP page arithmetic is baked at compile time and only survives a page-aligned shift. This constraint is arm64-only -- x86_64 images are RIP-relative and boot at any address\n"
             write(2, im_al, str_len(im_al))
-            exit(1)
+            fatal_exit()
         }
         if debug_info_mode != 0 {
             uint64 im_g = "error: -g conflicts with --emit=image: the DWARF footer and its section headers would land INSIDE the flat blob at addresses derived from the ELF layout the image does not have. Drop -g, or drop --emit=image to keep the ELF that -g understands\n"
             write(2, im_g, str_len(im_g))
-            exit(1)
+            fatal_exit()
         }
         // --stack-top= validation (sub-project B2, D4). Only runs when the
         // flag is actually present -- unlike --load-addr=, --stack-top= has
@@ -11247,7 +11371,7 @@ fn main() {
                 // consume it -- mirrors --load-addr=0's refusal just above.
                 uint64 st_z = "error: --stack-top=0 is refused: a zero stack pointer faults on the first push, and is indistinguishable from unset in every report and boot stub that consumes it\n"
                 write(2, st_z, str_len(st_z))
-                exit(1)
+                fatal_exit()
             }
             // Validation is ARCH-ASYMMETRIC (spec D4) and each half is
             // stated separately in its own diagnostic -- a shared message
@@ -11259,7 +11383,7 @@ fn main() {
                 if (stack_top & 15) != 0 {
                     uint64 st_al = "error: --stack-top= must be 16-byte aligned on arm64: aarch64 faults on the first SP-relative stack access if SP is not 16-byte aligned. This constraint is arm64-only -- x86_64 accepts any alignment\n"
                     write(2, st_al, str_len(st_al))
-                    exit(1)
+                    fatal_exit()
                 }
                 // The movz/movk pair the stub patches into the entry
                 // code covers bits 31:0 only, so anything >= 2^32 cannot be
@@ -11268,7 +11392,7 @@ fn main() {
                 if stack_top >= 4294967296 {
                     uint64 st_rg = "error: --stack-top= must be below 2^32 on arm64: the movz/movk pair the stub patches into the entry code covers bits 31:0 only. This constraint is arm64-only -- x86_64 stacks are bounded by their own range rule instead\n"
                     write(2, st_rg, str_len(st_rg))
-                    exit(1)
+                    fatal_exit()
                 }
             }
             // && reset_vector_set == 0 (sub-project E, Task 1): this arm's
@@ -11322,7 +11446,7 @@ fn main() {
                 if stack_top > 4096 && stack_top < 16392 {
                     uint64 st_pt = "error: --stack-top='s first push would land inside 0x1000-0x4000 on x86_64: the boot stub's identity-map page tables live there, the stack grows down, and the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x4008. This constraint is x86_64-only -- arm64 has no page tables in the flat image\n"
                     write(2, st_pt, str_len(st_pt))
-                    exit(1)
+                    fatal_exit()
                 }
                 // Bound 2: must be < 2^31. At or above that boundary the
                 // assembler widens `mov $imm,%rsp` from the 7-byte sign-
@@ -11331,7 +11455,7 @@ fn main() {
                 if stack_top >= 2147483648 {
                     uint64 st_hi = "error: --stack-top= must be below 0x80000000 on x86_64: at or above 2^31 the assembler widens `mov $imm,%rsp` from a 7-byte sign-extended form to a 10-byte movabs, moving every later patch site while the file size stays fixed. This constraint is x86_64-only -- arm64 is bounded by the movz/movk pair instead\n"
                     write(2, st_hi, str_len(st_hi))
-                    exit(1)
+                    fatal_exit()
                 }
                 // Bound 3 (B2 Task 4, review I3): the trampoline's identity
                 // map is ONE 512-entry page directory of 2 MiB pages, so it
@@ -11352,7 +11476,7 @@ fn main() {
                 if stack_top > 1073741824 {
                     uint64 st_1g = "error: --stack-top= must be at most 0x40000000 on x86_64: the self-boot trampoline's identity map is a single 512-entry page directory of 2 MiB pages, so it covers exactly the first 1 GiB; a stack above that is unmapped the moment paging is enabled and the first push triple-faults\n"
                     write(2, st_1g, str_len(st_1g))
-                    exit(1)
+                    fatal_exit()
                 }
                 // --load-addr's own trampoline preconditions. These are
                 // gated on --stack-top being present, i.e. on the stub
@@ -11367,12 +11491,12 @@ fn main() {
                 if load_addr < 16384 {
                     uint64 la_pt = "error: --load-addr= must be at least 0x4000 when --stack-top= asks for the x86_64 self-boot trampoline: the trampoline builds its identity-map page tables at physical 0x1000-0x4000 and zeroes that whole range, so an image loaded there is overwritten by its own boot code before it runs\n"
                     write(2, la_pt, str_len(la_pt))
-                    exit(1)
+                    fatal_exit()
                 }
                 if load_addr >= 1073741824 {
                     uint64 la_1g = "error: --load-addr= must be below 0x40000000 when --stack-top= asks for the x86_64 self-boot trampoline: the trampoline's identity map is a single 512-entry page directory of 2 MiB pages and covers exactly the first 1 GiB, so an image at or above that address is unmapped the instant paging is enabled\n"
                     write(2, la_1g, str_len(la_1g))
-                    exit(1)
+                    fatal_exit()
                 }
             }
             // --reset-vector's OWN x86_64 range rule (sub-project E, Task 1),
@@ -11414,7 +11538,7 @@ fn main() {
                 if stack_top > 4096 && stack_top < 28680 {
                     uint64 rv_pt = "error: --stack-top='s first push would land inside 0x1000-0x7000 under --reset-vector: the reset-vector stage builds its own identity page tables there (PDPT[0..3] and four page directories, mapping the full 4 GiB -- more table space than the self-boot trampoline's 0x1000-0x4000), and the stack grows down so the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x7008. This constraint is --reset-vector-only\n"
                     write(2, rv_pt, str_len(rv_pt))
-                    exit(1)
+                    fatal_exit()
                 }
                 // Review r1, Important 1: excluding B2's whole range arm above
                 // (the `&& reset_vector_set == 0` guard on it) also excluded
@@ -11450,7 +11574,7 @@ fn main() {
                 if stack_top >= 4294967296 {
                     uint64 rv_4g = "error: --stack-top= must be below 0x100000000 (4 GiB) under --reset-vector: the reset-vector stage's identity map is PDPT[0..3], four page directories covering the full 4 GiB, so a stack top above that is unmapped the moment paging is enabled and the first push triple-faults. A stack top of exactly 0x100000000 is refused CONSERVATIVELY rather than because it faults -- its first push lands at 0xFFFFFFF8, inside the map. This constraint is --reset-vector-only -- the self-boot trampoline's own ceiling is a different number, 0x40000000, for its narrower single-GiB map\n"
                     write(2, rv_4g, str_len(rv_4g))
-                    exit(1)
+                    fatal_exit()
                 }
             }
         }
@@ -11468,12 +11592,12 @@ fn main() {
             if arch == 0 {
                 uint64 ih_a64 = "error: --image-header requires --arch=arm64: the header is arm64's Linux Image format (magic 0x644d5241); x86_64 --emit=image already has its own front-of-file forms (the multiboot header --stack-top= adds, and the stage --reset-vector adds), so --image-header on x86_64 has nothing to attach to\n"
                 write(2, ih_a64, str_len(ih_a64))
-                exit(1)
+                fatal_exit()
             }
             if stack_top_set == 0 {
                 uint64 ih_st = "error: --image-header requires --stack-top=: a header on a stub-less image validates under file(1) and is accepted by a loader, but the image has no entry stub to jump to and faults instantly. Pass --stack-top= so the header's claim matches the bytes\n"
                 write(2, ih_st, str_len(ih_st))
-                exit(1)
+                fatal_exit()
             }
         }
     }
@@ -11504,7 +11628,7 @@ fn main() {
         if target_os != 4 {
             uint64 uf_tn = "error: --emit=uefi requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the application would carry that OS's syscalls, which UEFI firmware does not provide\n"
             write(2, uf_tn, str_len(uf_tn))
-            exit(1)
+            fatal_exit()
         }
         // No --arch at all: refuse. --emit= sets emit_set, which skips the fat
         // path AND its "pass --arch" refusal, so the arch would silently
@@ -11514,7 +11638,7 @@ fn main() {
         if arch_set == 0 {
             uint64 uf_ar = "error: --emit=uefi requires an explicit --arch=x86_64 or --arch=arm64: a PE header names the CPU in its Machine field, so a silently defaulted arch would produce an application declaring a processor you did not ask for\n"
             write(2, uf_ar, str_len(uf_ar))
-            exit(1)
+            fatal_exit()
         }
         // riscv32 / xtensa. Each message carries a substring UNIQUE to it --
         // "x86_64/arm64 only" would appear in both, and a defect that routed
@@ -11523,12 +11647,12 @@ fn main() {
         if arch == 2 {
             uint64 uf_rv = "error: --emit=uefi is x86_64/arm64 only: there is no PE Machine value for riscv32 in this compiler, and no UEFI firmware target for it here either. Use --arch=riscv32 --freestanding for a raw boot image instead\n"
             write(2, uf_rv, str_len(uf_rv))
-            exit(1)
+            fatal_exit()
         }
         if arch == 3 {
             uint64 uf_xt = "error: --emit=uefi is x86_64/arm64 only: there is no PE Machine value for xtensa, and the chip has no UEFI firmware. Use --arch=xtensa --freestanding (lx60 boot ELF) or --target=esp32 (esp-image) instead\n"
             write(2, uf_xt, str_len(uf_xt))
-            exit(1)
+            fatal_exit()
         }
         // -g. Its existing refusal is nested inside `if emit_mode == 8`, so a
         // new mode inherits ACCEPTANCE -- and acceptance here is invisible:
@@ -11541,7 +11665,7 @@ fn main() {
         if debug_info_mode != 0 {
             uint64 uf_g = "error: -g conflicts with --emit=uefi: the DWARF footer and its section headers are laid out from the ELF geometry a PE32+ EFI application does not have, and would land inside the image at addresses nothing maps. Drop -g, or drop --emit=uefi to keep the ELF that -g understands\n"
             write(2, uf_g, str_len(uf_g))
-            exit(1)
+            fatal_exit()
         }
     }
     // --emit=arx. Its own block for the same reason mode 9 has one: EVERY ROW
@@ -11563,7 +11687,7 @@ fn main() {
             c1_w("error: ")
             c1_w(cli_emit_flag)
             c1_w(" requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by\n")
-            exit(1)
+            fatal_exit()
         }
         // No --arch: refuse rather than default. The ARX header names the CPU
         // in its own arch field, and the loader refuses a mismatch, so a
@@ -11573,7 +11697,7 @@ fn main() {
             c1_w("error: ")
             c1_w(cli_emit_flag)
             c1_w(" requires an explicit --arch=x86_64 or --arch=arm64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make\n")
-            exit(1)
+            fatal_exit()
         }
         // arm64 IS ENABLED. The row that used to refuse it said what would lift
         // it -- "the page-congruence invariant ... would ship with static byte
@@ -11602,13 +11726,13 @@ fn main() {
             c1_w("error: ")
             c1_w(cli_emit_flag)
             c1_w(" has no riscv32 form: ApexRift runs on x86_64 and there is no riscv32 loader for this container. Use --arch=riscv32 --freestanding for a raw boot image instead\n")
-            exit(1)
+            fatal_exit()
         }
         if arch == 3 {
             c1_w("error: ")
             c1_w(cli_emit_flag)
             c1_w(" has no xtensa form: ApexRift runs on x86_64 and the chip has no loader for this container. Use --arch=xtensa --freestanding or --target=esp32 instead\n")
-            exit(1)
+            fatal_exit()
         }
         // -g, refused rather than silently discarded, for the reason mode 8 and
         // mode 9 both refuse it: the DWARF footer is laid out from an ELF
@@ -11619,7 +11743,7 @@ fn main() {
             c1_w(": the DWARF footer and its section headers are laid out from an ELF geometry this container does not have, and would land inside the loaded image at offsets nothing maps. Drop -g, or drop ")
             c1_w(cli_emit_flag)
             c1_w(" to keep the ELF that -g understands\n")
-            exit(1)
+            fatal_exit()
         }
     }
     // --emit=fatimage (emit_mode 11). Its own block, for the reason modes 9
@@ -11646,7 +11770,7 @@ fn main() {
         if target_os != 4 {
             uint64 fi_tn = "error: --emit=fatimage requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and every slice in the image would carry that OS's syscalls -- there is no kernel behind any of the boot paths a fat image has, because a fat image IS what boots\n"
             write(2, fi_tn, str_len(fi_tn))
-            exit(1)
+            fatal_exit()
         }
         // A fat image with one architecture is not a fat image. Refused rather
         // than quietly built, because the artifact would be a perfectly valid
@@ -11656,7 +11780,7 @@ fn main() {
         if fat_arch_list_set == 0 {
             uint64 fi_al = "error: --emit=fatimage requires a comma-separated --arch= list: write --arch=x86_64,arm64. A fat image is ONE FILE WITH SEVERAL BOOT PATHS, so it has no single architecture to default to, and a single --arch= would produce an ordinary image under a name that promises more than one machine can boot it\n"
             write(2, fi_al, str_len(fi_al))
-            exit(1)
+            fatal_exit()
         }
         // EXACTLY x86_64 AND arm64, and this is an allow-list with no
         // fall-through for the reason arch_os_pair_supported is one. The
@@ -11667,7 +11791,7 @@ fn main() {
         if fat_arch_mask != 3 {
             uint64 fi_ab = "error: --emit=fatimage composes exactly x86_64 and arm64: --arch=x86_64,arm64 (in either order). This container has two entry indirections and no more -- the x86_64 multiboot header, which a loader finds by scanning the first 8 KiB, and the arm64 Image header at offset 0, whose first word is a branch. A one-architecture list is an ordinary --emit=image build; there is no third boot path to add an architecture to\n"
             write(2, fi_ab, str_len(fi_ab))
-            exit(1)
+            fatal_exit()
         }
         // -g, refused rather than silently discarded, for the reason modes 8,
         // 9 and 10 all refuse it: the DWARF footer and its section headers are
@@ -11678,7 +11802,7 @@ fn main() {
         if debug_info_mode != 0 {
             uint64 fi_g = "error: -g conflicts with --emit=fatimage: the DWARF footer and its section headers are laid out from the ELF geometry none of a fat image's slices have, and would land inside the composite at offsets belonging to whichever slice follows. Drop -g, or drop --emit=fatimage to keep the ELF that -g understands\n"
             write(2, fi_g, str_len(fi_g))
-            exit(1)
+            fatal_exit()
         }
         // The four single-image front-of-file flags, each refused with a
         // message about THIS mode. Ahead of the generic "only meaningful with
@@ -11687,22 +11811,22 @@ fn main() {
         if load_addr_set != 0 {
             uint64 fi_la = "error: --load-addr= is ambiguous under --emit=fatimage: the image has one load address per slice, and they are different addresses on different machines. Use the per-architecture form -- --load-addr=x86_64:0x400000 or --load-addr=arm64:0x40000000 -- which sets where the WHOLE FILE lands for that architecture; each slice's own address is that base plus its offset in the file, which only the composer knows\n"
             write(2, fi_la, str_len(fi_la))
-            exit(1)
+            fatal_exit()
         }
         if stack_top_set != 0 {
             uint64 fi_st = "error: --stack-top= is ambiguous under --emit=fatimage: each slice emits its own entry stub and sets its own SP, in a different machine's memory map. Use the per-architecture form -- --stack-top=x86_64:0x3f0000 or --stack-top=arm64:0x40800000\n"
             write(2, fi_st, str_len(fi_st))
-            exit(1)
+            fatal_exit()
         }
         if image_header_set != 0 {
             uint64 fi_ih = "error: --image-header is redundant under --emit=fatimage and is refused rather than ignored: the fat image ALWAYS writes an arm64 Image header, at file offset 0, sharing those 64 bytes with the PE DOS stub -- that shared header is the arm64 boot path. Accepting the flag would suggest there is a form of this mode without one\n"
             write(2, fi_ih, str_len(fi_ih))
-            exit(1)
+            fatal_exit()
         }
         if reset_vector_set != 0 {
             uint64 fi_rv = "error: --reset-vector conflicts with --emit=fatimage: the reset-vector form owns file offset 0 exactly -- `-bios` maps the file's last byte at 0xFFFFFFFF and every self-reference in its stage assumes that -- and offset 0 of a fat image is already the arm64 Image header shared with the PE DOS stub. Two file-offset-0 constructs cannot share a file. Build the reset-vector image on its own with --emit=image\n"
             write(2, fi_rv, str_len(fi_rv))
-            exit(1)
+            fatal_exit()
         }
         // A PE HAS TO BE COMPILED, so it cannot come from a --slice=. A raw
         // image handed over on the command line has no COFF header, no section
@@ -11712,12 +11836,12 @@ fn main() {
         if fat_uefi_set != 0 && fat_uefi_arch == 0 && fat_slice_x86 != 0 {
             uint64 fu_sx = "error: --fat-uefi=x86_64 conflicts with --slice=x86_64:: the UEFI boot path is a PE32+ application the compiler builds from the source on the command line, and a --slice= file is a finished raw image with no COFF header to give it. Drop --slice=x86_64: so x86_64 is compiled here, or pass --fat-uefi=arm64 or --fat-uefi=none\n"
             write(2, fu_sx, str_len(fu_sx))
-            exit(1)
+            fatal_exit()
         }
         if fat_uefi_set != 0 && fat_uefi_arch == 1 && fat_slice_a64 != 0 {
             uint64 fu_sa = "error: --fat-uefi=arm64 conflicts with --slice=arm64:: the UEFI boot path is a PE32+ application the compiler builds from the source on the command line, and a --slice= file is a finished raw image with no COFF header to give it. Drop --slice=arm64: so arm64 is compiled here, or pass --fat-uefi=x86_64 or --fat-uefi=none\n"
             write(2, fu_sa, str_len(fu_sa))
-            exit(1)
+            fatal_exit()
         }
         // THE DEFAULT, DERIVED AND THEN PRINTED. x86_64 first because that is
         // where UEFI firmware is actually met in practice and because the
@@ -11750,47 +11874,47 @@ fn main() {
         if fat_load_x86 == 0 {
             uint64 fl_z = "error: --load-addr=x86_64:0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
             write(2, fl_z, str_len(fl_z))
-            exit(1)
+            fatal_exit()
         }
         if fat_load_a64 == 0 {
             uint64 fa_z = "error: --load-addr=arm64:0 is refused: a zero load address is indistinguishable from an unset one in every report and boot stub that consumes it\n"
             write(2, fa_z, str_len(fa_z))
-            exit(1)
+            fatal_exit()
         }
         if (fat_load_a64 & 4095) != 0 {
             uint64 fa_al = "error: --load-addr=arm64: must be 4096-aligned: ADRP page arithmetic is baked at compile time and only survives a page-aligned shift. Every slice offset inside a fat image is already 4096-aligned, so the base has to be too. This constraint is arm64-only -- the x86_64 slice is RIP-relative and boots at any address\n"
             write(2, fa_al, str_len(fa_al))
-            exit(1)
+            fatal_exit()
         }
         if fat_stack_x86 == 0 || fat_stack_a64 == 0 {
             uint64 fs_z = "error: a fat image's --stack-top=<arch>:0 is refused: a zero stack pointer faults on the first push, and is indistinguishable from unset in every report and boot stub that consumes it\n"
             write(2, fs_z, str_len(fs_z))
-            exit(1)
+            fatal_exit()
         }
         if (fat_stack_a64 & 15) != 0 {
             uint64 fs_al = "error: --stack-top=arm64: must be 16-byte aligned: aarch64 faults on the first SP-relative stack access if SP is not 16-byte aligned. This constraint is arm64-only -- the x86_64 slice accepts any alignment\n"
             write(2, fs_al, str_len(fs_al))
-            exit(1)
+            fatal_exit()
         }
         if fat_stack_a64 >= 4294967296 {
             uint64 fs_rg = "error: --stack-top=arm64: must be below 2^32: the movz/movk pair the arm64 entry stub patches into the entry code covers bits 31:0 only. This constraint is arm64-only -- the x86_64 slice is bounded by its trampoline's identity map instead\n"
             write(2, fs_rg, str_len(fs_rg))
-            exit(1)
+            fatal_exit()
         }
         if fat_stack_x86 > 4096 && fat_stack_x86 < 16392 {
             uint64 fs_pt = "error: --stack-top=x86_64:'s first push would land inside 0x1000-0x4000: the multiboot slice's trampoline builds its identity-map page tables there, the stack grows down, and the first push writes the eight bytes below the stack top. The stack top must be at most 0x1000 or at least 0x4008. This constraint is x86_64-only -- the arm64 slice's stub has no page tables\n"
             write(2, fs_pt, str_len(fs_pt))
-            exit(1)
+            fatal_exit()
         }
         if fat_stack_x86 >= 2147483648 {
             uint64 fs_hi = "error: --stack-top=x86_64: must be below 0x80000000: at or above 2^31 the assembler widens `mov $imm,%rsp` from a 7-byte sign-extended form to a 10-byte movabs, moving every later patch site while the file size stays fixed. This constraint is x86_64-only -- the arm64 slice is bounded by its movz/movk pair instead\n"
             write(2, fs_hi, str_len(fs_hi))
-            exit(1)
+            fatal_exit()
         }
         if fat_stack_x86 > 1073741824 {
             uint64 fs_1g = "error: --stack-top=x86_64: must be at most 0x40000000: the multiboot slice's trampoline maps a single 512-entry page directory of 2 MiB pages, exactly the first 1 GiB, and a stack above that is unmapped the moment paging is enabled -- the first push triple-faults\n"
             write(2, fs_1g, str_len(fs_1g))
-            exit(1)
+            fatal_exit()
         }
     }
     // Checked BEFORE --stack-top='s own "only meaningful" row just below:
@@ -11801,22 +11925,22 @@ fn main() {
     if reset_vector_set != 0 && emit_mode != 8 {
         uint64 rv_im = "error: --reset-vector is only meaningful with --emit=image: it selects the reset-vector form of the flat image, and only --emit=image produces a flat image for it to select\n"
         write(2, rv_im, str_len(rv_im))
-        exit(1)
+        fatal_exit()
     }
     if load_addr_set != 0 && emit_mode != 8 {
         uint64 la_im = "error: --load-addr= is only meaningful with --emit=image: hosted containers carry their load address in their own headers\n"
         write(2, la_im, str_len(la_im))
-        exit(1)
+        fatal_exit()
     }
     if stack_top_set != 0 && emit_mode != 8 {
         uint64 st_im = "error: --stack-top= is only meaningful with --emit=image: hosted containers manage the stack pointer through their own loader, not a flag\n"
         write(2, st_im, str_len(st_im))
-        exit(1)
+        fatal_exit()
     }
     if image_header_set != 0 && emit_mode != 8 {
         uint64 ih_im = "error: --image-header is only meaningful with --emit=image: it prefixes a flat image with an arm64 boot header, and only --emit=image produces a flat image to prefix\n"
         write(2, ih_im, str_len(ih_im))
-        exit(1)
+        fatal_exit()
     }
 
     // arch x OS validation. This runs AFTER the emit_mode -> target_os
@@ -11836,7 +11960,7 @@ fn main() {
         write(2, xo_o, str_len(xo_o))
         uint64 xo3 = " is not a supported target pair: x86_64 and arm64 build for linux, macos, windows, android or none; riscv32 and xtensa build for linux or none. (--emit=macho and --emit=pe select macos and windows even when --target= is absent.)\n"
         write(2, xo3, str_len(xo3))
-        exit(1)
+        fatal_exit()
     }
 
     // --target=esp32 is only meaningful on the xtensa freestanding ELF path
@@ -11847,7 +11971,7 @@ fn main() {
         if arch != 3 || freestanding == 0 || emit_mode != 0 {
             uint64 esp_tgt_msg = "error: --target=esp32 requires --arch=xtensa --freestanding\n"
             write(2, esp_tgt_msg, str_len(esp_tgt_msg))
-            exit(1)
+            fatal_exit()
         }
         // ESP32 initial SP: top of the DRAM window, 16-byte aligned,
         // instead of the qemu-lx60 stack top. Assigned BEFORE codegen so the
@@ -12058,7 +12182,7 @@ fn main() {
             write(2, " error(s) found in ", 19)
             write(2, input_path, str_len(input_path))
             write(2, "\n", 1)
-            exit(1)
+            fatal_exit()
         }
         write(1, "krc check: ", 11)
         write(1, input_path, str_len(input_path))
@@ -12117,7 +12241,7 @@ fn main() {
             uint64 gate_threshold = lc_min_fitness
             if gate_threshold == 0 { gate_threshold = 50 }
             if lc_check_ci_gate(gate_threshold) != 0 {
-                exit(1)
+                fatal_exit()
             }
         }
         exit(0)

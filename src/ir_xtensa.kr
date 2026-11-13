@@ -152,7 +152,7 @@ static uint64 xt_esp32_park_pool_off = 0
 
 fn xt_err(uint64 msg) {
     write(2, msg, str_len(msg))
-    exit(1)
+    fatal_exit()
 }
 fn xt_nyi_op(uint64 op) {
     uint64 m = "error: xtensa: IR op "
@@ -162,7 +162,7 @@ fn xt_nyi_op(uint64 op) {
     write(2, nb, nl)
     uint64 t = " not yet implemented\n"
     write(2, t, str_len(t))
-    exit(1)
+    fatal_exit()
 }
 
 // ---------------------------------------------------------------------------
@@ -1706,7 +1706,7 @@ fn asm_emit_xt(uint64 str_tok) {
     write(2, "error: xtensa: unrecognized asm instruction '", 45)
     write(2, sptr, slen)
     write(2, "'\n", 2)
-    exit(1)
+    fatal_exit()
 }
 
 // --- Per-instruction emission -------------------------------------------
@@ -3440,7 +3440,7 @@ fn resolve_fixups_xtensa() {
             diag_sugg_print()
             write(2, "\n", 1)
             diag_span_of(wtt)
-            exit(1)
+            fatal_exit()
         }
         i = i + 1
     }
