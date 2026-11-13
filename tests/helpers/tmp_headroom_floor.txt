@@ -9,6 +9,11 @@
 # The /tmp figure is per-user and so includes other jobs of the same user; it
 # stayed small (below). Whole-filesystem statvfs drops are informational only.
 #
+# The box was NOT quiet during the run (load average 11-13: another session's
+# pytest and mutation runs). That does not move the floor: it comes from the
+# private SUITE_TMP peak, which only this run writes; the /tmp growth figure
+# does include those other jobs, so it is an upper bound.
+#
 # Measurement run: t0-harness 6a07a0ff, REQUIRE_FULL_RUN=1 make pe-gate (full
 # toolchain, 3850 rows, 0 skipped) on Linux x86_64 (Ryzen 9 7900X, Ubuntu 26.04),
 # KR_TEST_TMP on ext4 under ~/.cache, floors overridden to 0 for the run, one

@@ -134,9 +134,12 @@ at exit and on an interrupt. The root must be absolute, outside the checkout, pl
 and allow running programs; anything else stops the suite with a message (#262). Before a row
 runs, the free space of the root — including a disk or user quota — is checked against
 `tests/helpers/tmp_headroom_floor.txt` (measured); `KR_TEST_MIN_FREE_GIB` /
-`KR_TEST_MIN_FREE_INODES` lower it on a small host. The `make check` / CI scripts and
-`make bootstrap` (#264: no more fixed `/tmp/krc3_bs` names) use the same root, unchanged when
-neither variable is set. The qemu example checkers clean up their logs, dumps and sockets when a
+`KR_TEST_MIN_FREE_INODES` lower it on a small host; a filesystem without an inode limit
+(btrfs, vfat, tmpfs with `nr_inodes=0`) is not refused for "0 inodes free" (#265), and a kernel
+too old to read quotas (before 5.14) gets a warning. The `make check` / CI scripts and
+`make bootstrap` (#264: no more fixed `/tmp/krc3_bs` names) use the same root and export it as
+`TMPDIR` for their own temporary files (#266); with neither variable set, their paths are
+unchanged. The qemu example checkers clean up their logs, dumps and sockets when a
 time limit stops them (#261), and `examples/tutorial-btree` puts its database at `argv[1]`, else
 `$TMPDIR` (#263).
 
