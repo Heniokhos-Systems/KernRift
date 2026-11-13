@@ -36,6 +36,10 @@ if [ -z "${KRC_ARCH:-}" ]; then
 fi
 RUNNER="${DIFF_RUNNER:-}"
 . "$DIR/../helpers/qemu_bin.sh"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$DIR/../helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$REPO") || exit 2
 QEMU_RUNNER="${QEMU_RUNNER:-$(qemu_bin aarch64)}"
 
 PASS=0
@@ -57,8 +61,8 @@ run_bin() {
 if [ "$MODE" = "backend" ]; then
     for src in "$DIR"/corpus/*.kr; do
         name="$(basename "$src" .kr)"
-        leg_bin="$(mktemp /tmp/krc_diff_${name}_leg_XXXX)"; rm -f "$leg_bin"
-        ir_bin="$(mktemp /tmp/krc_diff_${name}_ir_XXXX)"; rm -f "$ir_bin"
+        leg_bin="$(mktemp "$KRT_R/krc_diff_${name}_leg_XXXX")"; rm -f "$leg_bin"
+        ir_bin="$(mktemp "$KRT_R/krc_diff_${name}_ir_XXXX")"; rm -f "$ir_bin"
         leg_log="$(mktemp)"; ir_log="$(mktemp)"
 
         $KRC --legacy $KRC_ARCH "$src" -o "$leg_bin" > "$leg_log" 2>&1
@@ -107,8 +111,8 @@ elif [ "$MODE" = "crossarch" ]; then
     # to behave identically across x86_64 and arm64 IR.
     for src in "$DIR"/corpus/*.kr "$DIR"/ir-only/*.kr; do
         name="$(basename "$src" .kr)"
-        x64_bin="$(mktemp /tmp/krc_diff_${name}_x64_XXXX)"; rm -f "$x64_bin"
-        a64_bin="$(mktemp /tmp/krc_diff_${name}_a64_XXXX)"; rm -f "$a64_bin"
+        x64_bin="$(mktemp "$KRT_R/krc_diff_${name}_x64_XXXX")"; rm -f "$x64_bin"
+        a64_bin="$(mktemp "$KRT_R/krc_diff_${name}_a64_XXXX")"; rm -f "$a64_bin"
         blog="$(mktemp)"
 
         if ! $KRC --arch=x86_64 "$src" -o "$x64_bin" > "$blog" 2>&1; then

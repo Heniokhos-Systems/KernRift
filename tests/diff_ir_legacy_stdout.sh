@@ -5,9 +5,13 @@
 # return-by-value, nested structs, defer, fstrings.
 KRC="${KRC:-./build/krc3}"
 . "$(dirname "$0")/helpers/qemu_bin.sh"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$(dirname "$0")/helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$(dirname "$0")/..") || exit 2
 # arm64 natively on an aarch64 host ("env" is a no-op prefix), else qemu (#227).
 if [ "$(uname -m)" = aarch64 ]; then QEMU=env; else QEMU="$(qemu_bin aarch64)"; fi
-TMP=/tmp/diffo_$$
+TMP=$KRT_R/diffo_$$
 DIV=0; TOTAL=0
 out_one() {
     local arch="$1"; local flags="$2"; local o="$TMP.$3"

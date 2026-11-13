@@ -27,6 +27,10 @@
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$DIR/../helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$REPO") || exit 2
 KRC="${KRC:-$REPO/../build/krc2}"
 if [ ! -x "$KRC" ]; then KRC="$REPO/build/krc2"; fi
 if [ ! -x "$KRC" ]; then echo "fuzz: krc not found ($KRC)" >&2; exit 2; fi
@@ -69,8 +73,8 @@ record_regression() {
 run_one() {
     local src="$1" expected="$2" category="$3"
     local name="$(basename "$src" .kr)"
-    local leg_bin="$(mktemp /tmp/krc_fuzz_${name}_leg_XXXX)"; rm -f "$leg_bin"
-    local ir_bin="$(mktemp /tmp/krc_fuzz_${name}_ir_XXXX)"; rm -f "$ir_bin"
+    local leg_bin="$(mktemp "$KRT_R/krc_fuzz_${name}_leg_XXXX")"; rm -f "$leg_bin"
+    local ir_bin="$(mktemp "$KRT_R/krc_fuzz_${name}_ir_XXXX")"; rm -f "$ir_bin"
     local blog="$(mktemp)"
 
     if ! $KRC --legacy $KRC_ARCH "$src" -o "$leg_bin" > "$blog" 2>&1; then
@@ -138,7 +142,7 @@ if [ "$reg_count" -gt 0 ]; then
 fi
 
 # --- Fresh random programs ---
-FUZZ_TMP="$(mktemp -d /tmp/krc_fuzz_corpus_XXXX)"
+FUZZ_TMP="$(mktemp -d "$KRT_R/krc_fuzz_corpus_XXXX")"
 if ! python3 "$DIR/generate.py" --out "$FUZZ_TMP" --count "$FUZZ_COUNT" --seed "$FUZZ_SEED" > /dev/null 2>&1; then
     echo "fuzz: generate.py failed (seed=$FUZZ_SEED is probably non-decimal — use a plain integer)" >&2
     rm -rf "$FUZZ_TMP"

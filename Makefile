@@ -137,7 +137,6 @@ build-import: build/krc2
 test: build/krc2 build/kr-bin
 	@echo "=== Running test suite ==="
 	@case "$(CURDIR)" in *[[:space:]]*) echo "error: make test: the checkout path '$(CURDIR)' contains whitespace, which the suite does not support; move the checkout" >&2; exit 2 ;; esac; \
-	 case "$${TMPDIR:-/tmp}" in *[[:space:]]*) echo "error: make test: TMPDIR '$$TMPDIR' contains whitespace, which the suite does not support; unset it or choose another" >&2; exit 2 ;; esac; \
 	 t="build/krc-test.$$$$"; \
 	 trap 'rm -f "$$t"' EXIT; \
 	 trap 'p=$$!; [ -z "$$p" ] || { pkill -TERM -s "$$p" 2>/dev/null; kill -TERM -"$$p" 2>/dev/null; kill -TERM "$$p" 2>/dev/null; }; exit 130' INT; \
@@ -195,18 +194,16 @@ check: build/krc2 bootstrap test
 	@echo "=== check: all gates passed ==="
 
 # Verify bootstrap convergence
+# One recipe line (#264): a private mktemp -d directory under the test
+# scratch root (tests/helpers/test_tmp.sh: KR_TEST_TMP, else TMPDIR, else
+# /tmp), removed by the EXIT trap on the PASS and the FAIL path alike. The
+# fixed /tmp/krc3_bs names it used collided between two checkouts.
 bootstrap: build/krc2
 	@echo "=== Bootstrap verification ==="
-	@cp build/krc.kr /tmp/krc_bs_src.kr
-	@./build/krc2 --arch=x86_64 /tmp/krc_bs_src.kr -o /tmp/krc3_bs 2>/dev/null
-	@chmod +x /tmp/krc3_bs
-	@/tmp/krc3_bs --arch=x86_64 /tmp/krc_bs_src.kr -o /tmp/krc4_bs 2>/dev/null
-	@if diff /tmp/krc3_bs /tmp/krc4_bs >/dev/null 2>&1; then \
-		echo "PASS: fixed point at $$(wc -c < /tmp/krc3_bs) bytes"; \
-	else \
-		echo "FAIL: krc3 != krc4"; exit 1; \
-	fi
-	@rm -f /tmp/krc_bs_src.kr /tmp/krc3_bs /tmp/krc4_bs
+	@. tests/helpers/test_tmp.sh && R=$$(kr_test_root "$(CURDIR)") && B=$$(mktemp -d "$$R/krc_bs.XXXXXX") || exit 2; trap 'rm -rf "$$B"' EXIT; \
+	 cp build/krc.kr "$$B/src.kr"; ./build/krc2 --arch=x86_64 "$$B/src.kr" -o "$$B/krc3" 2>/dev/null; chmod +x "$$B/krc3" 2>/dev/null; \
+	 "$$B/krc3" --arch=x86_64 "$$B/src.kr" -o "$$B/krc4" 2>/dev/null; \
+	 if [ -s "$$B/krc3" ] && cmp -s "$$B/krc3" "$$B/krc4"; then echo "PASS: fixed point at $$(wc -c < "$$B/krc3") bytes"; else echo "FAIL: krc3 != krc4"; exit 1; fi
 
 # Install to INSTALL_DIR
 # Installs `kr` alongside `krc` because the compiler's own default output now

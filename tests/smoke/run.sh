@@ -18,6 +18,10 @@
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/.." && pwd)"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$DIR/../helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$REPO") || exit 2
 KRC="${KRC:-$REPO/../build/krc2}"
 # Default resolution: prefer build/krc2 if KRC wasn't explicitly set and
 # the default doesn't exist.
@@ -61,7 +65,7 @@ for src in "$DIR"/*.kr; do
     TOTAL=$((TOTAL + 1))
     expected="$(grep -oE '// expected:[[:space:]]*[0-9]+' "$src" | head -1 | grep -oE '[0-9]+$')"
     expected="${expected:-0}"
-    out="$(mktemp /tmp/krc_smoke_${name}_XXXX)"
+    out="$(mktemp "$KRT_R/krc_smoke_${name}_XXXX")"
     rm -f "$out"
     build_log="$(mktemp)"
     if ! $KRC $KRC_FLAGS "$src" -o "$out" > "$build_log" 2>&1; then

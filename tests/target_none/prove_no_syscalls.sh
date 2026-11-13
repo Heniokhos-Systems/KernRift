@@ -95,6 +95,10 @@
 set -u
 DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$DIR/../.." && pwd)"
+# Scratch under the one scratch root (#250): $KR_TEST_TMP, else $TMPDIR,
+# else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
+. "$DIR/../helpers/test_tmp.sh"
+KRT_R=$(kr_test_root "$REPO") || exit 2
 KRC="${KRC:-$REPO/build/krc2}"
 
 # REFUSE A $KRC THAT INJECTS AN --arch=, because gate 1 cannot measure anything
@@ -125,9 +129,9 @@ KRC="${KRC:-$REPO/build/krc2}"
 # a bare compiler produces a fat KRBOFAT container. Anything else means $KRC
 # is injecting an arch somewhere, and gate 1 cannot measure through it.
 if [ -n "${KRC:-}" ]; then
-    _pk_src="$(mktemp "${TMPDIR:-/tmp}/krc_archprobe_XXXXXX.kr")" && [ -n "$_pk_src" ] \
+    _pk_src="$(mktemp "$KRT_R/krc_archprobe_XXXXXX.kr")" && [ -n "$_pk_src" ] \
         || { echo "error: mktemp failed for the arch probe" >&2; exit 2; }
-    _pk_out="$(mktemp -u "${TMPDIR:-/tmp}/krc_archprobe_XXXXXX.bin")" && [ -n "$_pk_out" ] \
+    _pk_out="$(mktemp -u "$KRT_R/krc_archprobe_XXXXXX.bin")" && [ -n "$_pk_out" ] \
         || { rm -f "$_pk_src"; echo "error: mktemp -u failed for the arch probe" >&2; exit 2; }
     printf 'fn main() -> uint64 {\n    return 0\n}\n' > "$_pk_src"
     if $KRC "$_pk_src" -o "$_pk_out" >/dev/null 2>&1 && [ -s "$_pk_out" ]; then
@@ -325,8 +329,8 @@ fi
 
 # A failed mktemp must stop the gate: with TMP empty every path below would
 # be rooted at / ("$TMP/base" is /base).
-TMP=$(mktemp -d "${TMPDIR:-/tmp}/krc_tn_gate_XXXXXX") && [ -n "$TMP" ] && [ -d "$TMP" ] \
-    || { echo "error: mktemp -d failed under ${TMPDIR:-/tmp}" >&2; exit 2; }
+TMP=$(mktemp -d "$KRT_R/krc_tn_gate_XXXXXX") && [ -n "$TMP" ] && [ -d "$TMP" ] \
+    || { echo "error: mktemp -d failed under $KRT_R" >&2; exit 2; }
 # Gate 2's programs import "../std/...". Imports resolve against the importing
 # FILE's own directory first, then against the INSTALLED stdlib -- so a program
 # in /tmp would either fail to resolve or silently pick up whatever
