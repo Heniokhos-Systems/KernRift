@@ -1,6 +1,88 @@
 # Free-space floors of tests/run_tests.sh's scratch root (#250), read at suite
-# start; KR_TEST_MIN_FREE_GIB / KR_TEST_MIN_FREE_INODES override them.
-# PROVISIONAL: the plan's 6 GiB until the measurement run replaces this file
-# with the measured peak x 1.5 and its derivation.
-min_free_gib 6
-min_free_inodes 200000
+# start; KR_TEST_MIN_FREE_GIB / KR_TEST_MIN_FREE_INODES override them (0 disables).
+#
+# Measured, not guessed: floor = ceil(peak x 1.5), bytes in whole GiB, inodes
+# rounded up to 10000. Peak = what the run itself holds at once: the bytes and
+# entries of its SUITE_TMP (apparent size, like du -sb) plus the growth of the
+# user's /tmp quota usage (curspace/curinodes, Q_GETQUOTA) over the run -- the
+# few files that stay in /tmp (QMP sockets, wineserver) and anything missed.
+# The /tmp figure is per-user and so includes other jobs of the same user; it
+# stayed small (below). Whole-filesystem statvfs drops are informational only.
+#
+# Measurement run: t0-harness 6a07a0ff, REQUIRE_FULL_RUN=1 make pe-gate (full
+# toolchain, 3850 rows, 0 skipped) on Linux x86_64 (Ryzen 9 7900X, Ubuntu 26.04),
+# KR_TEST_TMP on ext4 under ~/.cache, floors overridden to 0 for the run, one
+# sample per second (1893 samples, 1892 s).
+#   peak SUITE_TMP: 6107363976 bytes (5.688 GiB), 3951 entries
+#   peak /tmp quota growth: 90218496 bytes, 1292 inodes
+#   peak combined: 6144469640 bytes (5.722 GiB) at t=1414.1 s, 4744 entries
+#   floor: ceil(5.722 GiB x 1.5) = 9 GiB; ceil(4744 x 1.5 / 10000) x 10000 = 10000 inodes
+#
+# Every 30th sample (t s, SUITE_TMP bytes, SUITE_TMP entries, /tmp quota growth bytes, inodes):
+#       0.0            0      0          0      0
+#      30.0          844      4     -53248      0
+#      60.0          744      4      28672      3
+#      90.0         6138      4      28672      6
+#     120.0          824      4   19116032    633
+#     150.0          761      4   19111936    632
+#     180.0         6333      4   19128320    634
+#     210.0          844      4   25653248    636
+#     240.0         5817      4   24412160    626
+#     270.0         6138      4   33918976    627
+#     300.0          900      4   33918976    627
+#     330.0         6208      4   33923072    627
+#     360.0         1051      4   33927168    626
+#     390.0         5902      4   33931264    626
+#     420.0          887      4   33939456    627
+#     450.1          770      4   33918976    629
+#     480.1         1251      4   34447360    635
+#     510.1          800      3   36343808    635
+#     540.1         1846      5   36347904    635
+#     570.1         5918      5   36347904    635
+#     600.1         4682      5   36352000    635
+#     630.1       985344      6   17903616    629
+#     660.1         2034      4   21315584    646
+#     690.1        25120      5   22552576    677
+#     720.1          512      3   22876160    771
+#     750.1          440      3   32419840    786
+#     780.1          588      3   32419840    786
+#     810.1         1812      3   32419840    786
+#     840.1          239      4   32419840    786
+#     870.1           48      2   32419840    788
+#     900.1           48      2   32419840    787
+#     930.1           48      2   33009664    796
+#     960.1       202140     31   32428032    793
+#     990.1   1270928167   2066   32432128    794
+#    1020.1   1270946160   2069   32436224    794
+#    1050.1   1270963903   2072   32436224    794
+#    1080.1   1270983316   2075   32436224    794
+#    1110.1   1271103147   2105   35151872    814
+#    1140.1   1271298981   2138   35155968    815
+#    1170.1   1271319577   2144   35155968    815
+#    1200.1   1271432381   2270   35160064    816
+#    1230.1   1287760302   2535   35172352    817
+#    1260.1   1305669854   2665   35180544    819
+#    1290.1   1288358050   2662   35180544    819
+#    1320.1   1301531244   2665   35180544    818
+#    1350.1   1681301828   2670   35180544    819
+#    1380.1   3766672446   2670   35184640    822
+#    1410.1   5841098425   2670   37105664    824
+#    1440.1   2358548953   2670   37117952    824
+#    1470.1   4397091397   2670   17903616    625
+#    1500.1   6106497498   2670   17899520    624
+#    1530.1   2940531646   2670   17903616    624
+#    1560.1   4960961995   2670   24444928    629
+#    1590.2   6103512740   2720   24444928    629
+#    1620.2   6103600348   2725   32055296    631
+#    1650.2   6103624023   2728   33976320    632
+#    1680.2   6103649731   2731   33980416    632
+#    1710.2   6103651021   2731   33984512    632
+#    1740.2   6103686860   2740   33984512    632
+#    1770.2   6103736776   2751   33988608    632
+#    1800.2   6103882910   2779   34017280    633
+#    1830.2        71270     13   34553856    640
+#    1860.2      7262139      6   36454400    639
+#    1890.2      5466054      6   36458496    639
+#    1414.1   6107363976   2670   37105664    824
+min_free_gib 9
+min_free_inodes 10000
