@@ -442,10 +442,11 @@ gate1() {
         done
     done
 
-    # (A2) The CONTAINER emitters, which the rows above do not reach. --target=
-    #      selects the ABI (syscall numbers, calling convention), NOT the
-    #      output format: `--arch=x86_64 --target=windows` emits an ELF whose
-    #      magic is 7f454c46, and PE and Mach-O come out only under --emit=.
+    # (A2) The CONTAINER emitters, through --emit=. Since C1 (#233) a hosted
+    #      --target= with no --emit= also builds its OS's container (Mach-O,
+    #      PE), so the macos/windows rows of (A) reach these emitters too; the
+    #      ELF form of macOS/Windows code is only the --freestanding carrier.
+    #      The --emit= spellings keep this block's rows independent of that.
     #      These rows exist because an injected byte in emit_pe_headers_x64 and
     #      emit_pe_headers_a64 -- both of them -- flagged only the two fat rows
     #      when the matrix had 121 rows, which is what a container emitter

@@ -93,7 +93,7 @@ Currently frozen: all helpers documented in `docs/ERROR_HANDLING.md`
 | Flag                     | Stability |
 |--------------------------|-----------|
 | `--emit=<format>`        | Stable — the accepted spellings are an additive set; none has ever been removed. `krc --emit=<garbage>` prints the whole list, and the suite pins that list against the compiler's own arms both ways (`emit_valid_list_is_complete`). This row used to read `--emit=exe/obj/asm/ir`, which named a spelling (`exe`) the compiler has never accepted and omitted the other 27 it does. |
-| `--target=<name>`        | Stable    |
+| `--target=<name>`        | Stable — selects the OS and, absent `--emit=`, its container (ELF, Mach-O, PE, Android PIE; with `--freestanding`, macOS/Windows keep the ELF carrier) |
 | `--legacy`               | Stable during the IR migration; may become a no-op later. |
 | `--coalesce` / `--no-coalesce` | Stable surface — the heuristic may change. |
 | `--O0` / `--O1`          | Stable surface — the underlying optimizations may change. |
@@ -120,6 +120,14 @@ dispatch chain and was silently ignored, producing a default-target binary.
 It is now rejected outright. Note that `--target=` selects the **OS** (or, for
 `esp32`, the machine target); the instruction set is selected separately with
 `--arch=`.
+
+**Flag combinations.** An `--emit=` must agree with `--target=` (the OS it
+builds for) and with `--arch=` (when its spelling names an architecture, such
+as `win-arm64`); `--targets=` is exclusive of `--arch=`, a hosted `--target=`,
+`--emit=` and `-c`, and an unknown, upper-case or empty `--targets=` name is an
+error; `-g` is accepted only where DWARF is emitted (x86_64/arm64 ELF
+executables). A combination that would silently drop a typed flag is refused
+(exit 1) rather than built; LANGUAGE.md §20 has the rules.
 
 Removing or renaming a flag requires a minor-version bump. Changing the
 *default* value of a flag (e.g., `--O1` becoming `--O2`) also requires a

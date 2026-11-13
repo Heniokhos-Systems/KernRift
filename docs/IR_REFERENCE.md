@@ -126,7 +126,7 @@ nothing, i.e. that mode was already using the legacy backend.
 | **`--emit=obj` / `-c`** | **legacy** | byte-identical with and without `--legacy` (160 B both) |
 | **`--emit=lkm`** | **legacy** | byte-identical with and without `--legacy` |
 | `--emit=image`, `--emit=uefi` | **IR** | the gate excludes only modes 3 and 7; the usual "differs from `--legacy`" evidence is *unavailable* here — both require `--target=none`, and `--legacy` is refused under it (`t6_legacy_tnone_*`), so there is no legacy build to diff against |
-| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:11126`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
+| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:11134`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
 | `--emit=fatimage` (mode 11) | **IR**, per slice | never reaches the gate as 11: `compile_fatimage` (`src/main.kr:9789`) calls `compile()` per slice as mode 9 (x86_64 UEFI) and mode 8 (x86_64 and arm64 image), both IR. Requires `--target=none` and `--arch=x86_64,arm64`, so `--legacy` is refused; `--O0` changes the bytes |
 | `--arch=riscv32`, `--arch=xtensa` (any emit mode) | **IR** | no legacy backend exists for these arches; `--legacy` is a silent no-op |
 | `--emit=ir` | neither — lowering only | the `if emit_mode == 6` block in `compile()`, `src/main.kr` — exits before codegen |
@@ -166,11 +166,15 @@ need legacy codegen for extern relocations"*.
 > round for exactly this reason, and the fix was to move the refusal helper
 > out of `ir.kr` into `codegen.kr` (`src/codegen.kr:1011`–`1100`).
 
-Also verified, and frequently assumed backwards: **`--target=` selects the
-ABI, not the container.** `--arch=x86_64 --target=windows` emits an **ELF**
-(`objdump` reports `elf64-x86-64`). PE and Mach-O only come out of
-`--emit=pe` / `--emit=macho`. A byte-identity gate built on `--target=`
-rows alone will never exercise the PE or Mach-O header emitters.
+Also verified, and easy to assume wrongly: **`--target=` selects the ABI
+and, when no `--emit=` is given, the container** (C1, #233): `--arch=x86_64
+--target=windows` emits a **PE**, `--target=macos` a Mach-O. The ELF form of
+Windows or macOS code exists only as the `--freestanding` carrier —
+`--freestanding --target=windows` emits an ELF (`objdump` reports
+`elf64-x86-64`) holding Windows-ABI code. A byte-identity gate that wants the
+ABI without the container must therefore use the carrier, and one that wants
+the PE or Mach-O header emitters gets them from `--target=` as well as from
+`--emit=pe` / `--emit=macho`.
 
 The corollary for Windows frames (#143): **`target_os == 2` carries the
 frame-pointer rule in any container.** The Windows prologue/epilogue shapes —
@@ -211,7 +215,7 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 ## 3. The per-OS dispatch shape, and where a new case goes
 
 `target_os` values (parsed at `src/main.kr:10746`, derived from `--emit` at
-`src/main.kr:11096`–`11098`, reset per slice by `compile_fat` at `src/main.kr:7365` and `src/main.kr:8193`):
+`src/main.kr:11104`–`11106`, reset per slice by `compile_fat` at `src/main.kr:7365` and `src/main.kr:8193`):
 
 <!-- The previous version of this line read "assigned in 9011-5258, defaults at
      3631/3859/4113/4361/4486/4618". The range ran backwards and every one of
@@ -899,7 +903,7 @@ The driver is `ir_optimize()` (`src/ir.kr:14746`). **There is no
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:13490`, written only at
-`src/main.kr:10913`) and each backend skips the whole call
+`src/main.kr:10921`) and each backend skips the whole call
 (`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2418`,
 `src/ir_xtensa.kr:2832`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
