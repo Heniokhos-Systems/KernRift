@@ -20844,8 +20844,8 @@ static uint64 import_failed = 0
 // produced NO FILE. A release script that writes into a dist/ it has not
 // created yet therefore got a green build and no artifact.
 //
-// Checked HERE, not in codegen_write_output: main.kr:1949 (asm listing) and
-// main.kr:5653 (esp32 image) call this directly and bypass
+// Checked HERE, not in codegen_write_output: main.kr:1955 (asm listing) and
+// main.kr:5659 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {

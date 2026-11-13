@@ -293,10 +293,11 @@ fi
 #   that is known-noisy stops being read, and the next person could not have
 #   told this expected delta from a real one.
 #
-# Pinned to 5ffd8c7, the first parent of the merge that re-pinned it: that
-# merge's own sources are the AFTER side, so gate 1 compares two distinct
-# trees, and every row the merge moved is listed in G1_MOVED below.
-TN_PIN=5ffd8c7a28cddfd5e67facc26fe7bdc552c436df
+# Pinned by C1 (#233) to 9692b7f, the commit its branch was cut from (T0's
+# head; src/ identical to main@T0): C1's merge re-pins it to that merge's own
+# first parent, so gate 1 compares two distinct trees, and every row C1 moved
+# is listed in G1_MOVED below.
+TN_PIN=9692b7f92728b74927544767177fc678fc7c0adb
 # G1_MOVED: the rows TN_PIN is EXPECTED to differ on, one name per line, each
 # with its exit status unchanged. A commit that moves output on purpose (a
 # merge of a codegen change, say) may pin to its own parent and list here
@@ -305,9 +306,30 @@ TN_PIN=5ffd8c7a28cddfd5e67facc26fe7bdc552c436df
 # differ, and a change of exit status all fail. The list belongs to the pin:
 # with TN_BASE set from outside to another commit it is empty (every row must
 # be identical) unless G1_MOVED_WANT is set too.
-# Pinned by the merge of ci-macos-26 to its first parent (5ffd8c7); these are
-# the rows that merge moved, measured when it was made (0 of 147).
-G1_MOVED=""
+# C1 (#233): a hosted --target=macos|windows with no --emit= now builds that
+# OS's container (Mach-O / PE) instead of an ELF holding its code. 18 rows,
+# measured (exit 0 -> 0 each): the --target=macos|windows rows of (A) without
+# an --emit= (IR and --legacy; krc_*_windows_legacy is refused on both sides,
+# by the syscall_raw rule) and the four macos|windows debug_* rows of (B). The (A2) rows
+# already said --emit=pe / --emit=macho and do not move.
+G1_MOVED="krc_x86_64_macos_ir
+krc_x86_64_macos_legacy
+krc_x86_64_windows_ir
+krc_arm64_macos_ir
+krc_arm64_macos_legacy
+krc_arm64_windows_ir
+probe_x86_64_macos_ir
+probe_x86_64_macos_legacy
+probe_x86_64_windows_ir
+probe_x86_64_windows_legacy
+probe_arm64_macos_ir
+probe_arm64_macos_legacy
+probe_arm64_windows_ir
+probe_arm64_windows_legacy
+debug_x86_64_macos
+debug_x86_64_windows
+debug_arm64_macos
+debug_arm64_windows"
 TN_BASE="${TN_BASE:-$TN_PIN}"
 if [ "$TN_BASE" = "$TN_PIN" ]; then G1_MOVED_WANT="${G1_MOVED_WANT-$G1_MOVED}"; else G1_MOVED_WANT="${G1_MOVED_WANT-}"; fi
 

@@ -22418,10 +22418,14 @@ t6_builds "t6_legacy_debug_fat_builds" -- --legacy --debug "$T6_D/arr.kr"
 # against --arch=arm64 --debug, with NO --legacy. NOTHING may be refused
 # for a --debug reason any more -- obj and lkm are the two that reach
 # legacy arm64 codegen, and both now carry the bounds check instead of
-# being turned away. Three spellings still fail here, each for a reason
-# that has nothing to do with --debug and predates it: image, uefi and
-# fatimage require --target=none (not passed here), and lkm is x86_64-only.
-# Those four are asserted on their OWN wording, and every row additionally
+# being turned away. Ten spellings still fail here, each for a reason
+# that has nothing to do with --debug: image, uefi and fatimage require
+# --target=none (not passed here), lkm is x86_64-only, and the six spellings
+# that name x86_64 (elf-x86_64 linux-x86_64 linux-x86-64 mac-x64 windows-x64
+# win-x64) now contradict --arch=arm64 and are refused for that (C1, #237: an
+# --emit= spelling that names an architecture selects it, and refuses an
+# --arch= naming the other one; they used to build arm64 and drop the arch in
+# the spelling). Those ten are asserted on their OWN wording, and every row additionally
 # asserts that the word "--debug" does not appear in the failure -- which
 # is what makes this a no-route-refused sweep rather than a snapshot of
 # which refusal happens to win. The 29-item list below is a hardcoded snapshot, not derived
@@ -22452,11 +22456,21 @@ for ES in $EMIT_SPELLINGS; do
         echo "FAIL: t6_emit_spelling_$ES (refused with a message naming --debug -- a --debug refusal is back on this route: '$ES_ERR')"
         FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
     else
-        # image/uefi need --target=none, and lkm is x86_64-only: three
-        # pre-existing refusals with nothing to do with --debug. Assert
+        # The six x86_64-named spellings contradict --arch=arm64 (#237),
+        # image/uefi/fatimage need --target=none, and lkm is x86_64-only:
+        # refusals with nothing to do with --debug. Assert
         # each on its own wording so a future change that made one of them
         # start refusing for a --debug reason would still be caught above.
-        if [ "$ES" = "image" ] || [ "$ES" = "uefi" ] || [ "$ES" = "fatimage" ]; then
+        if [ "$ES" = "elf-x86_64" ] || [ "$ES" = "linux-x86_64" ] || [ "$ES" = "linux-x86-64" ] \
+           || [ "$ES" = "mac-x64" ] || [ "$ES" = "windows-x64" ] || [ "$ES" = "win-x64" ]; then
+            if [ "$ES_ST" = "1" ] && [ ! -f "$T6_D/es_out" ] \
+               && echo "$ES_ERR" | head -1 | grep -qF -- "error: --emit=$ES conflicts with --arch=arm64: --emit=$ES names the x86_64 architecture"; then
+                PASS=$((PASS + 1))
+            else
+                echo "FAIL: t6_emit_spelling_$ES (expected the --emit=/--arch= conflict refusal, got exit $ES_ST: '$ES_ERR')"
+                FAIL=$((FAIL + 1)); ES_BAD="$ES_BAD $ES"
+            fi
+        elif [ "$ES" = "image" ] || [ "$ES" = "uefi" ] || [ "$ES" = "fatimage" ]; then
             if [ "$ES_ST" != "0" ] && echo "$ES_ERR" | grep -q -- "--target=none"; then
                 PASS=$((PASS + 1))
             else
@@ -22492,7 +22506,7 @@ for ES in $EMIT_SPELLINGS; do
     rm -f "$T6_D/es_out"
 done
 if [ -z "$ES_BAD" ]; then
-    echo "  t6_emit_spelling_enumeration: PASS (29/29 -- no --debug refusal on any route; image/uefi/fatimage/lkm fail for their own pre-existing reasons)"
+    echo "  t6_emit_spelling_enumeration: PASS (29/29 -- no --debug refusal on any route; image/uefi/fatimage/lkm and the six x86_64-named spellings fail for their own reasons)"
 else
     echo "  t6_emit_spelling_enumeration: see failures above for:$ES_BAD"
 fi
@@ -23964,20 +23978,16 @@ else
 fi
 rm -f $SUITE_TMP/krc_uefina_$$
 
-# 6-7. --target=android, BOTH ORDERS, because the two orders fail through
-#      different doors and only one of them is covered by row 1.
-#
-#      MEASURED: `--target=android` does not merely set target_os, it ASSIGNS
-#      emit_mode = 4 in the middle of the argument loop. So with --emit=uefi
-#      FIRST the mode is silently overwritten, the emit_mode-9 refusals never
-#      run, and the build emits an Android PIE ELF at exit 0 -- --emit=image
-#      survives the same line only by the accident of ALSO requiring
-#      --load-addr=, whose "only meaningful with --emit=image" check then
-#      fires. A new mode has no such backstop, so it gets an explicit one.
-#      In the other order --emit=uefi comes last, wins the chain, and is
-#      caught by row 1's target_os rule instead -- a different door, hence a
-#      different expected diagnostic, hence two rows and not one.
-uefi_refuses uefi_refuses_target_android "overridden by --target=android" --arch=x86_64 --emit=uefi --target=android
+# 6-7. --target=android, BOTH ORDERS: the two rows now prove order
+#      independence. --target=android used to ASSIGN emit_mode = 4 in the
+#      middle of the argument loop, so --emit=uefi FIRST was silently
+#      overwritten into an Android PIE at exit 0, and a one-off
+#      "overridden by --target=android" refusal guarded that order. Since C1
+#      (#233) --target= only names the OS -- its container default applies
+#      after the loop and only when no --emit= was given -- so --emit=uefi
+#      survives in either order and both reach row 1's "requires
+#      --target=none" rule.
+uefi_refuses uefi_refuses_target_android "requires --target=none" --arch=x86_64 --emit=uefi --target=android
 uefi_refuses uefi_target_android_first "requires --target=none" --arch=x86_64 --target=android --emit=uefi
 
 # 8. -g: refused. At BASE the -g refusal lives INSIDE `if emit_mode == 8`, so
@@ -27410,25 +27420,48 @@ tn_mp_same_as_linux tn_module_path_xtensa  pair     --arch=xtensa
 # but the call WRITES the path through its buffer argument, so deleting it
 # silently drops that write. Windows is the only target that emits
 # IR_MODULE_PATH (target_os==2 gated), so build the same buffer-alloc
-# skeleton with and without the call and compare PE sizes: with the bug, an
-# unused-result call adds zero bytes over no call at all (fully erased).
-# Size, not cmp -s: the PE COFF header carries a build timestamp, so two
-# builds of even identical code differ in a couple of header bytes -- the
-# artifact SIZE is the part DCE actually changes.
+# skeleton with and without the call and compare the size of the CODE: with
+# the bug, an unused-result call adds zero bytes over no call at all (fully
+# erased). The code size is the .text section's VirtualSize, read from the PE
+# section table: since C1 (#233) --target=windows builds a PE (it used to be an
+# ELF carrying Windows code), and a PE's file size is padded to its section
+# alignment -- 6144 bytes for both programs -- so the file size no longer
+# sees the difference (0xA8 vs 0xD0 bytes of .text when the call is kept).
 TOTAL=$((TOTAL + 1))
 printf 'fn main() {\n    uint64 buf = alloc(300)\n    exit(0)\n}\n' > "$TN_D/mp_nocall.kr"
 printf 'fn main() {\n    uint64 buf = alloc(300)\n    get_module_path(buf, 300)\n    exit(0)\n}\n' > "$TN_D/mp_unused.kr"
 rm -f "$TN_D/mp_nocall_w" "$TN_D/mp_unused_w"
 timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_nocall.kr" -o "$TN_D/mp_nocall_w" >/dev/null 2>&1
 timeout -k 5 "$RUN_TEST_TIMEOUT" "$CP_KRC" --arch=x86_64 --target=windows "$TN_D/mp_unused.kr" -o "$TN_D/mp_unused_w" >/dev/null 2>&1
-if [ -f "$TN_D/mp_nocall_w" ] && [ -f "$TN_D/mp_unused_w" ]; then
-    MP_NC_SZ=$(wc -c < "$TN_D/mp_nocall_w")
-    MP_UN_SZ=$(wc -c < "$TN_D/mp_unused_w")
-    if [ "$MP_NC_SZ" != "$MP_UN_SZ" ]; then
+# pe_text_size FILE: the VirtualSize of the PE's .text section, or nothing
+pe_text_size() {
+    python3 -B - "$1" <<'PETXTEOF' 2> /dev/null
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+pe = struct.unpack_from('<I', b, 0x3c)[0]
+assert b[pe:pe + 4] == b'PE\0\0'
+nsec, = struct.unpack_from('<H', b, pe + 6)
+opt, = struct.unpack_from('<H', b, pe + 20)
+sec = pe + 24 + opt
+for k in range(nsec):
+    o = sec + 40 * k
+    if b[o:o + 8].rstrip(b'\0') == b'.text':
+        print(struct.unpack_from('<I', b, o + 8)[0])
+PETXTEOF
+}
+if ! command -v python3 > /dev/null 2>&1; then
+    skip_row tn_module_path_unused_result_not_dce "needs python3 to read the PE section table"
+elif [ -f "$TN_D/mp_nocall_w" ] && [ -f "$TN_D/mp_unused_w" ]; then
+    MP_NC_SZ=$(pe_text_size "$TN_D/mp_nocall_w")
+    MP_UN_SZ=$(pe_text_size "$TN_D/mp_unused_w")
+    if [ -z "$MP_NC_SZ" ] || [ -z "$MP_UN_SZ" ]; then
+        echo "FAIL: tn_module_path_unused_result_not_dce (no .text section found: are the artifacts PEs? $(head -c 4 "$TN_D/mp_nocall_w" | od -An -c | tr -s ' '))"
+        FAIL=$((FAIL + 1))
+    elif [ "$MP_NC_SZ" != "$MP_UN_SZ" ]; then
         PASS=$((PASS + 1))
-        echo "  tn_module_path_unused_result_not_dce: PASS ($MP_NC_SZ vs $MP_UN_SZ bytes)"
+        echo "  tn_module_path_unused_result_not_dce: PASS (.text $MP_NC_SZ vs $MP_UN_SZ bytes)"
     else
-        echo "FAIL: tn_module_path_unused_result_not_dce (no-call and unused-result artifacts are the same size ($MP_NC_SZ) -- get_module_path was DCE'd)"
+        echo "FAIL: tn_module_path_unused_result_not_dce (no-call and unused-result .text are the same size ($MP_NC_SZ) -- get_module_path was DCE'd)"
         FAIL=$((FAIL + 1))
     fi
 else
@@ -30953,13 +30986,34 @@ fi
 rm -f "$II_SRC" "$II_BIN"
 fi
 
+# emit_recipe SPELLING -> "magic|flags|source[|arch]". The 11 spellings that
+# NAME an architecture (#237, C1) carry their own --arch= and an expected arch:
+# since C1 such a spelling selects its architecture, and an --arch= naming the
+# other one is refused -- so under `make test`'s x86_64 wrapper (and CI's, and
+# native_suite.sh's) an arm64-named spelling, and under the arm64 wrapper (CI's
+# arm64 job, the Pi) an x86_64-named one, would be refused without it. The
+# recipe's --arch= comes after the wrapper's and wins (the last --arch= wins);
+# the artifact is then checked to BE that arch (ELF e_machine, Mach-O cputype,
+# PE Machine), not only to carry the container's magic.
 emit_recipe() {
     case "$1" in
-        elf|elf-arm64|elf-x86_64|elfexe|linux|linux-x86_64|linux-arm64|linux-x86-64|obj|android)
+        elf-arm64|linux-arm64)
+            echo "7f454c46|--arch=arm64|$EV_SRC|arm64" ;;
+        elf-x86_64|linux-x86_64|linux-x86-64)
+            echo "7f454c46|--arch=x86_64|$EV_SRC|x86_64" ;;
+        elf|elfexe|linux|obj|android)
             echo "7f454c46||$EV_SRC" ;;
-        macho|mac|macos|mac-x64|mac-arm64|darwin)
+        mac-x64)
+            echo "cffaedfe|--arch=x86_64|$EV_SRC|x86_64" ;;
+        mac-arm64)
+            echo "cffaedfe|--arch=arm64|$EV_SRC|arm64" ;;
+        macho|mac|macos|darwin)
             echo "cffaedfe||$EV_SRC" ;;
-        windows|windows-x64|windows-arm64|win|win-x64|win-arm64|pe)
+        windows-x64|win-x64)
+            echo "4d5a0000|--arch=x86_64|$EV_SRC|x86_64" ;;
+        windows-arm64|win-arm64)
+            echo "4d5a0000|--arch=arm64|$EV_SRC|arm64" ;;
+        windows|win|pe)
             echo "4d5a0000||$EV_SRC" ;;
         # An .ko is a relocatable ELF, but it needs a @module_init to be
         # emitted at all, so it cannot share the default source.
@@ -31061,12 +31115,24 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# ev_arch FILE: the architecture an ELF / 64-bit Mach-O / PE header names
+# (x86_64, arm64, or "other:<bytes>"), read with od so no other tool is needed.
+ev_arch() {
+    local m
+    case "$(xxd -p -l4 "$1")" in
+        7f454c46) m=$(od -An -tx1 -j18 -N2 "$1" | tr -d ' \n') ;;
+        cffaedfe) m=$(od -An -tx1 -j4 -N4 "$1" | tr -d ' \n') ;;
+        4d5a*)    m=$(od -An -tx1 -j$(( $(od -An -tu4 -j60 -N4 "$1" | tr -d ' ') + 4 )) -N2 "$1" | tr -d ' \n') ;;
+    esac
+    case "$m" in 3e00|07000001|6486) echo x86_64 ;; b700|0c000001|64aa) echo arm64 ;; *) echo "other:$m" ;; esac
+}
 for GOOD in $EV_ALL; do
     TOTAL=$((TOTAL + 1))
     rm -f "$EV_BIN"
     EV_R=$(emit_recipe "$GOOD")
     EXP_MAGIC="${EV_R%%|*}"; EV_REST="${EV_R#*|}"
     EV_FLAGS="${EV_REST%%|*}"; EV_IN="${EV_REST#*|}"
+    EV_ARCH=""; case "$EV_IN" in *'|'*) EV_ARCH="${EV_IN#*|}"; EV_IN="${EV_IN%%|*}" ;; esac
     if [ -z "$EV_R" ]; then
         echo "FAIL: emit_accept_$GOOD (no recipe; see emit_recipe_covers_every_alias)"; FAIL=$((FAIL + 1))
     elif [ "$EXP_MAGIC" = "STDOUT" ]; then
@@ -31090,8 +31156,10 @@ for GOOD in $EV_ALL; do
                 *)
                     PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (headerless, first bytes $GOT_MAGIC)" ;;
             esac
+        elif [ "$GOT_MAGIC" = "$EXP_MAGIC" ] && [ -n "$EV_ARCH" ] && [ "$(ev_arch "$EV_BIN")" != "$EV_ARCH" ]; then
+            echo "FAIL: emit_accept_$GOOD (magic $GOT_MAGIC, but the header names $(ev_arch "$EV_BIN"), want $EV_ARCH -- the spelling names an architecture)"; FAIL=$((FAIL + 1))
         elif [ "$GOT_MAGIC" = "$EXP_MAGIC" ]; then
-            PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC)"
+            PASS=$((PASS + 1)); echo "  emit_accept_$GOOD: PASS (magic $GOT_MAGIC${EV_ARCH:+, $EV_ARCH})"
         else
             echo "FAIL: emit_accept_$GOOD (expected magic $EXP_MAGIC, got $GOT_MAGIC)"; FAIL=$((FAIL + 1))
         fi

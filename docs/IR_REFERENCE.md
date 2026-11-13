@@ -126,8 +126,8 @@ nothing, i.e. that mode was already using the legacy backend.
 | **`--emit=obj` / `-c`** | **legacy** | byte-identical with and without `--legacy` (160 B both) |
 | **`--emit=lkm`** | **legacy** | byte-identical with and without `--legacy` |
 | `--emit=image`, `--emit=uefi` | **IR** | the gate excludes only modes 3 and 7; the usual "differs from `--legacy`" evidence is *unavailable* here — both require `--target=none`, and `--legacy` is refused under it (`t6_legacy_tnone_*`), so there is no legacy build to diff against |
-| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:10716`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
-| `--emit=fatimage` (mode 11) | **IR**, per slice | never reaches the gate as 11: `compile_fatimage` (`src/main.kr:9409`) calls `compile()` per slice as mode 9 (x86_64 UEFI) and mode 8 (x86_64 and arm64 image), both IR. Requires `--target=none` and `--arch=x86_64,arm64`, so `--legacy` is refused; `--O0` changes the bytes |
+| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:10907`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
+| `--emit=fatimage` (mode 11) | **IR**, per slice | never reaches the gate as 11: `compile_fatimage` (`src/main.kr:9601`) calls `compile()` per slice as mode 9 (x86_64 UEFI) and mode 8 (x86_64 and arm64 image), both IR. Requires `--target=none` and `--arch=x86_64,arm64`, so `--legacy` is refused; `--O0` changes the bytes |
 | `--arch=riscv32`, `--arch=xtensa` (any emit mode) | **IR** | no legacy backend exists for these arches; `--legacy` is a silent no-op |
 | `--emit=ir` | neither — lowering only | the `if emit_mode == 6` block in `compile()`, `src/main.kr` — exits before codegen |
 
@@ -210,8 +210,8 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 
 ## 3. The per-OS dispatch shape, and where a new case goes
 
-`target_os` values (parsed at `src/main.kr:10364`, derived from `--emit` at
-`src/main.kr:10686`–`10688`, reset per slice by `compile_fat` at `src/main.kr:7115` and `src/main.kr:8089`):
+`target_os` values (parsed at `src/main.kr:10544`, derived from `--emit` at
+`src/main.kr:10877`–`10879`, reset per slice by `compile_fat` at `src/main.kr:7121` and `src/main.kr:8095`):
 
 <!-- The previous version of this line read "assigned in 9011-5258, defaults at
      3631/3859/4113/4361/4486/4618". The range ran backwards and every one of
@@ -272,7 +272,7 @@ by the command above).
   guard cannot see it, because no trap instruction is emitted. Three such
   sites shipped in this compiler; see §9.
 - **A new arch × OS pair is validated by an allow-list**, not a blacklist:
-  `arch_os_pair_supported()` (`src/main.kr:8656`) is per-row
+  `arch_os_pair_supported()` (`src/main.kr:8662`) is per-row
   `if os == n { return 1 }` with a `return 0` fall-through, checked on the
   resolved pair before every compile entry. Adding an arch without adding its
   row is a hard error at the first build. Before it existed,
@@ -879,7 +879,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
   `src/codegen.kr:16718`). `_start` is not a seed, so freestanding riscv32 and
   xtensa (and `--emit=image`) entry points had to be added explicitly
-  (`src/main.kr:4572`–`4587`).
+  (`src/main.kr:4578`–`4593`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
@@ -899,7 +899,7 @@ The driver is `ir_optimize()` (`src/ir.kr:14746`). **There is no
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:13490`, written only at
-`src/main.kr:10526`) and each backend skips the whole call
+`src/main.kr:10711`) and each backend skips the whole call
 (`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2418`,
 `src/ir_xtensa.kr:2832`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
@@ -1845,7 +1845,7 @@ opcodes that were never emitted.
 | cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13765`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |
-| `arch_os_pair_supported()` | yes (`src/main.kr:8656`) | **absent** — no arch × OS allow-list |
+| `arch_os_pair_supported()` | yes (`src/main.kr:8662`) | **absent** — no arch × OS allow-list |
 | `--target=amdgpu-native` | no | yes |
 | var map | FNV-1a open-addressed 4096-slot hash (`src/ir.kr:1014`) | linear scan (`ir.mlr:1013`) |
 | per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:14502`) | a 65536-entry walk stack |

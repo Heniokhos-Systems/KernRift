@@ -284,6 +284,12 @@ fn diag_span_of(uint64 tok_idx) {
     diag_print_source_line(tok_start, tok_text_len(tok_idx), srcmap_line(tok_start))
 }
 
+// The compiler's one fatal exit (C1): a command line or a program the
+// compiler refuses ends here, with exit status 1.
+fn fatal_exit() {
+    exit(1)
+}
+
 // Immediate fatal: "file:line:col: error: <msg>" + source span + caret, exit(1).
 // For the write+exit error sites in the parser and codegen.
 @export
@@ -8817,6 +8823,192 @@ fn target_os_flag_name(uint64 os) -> uint64 {
 }
 
 // ===========================================================================
+// C1 (#233 #237): ONE resolution of OS, container, architecture and
+// fat-vs-single, right after the argument loop.
+// ===========================================================================
+//
+// Five facts -- target OS, architecture, container, fat-vs-single and debug
+// info -- used to be decided in different places from different variables, and
+// nothing checked that they agreed: --target=macos without --emit= wrote an ELF
+// holding macOS code, --target=android rewrote emit_mode from INSIDE the
+// argument loop (so the result depended on flag order), a hosted --target=
+// alone built the default fat binary (the flag silently ignored), and
+// --emit=win-arm64 built x86_64. The argument loop now only RECORDS what was
+// typed; resolve_os_container() applies the rules once, and nothing after it
+// re-decides any of the four:
+//   R1  an explicit hosted --target= and an executable --emit= (the LAST
+//       --emit=) must name the same OS -- except the ELF carrier,
+//       `--freestanding --target=macos|windows` with an ELF-family --emit=;
+//   R2  with no --emit=/-c, the hosted --target= chooses the container (linux
+//       ELF, macos Mach-O, windows PE, android Android PIE; with
+//       --freestanding, macos/windows keep the ELF carrier);
+//   R9  an --emit= spelling that names an architecture (win-arm64, elf-x86_64,
+//       ...) selects it when --arch= was not typed. arch_set stays 0: it
+//       means "--arch= was typed", which is what the explicit-arch refusals
+//       and R8 key on. (Its contradiction refusal runs later, after the
+//       --target=none block, so --emit=win-x64 --arch=arm64 --target=none
+//       keeps its --target=none message.)
+//   R5  fat iff --targets= was given, or none of --arch=, --emit=/-c or a
+//       hosted --target= was. cli_is_fat is the ONLY fat-vs-single predicate:
+//       the dispatch and the output name both read it.
+// R3 (an exe --emit= sets the OS when no --target= did) stays where it was,
+// in the auto-set rows after this call: after R1, `target_os == 0` there can
+// only mean "no --target=".
+
+// The user typed --freestanding (--target=none also sets `freestanding`, but
+// only the typed flag selects the ELF carrier).
+static uint64 cli_freestanding_flag = 0
+// The LAST --emit=/-c as typed ("--emit=win-x64", "-c"); 0 = none. Every
+// --emit= arm and -c reset it, so a later one replaces an earlier one.
+static uint64 cli_emit_flag = 0
+// The architecture the LAST --emit= spelling names (0 x86_64, 1 arm64), or
+// 0xFF when it names none; reset by every --emit= arm and by -c.
+static uint64 cli_emit_arch = 0xFF
+// The value of the last --arch= as typed ("x86_64", "aarch64", ...); 0 = none.
+static uint64 cli_arch_flag = 0
+// R5's verdict: 1 = compile_fat, 0 = one single-target build.
+static uint64 cli_is_fat = 0
+
+fn c1_w(uint64 s) { write(2, s, str_len(s)) }
+
+// The OS an executable --emit= builds for, as a --target= kind (1 linux,
+// 2 macos, 3 windows, 4 android), or 0 for every other emit mode. emit_mode 0
+// with emit_set means an ELF-family spelling (elfexe, elf, linux, ...).
+fn c1_emit_os(uint64 emit_mode) -> uint64 {
+    if emit_mode == 0 { return 1 }
+    if emit_mode == 1 { return 2 }
+    if emit_mode == 2 { return 3 }
+    if emit_mode == 4 { return 4 }
+    return 0
+}
+
+// The architecture an --emit= spelling names (#237): 1 for the five *-arm64
+// spellings, 0 for the six *-x64 / *-x86_64 / linux-x86-64 ones, 0xFF for
+// every spelling that names none.
+fn c1_spelling_arch(uint64 sp) -> uint64 {
+    if str_eq_full(sp, "elf-arm64") != 0 || str_eq_full(sp, "linux-arm64") != 0
+       || str_eq_full(sp, "mac-arm64") != 0 || str_eq_full(sp, "windows-arm64") != 0
+       || str_eq_full(sp, "win-arm64") != 0 { return 1 }
+    if str_eq_full(sp, "elf-x86_64") != 0 || str_eq_full(sp, "linux-x86_64") != 0
+       || str_eq_full(sp, "linux-x86-64") != 0 || str_eq_full(sp, "mac-x64") != 0
+       || str_eq_full(sp, "windows-x64") != 0 || str_eq_full(sp, "win-x64") != 0 { return 0 }
+    return 0xFF
+}
+
+fn c1_os_name(uint64 kind) -> uint64 {
+    if kind == 2 { return "macOS" }
+    if kind == 3 { return "Windows" }
+    if kind == 4 { return "Android" }
+    return "Linux"
+}
+
+// R1's refusal (note 2.4): <E> the --emit= as typed, <T> the --target= value
+// as typed; the container phrases follow the emit's and the target's OS.
+fn c1_r1_die(uint64 eos, uint64 tkind, uint64 tstr) {
+    uint64 ec = "a static ELF executable"
+    if eos == 2 { ec = "a Mach-O executable" }
+    if eos == 3 { ec = "a PE executable" }
+    if eos == 4 { ec = "an Android PIE ELF" }
+    uint64 tc = "a Linux ELF executable"
+    if tkind == 2 { tc = "a Mach-O executable" }
+    if tkind == 3 { tc = "a PE executable" }
+    if tkind == 4 { tc = "an Android PIE ELF" }
+    c1_w("error: ")
+    c1_w(cli_emit_flag)
+    c1_w(" conflicts with --target=")
+    c1_w(tstr)
+    c1_w(": ")
+    c1_w(cli_emit_flag)
+    c1_w(" builds ")
+    c1_w(ec)
+    c1_w(" for ")
+    c1_w(c1_os_name(eos))
+    c1_w(" but --target=")
+    c1_w(tstr)
+    c1_w(" names ")
+    c1_w(c1_os_name(tkind))
+    c1_w(". Drop ")
+    c1_w(cli_emit_flag)
+    c1_w(" (--target=")
+    c1_w(tstr)
+    c1_w(" alone builds ")
+    c1_w(tc)
+    c1_w("), or drop --target=")
+    c1_w(tstr)
+    c1_w(" (")
+    c1_w(cli_emit_flag)
+    c1_w(" alone builds for ")
+    c1_w(c1_os_name(eos))
+    c1_w(")\n")
+    fatal_exit()
+}
+
+// R9's refusal (note 2.4): the --emit= spelling names one architecture and
+// the typed --arch= another. <G> is the plain spelling of the same container.
+fn c1_r9_die(uint64 emit_mode) {
+    uint64 ea = "x86_64"
+    if cli_emit_arch == 1 { ea = "arm64" }
+    uint64 g = "elfexe"
+    if emit_mode == 1 { g = "macho" }
+    if emit_mode == 2 { g = "pe" }
+    c1_w("error: ")
+    c1_w(cli_emit_flag)
+    c1_w(" conflicts with --arch=")
+    c1_w(cli_arch_flag)
+    c1_w(": ")
+    c1_w(cli_emit_flag)
+    c1_w(" names the ")
+    c1_w(ea)
+    c1_w(" architecture but --arch=")
+    c1_w(cli_arch_flag)
+    c1_w(" names ")
+    c1_w(cli_arch_flag)
+    c1_w(". Drop --arch=")
+    c1_w(cli_arch_flag)
+    c1_w(" (")
+    c1_w(cli_emit_flag)
+    c1_w(" alone builds for ")
+    c1_w(ea)
+    c1_w("), or write --emit=")
+    c1_w(g)
+    c1_w(" to keep --arch=")
+    c1_w(cli_arch_flag)
+    c1_w("\n")
+    fatal_exit()
+}
+
+// R1, R2, R9 (derivation) and R5, applied once. tkind/tstr: the --target=
+// kind main()'s loop recorded (1 linux, 2 macos, 3 windows, 4 android,
+// 5 esp32, 6 none; 0 = none given) and its value as typed. Returns the
+// resolved emit_mode in bits 0-7 and arch in bits 8-15; sets cli_is_fat.
+fn resolve_os_container(uint64 emit_mode, uint64 emit_set, uint64 arch, uint64 arch_set, uint64 tkind, uint64 tstr) -> uint64 {
+    uint64 hosted = 0
+    if tkind >= 1 && tkind <= 4 { hosted = 1 }
+    // R1
+    if hosted != 0 && emit_set != 0 {
+        uint64 eos = c1_emit_os(emit_mode)
+        if eos != 0 && eos != tkind {
+            uint64 carrier = 0
+            if cli_freestanding_flag != 0 && eos == 1 && (tkind == 2 || tkind == 3) { carrier = 1 }
+            if carrier == 0 { c1_r1_die(eos, tkind, tstr) }
+        }
+    }
+    // R2
+    if hosted != 0 && emit_set == 0 {
+        if tkind == 2 && cli_freestanding_flag == 0 { emit_mode = 1 }
+        if tkind == 3 && cli_freestanding_flag == 0 { emit_mode = 2 }
+        if tkind == 4 { emit_mode = 4 }
+    }
+    // R9 (derivation only)
+    if arch_set == 0 && cli_emit_arch != 0xFF { arch = cli_emit_arch }
+    // R5
+    cli_is_fat = 0
+    if targets_arg_given != 0 { cli_is_fat = 1 }
+    if arch_set == 0 && emit_set == 0 && hosted == 0 && cli_argc > 0 { cli_is_fat = 1 }
+    return emit_mode | (arch << 8)
+}
+
+// ===========================================================================
 // --emit=fatimage: ONE boot image with several boot paths.
 // ===========================================================================
 //
@@ -9934,21 +10126,6 @@ fn main() {
     uint64 emit_mode = 0
     uint64 arch_set = 0
     uint64 emit_set = 0
-    // "the LAST --emit= on the line spelled `uefi`", which is a different fact
-    // from `emit_mode == 9` and is why it needs its own variable. --target=
-    // android does not merely set target_os: it ASSIGNS emit_mode = 4 from
-    // inside the argument loop, so `--emit=uefi --target=android` leaves
-    // emit_mode 4 with nothing anywhere recording that a UEFI application was
-    // asked for. Measured before this existed: that line emitted an Android
-    // PIE ELF at exit 0. --emit=image survives the same clobber only by
-    // accident (it also requires --load-addr=, whose own "only meaningful
-    // with --emit=image" check then fires); a new mode has no such backstop.
-    //
-    // RESET, NOT JUST SET, by every later --emit= and by -c — otherwise the
-    // post-loop check below would also fire on `--emit=uefi --emit=elfexe`,
-    // which is ordinary last-wins and must keep working (pinned by
-    // uefi_emit_last_wins_away).
-    uint64 uefi_set = 0
     // Tracks what the last --target= flag resolved to, so a second, different
     // --target= is a conflict rather than last-wins (e.g. --target=esp32
     // already implies bare metal on Xtensa; composing it with an OS name or
@@ -9977,6 +10154,7 @@ fn main() {
             } else if str_starts_with(arg, "--arch=", 7) != 0 {
                 arch_set = 1
                 uint64 arch_str = arg + 7
+                cli_arch_flag = arch_str
                 // THE LIST FORM, and it is entered ONLY on a comma. Every
                 // single-arch spelling this compiler has ever accepted goes
                 // down the untouched chain below, so no existing invocation
@@ -10018,10 +10196,12 @@ fn main() {
                 }
             } else if str_starts_with(arg, "--emit=", 7) != 0 {
                 emit_set = 1
-                // Cleared here and re-set only by the `uefi` arm below, so it
-                // always describes the LAST --emit= and never a superseded one.
-                uefi_set = 0
                 uint64 emit_str = arg + 7
+                // C1: what the LAST --emit= said, as typed, and the
+                // architecture its spelling names (#237) -- replaced by every
+                // later --emit= or -c, so only the last one counts.
+                cli_emit_flag = arg
+                cli_emit_arch = c1_spelling_arch(emit_str)
                 // Recorded for entry_missing_die, which used to name a flag the
                 // caller may never have passed. Set before the alias chain so
                 // every spelling reports itself rather than its canonical form.
@@ -10097,7 +10277,6 @@ fn main() {
                     // at all. What it does share with 8 is the PAYLOAD, which
                     // is why both are in img_raw.
                     emit_mode = 9
-                    uefi_set = 1
                 } else if str_eq_full(emit_str, "fatimage") != 0 {
                     // ONE boot image with several boot paths (see
                     // compile_fatimage above for the layout and the reasoning).
@@ -10272,8 +10451,9 @@ fn main() {
                 exit(1)
             } else if str_eq_full(arg, "-c") != 0 {
                 emit_set = 1
-                uefi_set = 0
                 emit_mode = 3
+                cli_emit_flag = "-c"
+                cli_emit_arch = 0xFF
             } else if str_starts_with(arg, "-c=", 3) != 0 {
                 // str_eq_full above matches bare "-c" only, so without this
                 // arm `-c=1` fell through to the final
@@ -10368,8 +10548,12 @@ fn main() {
                 } else if tgt_kind == 3 {
                     target_os = 2
                 } else if tgt_kind == 4 {
+                    // Only the OS. It used to ASSIGN emit_mode = 4 here, in
+                    // the middle of the loop, so an --emit= written before it
+                    // was silently replaced by an Android PIE (#233); the
+                    // Android container is now R2's default, applied after
+                    // the loop and only when no --emit=/-c was given.
                     target_os = 3
-                    emit_mode = 4
                 } else if tgt_kind == 5 {
                     machine_target = 1
                 } else if tgt_kind == 6 {
@@ -10518,6 +10702,7 @@ fn main() {
                 exit(0)
             } else if str_starts_with(arg, "--freestanding", 14) != 0 {
                 freestanding = 1
+                cli_freestanding_flag = 1
             } else if str_starts_with(arg, "--legacy", 8) != 0 {
                 emit_ir_mode = 0
             } else if str_starts_with(arg, "--ir", 4) != 0 {
@@ -10678,6 +10863,12 @@ fn main() {
 
 
 
+    // C1: the one resolution of OS, container, architecture and
+    // fat-vs-single (R1, R2, R9's derivation, R5) -- see resolve_os_container.
+    uint64 c1_res = resolve_os_container(emit_mode, emit_set, arch, arch_set, target_arg_kind, target_arg_str)
+    emit_mode = c1_res & 0xFF
+    arch = (c1_res >> 8) & 0xFF
+
     if c7_dump_parser_path != 0 || c7_dump_quoter_path != 0 {
         c7_dump_leaves(arch)
     }
@@ -10760,25 +10951,6 @@ fn main() {
     }
     // emit_mode=4 (android): default to arm64 unless --arch was explicitly set
     if emit_mode == 4 && arch_set == 0 { arch = 1 }
-
-    // --emit=uefi survived the argument loop, or it did not. THE ONLY THING
-    // THAT CAN TAKE IT AWAY IS --target=android, which assigns emit_mode = 4
-    // in the middle of the loop; a later --emit= clears uefi_set on its way
-    // past, so ordinary last-wins never reaches here.
-    //
-    // FIRST, AHEAD OF EVERY OTHER REFUSAL IN THIS FILE, because by this point
-    // emit_mode says 4 and target_os says 3 — the request is invisible to
-    // every check keyed on either. Without this the line emits an Android PIE
-    // ELF at exit 0 with no diagnostic, which is the exact shape sub-project A
-    // spent a Critical on. The opposite order (`--target=android --emit=uefi`)
-    // is NOT this defect: there --emit=uefi legitimately wins the chain and is
-    // refused by the --target=none rule below, which is a different door and
-    // says so.
-    if uefi_set != 0 && emit_mode != 9 {
-        uint64 uf_ov = "error: --emit=uefi was overridden by --target=android: --target=android does not only select an OS, it also forces --emit=android, so the UEFI application you asked for would have been emitted as an Android PIE ELF. Drop --target=android (--emit=uefi requires --target=none), or drop --emit=uefi\n"
-        write(2, uf_ov, str_len(uf_ov))
-        exit(1)
-    }
 
     // WAS: a refusal of --debug on every command line that reaches legacy
     // arm64 codegen, because codegen_aarch64.kr had no array-bounds-check
@@ -10963,6 +11135,17 @@ fn main() {
         //            --emit=ir under --target=none is already the oracle the
         //            provider-routing tests read.
         //   elfexe — the default, and the format --target=none emits.
+    }
+
+    // R9 (#237): an --emit= spelling that names an architecture refuses an
+    // --arch= naming another one (riscv32 and xtensa included) -- it used to
+    // let --arch= win and drop the spelling's architecture silently. HERE,
+    // after the --target=none block and not in resolve_os_container, so
+    // `--emit=win-x64 --arch=arm64 --target=none` keeps that block's
+    // "--emit=pe conflicts with --target=none" message (t6_emit_winx64_tnone).
+    // A comma --arch= list is left to its own refusal below.
+    if arch_set != 0 && fat_arch_list_set == 0 && cli_emit_arch != 0xFF && arch != cli_emit_arch {
+        c1_r9_die(emit_mode)
     }
 
     // AHEAD OF EVERY MODE-SPECIFIC BLOCK BELOW, and that placement is the whole
@@ -11758,8 +11941,8 @@ fn main() {
             uint64 ep4 = ep + 4; uint8 z = 0
             unsafe { *(ep4 as uint8) = z }
             output_path = out
-        } else if arch_set != 0 || emit_set != 0 {
-            // Single arch: input.kr → input (no extension, native binary)
+        } else if cli_is_fat == 0 {
+            // Single target: input.kr → input (no extension, native binary)
             uint64 out = cg_alloc(base_len + 1)
             memcpy(out, input_path, base_len)
             uint64 tp = out + base_len
@@ -11960,7 +12143,7 @@ fn main() {
         write(2, xtmsg, str_len(xtmsg))
         exit(1)
     }
-    if target_mask != 0 || (arch_set == 0 && emit_set == 0 && cli_argc > 0) {
+    if cli_is_fat != 0 {
         // --target=none must never reach compile_fat, from ANY entrance
         // (no --arch given at all, or an explicit --targets=<list> that
         // does not happen to spell "none" as one of its elements — the
