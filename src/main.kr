@@ -7024,6 +7024,57 @@ fn c1_r8_arch_die() {
     fatal_exit()
 }
 
+// R10 (#236 #238, C1): -g writes DWARF only into an x86_64/arm64 ELF
+// executable (compile()'s finalize, emit_mode 0); every other container,
+// riscv32/xtensa, and the fat builds dropped it without a word -- refused
+// instead, naming the flag that chose the container: an explicit --emit=/-c
+// first, then --target= (its R2 container), then --arch=. image/uefi/arx/
+// arxmod/fatimage keep their own -g refusals, which fire earlier.
+fn c1_r10_die(uint64 emit_mode, uint64 emit_set, uint64 tstr) {
+    uint64 what = 0
+    uint64 tc = 0
+    if cli_is_fat != 0 {
+        what = "debug information for fat binary slices"
+        if targets_arg_given != 0 {
+            c1_w("error: -g conflicts with --targets=: ")
+        } else {
+            c1_w("error: -g conflicts with the default fat binary: a fat .krbo binary is built here (no --arch=, --target= or --emit=), and ")
+        }
+    } else {
+        if emit_mode == 2 { what = "debug information for PE executables (CodeView/PDB)"; tc = "a PE executable" }
+        if emit_mode == 1 { what = "debug information for Mach-O executables (DWARF in a dSYM bundle)"; tc = "a Mach-O executable" }
+        if emit_mode == 4 { what = "debug information for Android PIE executables"; tc = "an Android PIE executable" }
+        if emit_mode == 3 { what = "debug information for relocatable objects (ELF .o, Mach-O .o, COFF .obj)" }
+        if emit_mode == 7 { what = "debug information for kernel modules (.ko)" }
+        if emit_mode == 5 { what = "debug information in an assembly listing" }
+        if emit_mode == 6 { what = "debug information in an IR dump" }
+        if what != 0 && emit_set != 0 {
+            c1_w("error: -g conflicts with ")
+            c1_w(cli_emit_flag)
+            c1_w(": ")
+        } else if what != 0 {
+            // no --emit=/-c: the container is R2's, chosen by --target=
+            c1_w("error: -g conflicts with --target=")
+            c1_w(tstr)
+            c1_w(": --target=")
+            c1_w(tstr)
+            c1_w(" builds ")
+            c1_w(tc)
+            c1_w(", and ")
+        } else {
+            // an ELF executable on riscv32 or xtensa
+            c1_w("error: -g conflicts with --arch=")
+            c1_w(cli_arch_flag)
+            c1_w(": DWARF for ")
+            c1_w(cli_arch_flag)
+            what = 0
+        }
+    }
+    if what != 0 { c1_w(what) }
+    c1_w(" is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g\n")
+    fatal_exit()
+}
+
 fn c1_r8_emit_die() {
     c1_w("error: --targets= conflicts with ")
     c1_w(cli_emit_flag)
@@ -11675,8 +11726,12 @@ fn main() {
         // none -- it is the OS -- so such an artifact faults on its first call
         // with nothing to report it.
         if target_os != 4 {
-            uint64 ax_tn = "error: --emit=arx requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by\n"
-            write(2, ax_tn, str_len(ax_tn))
+            // #240: every message of this block names the flag as typed --
+            // --emit=arxmod shares mode 10 and used to be reported as
+            // --emit=arx.
+            c1_w("error: ")
+            c1_w(cli_emit_flag)
+            c1_w(" requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by\n")
             exit(1)
         }
         // No --arch: refuse rather than default. The ARX header names the CPU
@@ -11684,8 +11739,9 @@ fn main() {
         // silently defaulted arch produces a container that is rejected at load
         // time for a choice the user never made.
         if arch_set == 0 {
-            uint64 ax_ar = "error: --emit=arx requires an explicit --arch=x86_64 or --arch=arm64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make\n"
-            write(2, ax_ar, str_len(ax_ar))
+            c1_w("error: ")
+            c1_w(cli_emit_flag)
+            c1_w(" requires an explicit --arch=x86_64 or --arch=arm64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make\n")
             exit(1)
         }
         // arm64 IS ENABLED. The row that used to refuse it said what would lift
@@ -11712,21 +11768,26 @@ fn main() {
         // document: a shared "x86_64 only" half would let a defect that routed
         // one arch to the other's arm still pass a grep.
         if arch == 2 {
-            uint64 ax_rv = "error: --emit=arx has no riscv32 form: ApexRift runs on x86_64 and there is no riscv32 loader for this container. Use --arch=riscv32 --freestanding for a raw boot image instead\n"
-            write(2, ax_rv, str_len(ax_rv))
+            c1_w("error: ")
+            c1_w(cli_emit_flag)
+            c1_w(" has no riscv32 form: ApexRift runs on x86_64 and there is no riscv32 loader for this container. Use --arch=riscv32 --freestanding for a raw boot image instead\n")
             exit(1)
         }
         if arch == 3 {
-            uint64 ax_xt = "error: --emit=arx has no xtensa form: ApexRift runs on x86_64 and the chip has no loader for this container. Use --arch=xtensa --freestanding or --target=esp32 instead\n"
-            write(2, ax_xt, str_len(ax_xt))
+            c1_w("error: ")
+            c1_w(cli_emit_flag)
+            c1_w(" has no xtensa form: ApexRift runs on x86_64 and the chip has no loader for this container. Use --arch=xtensa --freestanding or --target=esp32 instead\n")
             exit(1)
         }
         // -g, refused rather than silently discarded, for the reason mode 8 and
         // mode 9 both refuse it: the DWARF footer is laid out from an ELF
         // geometry this container does not have.
         if debug_info_mode != 0 {
-            uint64 ax_g = "error: -g conflicts with --emit=arx: the DWARF footer and its section headers are laid out from an ELF geometry this container does not have, and would land inside the loaded image at offsets nothing maps. Drop -g, or drop --emit=arx to keep the ELF that -g understands\n"
-            write(2, ax_g, str_len(ax_g))
+            c1_w("error: -g conflicts with ")
+            c1_w(cli_emit_flag)
+            c1_w(": the DWARF footer and its section headers are laid out from an ELF geometry this container does not have, and would land inside the loaded image at offsets nothing maps. Drop -g, or drop ")
+            c1_w(cli_emit_flag)
+            c1_w(" to keep the ELF that -g understands\n")
             exit(1)
         }
     }
@@ -12005,6 +12066,15 @@ fn main() {
         if target_arg_kind >= 1 && target_arg_kind <= 4 { c1_r8_target_die(target_arg_str) }
         if arch_set != 0 { c1_r8_arch_die() }
         if emit_set != 0 { c1_r8_emit_die() }
+    }
+    // R10 (#236 #238): -g only where DWARF is really written -- a single
+    // build whose container is the ELF executable, on x86_64 or arm64
+    // (hosted Linux, --freestanding, the ELF carrier, --target=none). After
+    // R8, so `--arch=x86_64 --targets=... -g` keeps the --targets= message.
+    if debug_info_mode != 0 {
+        if cli_is_fat != 0 || emit_mode != 0 || (arch != 0 && arch != 1) {
+            c1_r10_die(emit_mode, emit_set, target_arg_str)
+        }
     }
 
     // Derive output name from input if not specified with -o
