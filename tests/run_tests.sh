@@ -248,6 +248,26 @@ trap 'suite_abort 143' TERM
 trap 'suite_abort 129' HUP
 trap 'suite_abort 130' INT
 
+# ckpy_run SECS CHECK.PY IMAGE: run one of the examples' qemu checkers
+# (examples/*/check.py) with a SECS-second limit, leaving its output in
+# CKPY_OUT and its status in CKPY_RC. python3 is started in the background
+# so its pid -- the <pid> in the checker's scratch names (mgui_<pid>.sock,
+# ramfb_check_<pid>.txt, ...) -- is known; it goes into
+# $SUITE_TMP/checker_pids for suite_tmp_nothing_outside_root (#261), which
+# checks THIS run's names only, so a suite running the same checkers in
+# another worktree cannot turn it red. The limit sends TERM, like `timeout`.
+ckpy_run() {
+    local o="$SUITE_TMP/ckpy_out.$$" pid w
+    python3 "$2" "$3" > "$o" 2>&1 &
+    pid=$!
+    echo "$pid" >> "$SUITE_TMP/checker_pids"
+    ( trap 'kill "$s" 2> /dev/null; exit 0' TERM; sleep "$1" & s=$!; wait "$s"; kill -TERM "$pid" 2> /dev/null ) &
+    w=$!
+    wait "$pid"; CKPY_RC=$?
+    kill -TERM "$w" 2> /dev/null; wait "$w" 2> /dev/null
+    CKPY_OUT=$(cat "$o"); rm -f "$o"
+}
+
 # Per-test wall-clock bound for the run_* helpers' compiled programs, so a
 # miscompile that loops cannot hang the suite: it fails as TIMEOUT. The limit
 # is generous: a row whose program is meant to fault waits for the system's
@@ -5777,6 +5797,253 @@ QRS_G=$(PATH="$QRS_P/none" qemu_bin $QRS_Z); QRS_RC=$?
 rm -rf "$QRS_P"
 if [ -z "$QRS_BAD" ]; then PASS=$((PASS + 1)); echo "  qemu_resolver_single_site: PASS (no literal -static site or other qemu-user probe in tests/**/*.sh, the diff scripts and count_insns.sh source qemu_bin, which prefers -static, falls back to the plain name and reports neither)"
 else FAIL=$((FAIL + 1)); echo "FAIL: qemu_resolver_single_site ($QRS_BAD)"; fi
+
+# --- One scratch root: rows (#250, #262) --------------------------------------
+# suite_tmp_single_root: no test script writes under a literal /tmp any more.
+# Scope by DISCOVERY, not a list: every tracked tests/**/*.sh and *.py (the
+# :(glob) pathspec, so tests/run_tests.sh and the other top-level scripts are
+# in -- a plain 'tests/**' pathspec misses them), every examples/**/check.py
+# and examples/**/Makefile, the Makefile, and every script run_tests.sh names
+# as $DIR/../<path>.sh|.py. A hit is a /tmp path component (not foo/tmp, not
+# $X/tmp) on a line that is not a whole-line comment; the ALLOW entries below
+# (file + fixed text, each with its reason) are the only ones accepted, and an
+# entry that no longer matches anything fails too, so the list cannot rot.
+# Also refused: a row that cd's into SUITE_TMP or TMPDIR itself (native_exec.sh
+# stages the cwd, so that would copy every row's files to the laptop), and a
+# standalone script that makes scratch without sourcing helpers/test_tmp.sh.
+TOTAL=$((TOTAL + 1))
+STR_OUT=$(cd "$DIR/.." && python3 -I - <<'STR_PYEOF' 2>&1
+import re, subprocess
+T = '/' + 'tmp'   # spelled apart: this row's own text must not match itself
+files = subprocess.run(['git', 'ls-files', ':(glob)tests/**/*.sh', ':(glob)tests/**/*.py',
+                        ':(glob)examples/**/check.py', ':(glob)examples/**/Makefile', 'Makefile'],
+                       capture_output=True, text=True).stdout.split()
+src = open('tests/run_tests.sh', encoding='utf-8', errors='replace').read()
+for m in sorted(set(re.findall(r'\$DIR/\.\./([A-Za-z0-9_./-]+\.(?:sh|py))', src))):
+    files.append(m)
+files = sorted(set(files))
+ALLOW = [  # (file, fixed text with @ for the root, reason)
+    ('tests/helpers/test_tmp.sh', '_ktr_raw=@; _ktr_from=default', 'the default of the rule'),
+    ('tests/target_none/boot_gate.sh', 'mktemp -d @/krcqmp.XXXXXX', 'QMP socket: AF_UNIX paths cap at 107 bytes'),
+    ('examples/mouse-gui/check.py', 'path = "@/" + name', 'QMP socket (AF_UNIX length)'),
+    ('examples/ramfb-demo/check.py', 'path = "@/" + name', 'QMP socket (AF_UNIX length)'),
+    ('examples/bare-console/check.py', 'path = "@/" + name', 'QMP socket (AF_UNIX length)'),
+    ('examples/tutorial-btree/Makefile', '"$${TMPDIR:-@}/kr_tutorial_btree.db"', 'clean: the program\'s own default (#263)'),
+    ('tests/run_tests.sh', 'file_open("@/our_image.bin", 1)', 'esp32_image_format placeholder, sed-rewritten to $ESP_OUT before use'),
+    ('tests/run_tests.sh', 'sed -i "s#\\"@/our_image.bin\\"#', 'the sed that rewrites that placeholder'),
+    ('tests/run_tests.sh', '"@/krc_test_read_file_bug5_does_not_exist_xyz.txt"', 'io_read_file_empty_vs_missing: a path that is never created'),
+    ('tests/run_tests.sh', 'CKT_SOCK="@/${CKT_SK}_$CKT_P.sock"', 'check_py_cleans_up_on_term: the checkers\' sockets'),
+    ('tests/run_tests.sh', 'STO_SOCK="@/${STO_P}_$STO_PID.sock"', 'suite_tmp_nothing_outside_root: the checkers\' sockets'),
+    ('tests/run_tests.sh', 'for STO_D in @ "$KR_TEST_ROOT"; do', 'suite_tmp_nothing_outside_root: looks for strays there'),
+    ('tests/run_tests.sh', 'STO_F in @/${STO_S}_$STO_PID', 'suite_tmp_nothing_outside_root: the checkers\' old names'),
+    ('tests/run_tests.sh', 'KRT_TMPS=@', 'suite_tmp_root_rule: the expected default'),
+]
+pat = re.compile(r'(?<![A-Za-z0-9_.}/])' + re.escape(T) + r'(?![A-Za-z0-9_])')
+used = [0] * len(ALLOW)
+bad = []
+for f in files:
+    try:
+        lines = open(f, encoding='utf-8', errors='replace').read().split('\n')
+    except OSError as e:
+        bad.append('%s: unreadable (%s)' % (f, e)); continue
+    for n, l in enumerate(lines, 1):
+        if l.lstrip().startswith('#') or not pat.search(l):
+            continue
+        hit = [k for k, (af, at, _) in enumerate(ALLOW) if af == f and at.replace('@', T) in l]
+        if hit:
+            for k in hit: used[k] += 1
+        else:
+            bad.append('%s:%d: %s' % (f, n, l.strip()[:90]))
+    for n, l in enumerate(lines, 1):
+        if f.endswith('.sh') and re.match(r'\s*cd\s+"?\$\{?(SUITE_TMP|TMPDIR)\}?"?\s*($|[;&|)])', l):
+            bad.append('%s:%d: cd into the run\'s scratch directory itself: %s' % (f, n, l.strip()[:60]))
+for f in ('tests/diff/run.sh', 'tests/diff_ir_legacy.sh', 'tests/diff_ir_legacy_stdout.sh',
+          'tests/smoke/run.sh', 'tests/fuzz/run.sh', 'tests/target_none/prove_no_syscalls.sh'):
+    if 'helpers/test_tmp.sh"' not in open(f).read():
+        bad.append('%s: does not source tests/helpers/test_tmp.sh' % f)
+for k, u in enumerate(used):
+    if not u:
+        bad.append('allow-list entry no longer matches: %s %r' % (ALLOW[k][0], ALLOW[k][1]))
+print('SCANNED %d files, %d allowed hits' % (len(files), sum(used)))
+for b in bad[:12]:
+    print('BAD ' + b)
+if len(bad) > 12:
+    print('BAD ... and %d more' % (len(bad) - 12))
+STR_PYEOF
+)
+if printf '%s\n' "$STR_OUT" | grep -q '^SCANNED' && ! printf '%s\n' "$STR_OUT" | grep -q '^BAD'; then
+    PASS=$((PASS + 1)); echo "  suite_tmp_single_root: PASS ($(printf '%s\n' "$STR_OUT" | sed -n 's/^SCANNED //p'); no literal scratch path under the system temp dir, no cd into the scratch dir, every standalone script sources test_tmp.sh)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_single_root ($(printf '%s\n' "$STR_OUT" | tr '\n' '|' | cut -c1-900))"
+fi
+
+# suite_tmp_root_rule: tests/helpers/test_tmp.sh's rule, under bash AND dash
+# (Makefile recipes source it with /bin/sh): KR_TEST_TMP wins over TMPDIR;
+# TMPDIR when KR_TEST_TMP is unset or empty; /tmp with neither; the result is
+# canonical (a symlinked root resolves to its target); a refusal prints its
+# FATAL on stderr only, nothing on stdout.
+TOTAL=$((TOTAL + 1))
+KRT_TMPS=/tmp
+KRR_D=$(mktemp -d "$SUITE_TMP/krr.XXXXXX"); mkdir -p "$KRR_D/a" "$KRR_D/b"; ln -s "$KRR_D/a" "$KRR_D/l"
+KRR_A=$(cd "$KRR_D/a" && pwd -P); KRR_B=$(cd "$KRR_D/b" && pwd -P); KRR_TMP=$(cd "$KRT_TMPS" && pwd -P)
+KRR_BAD=""; KRR_N=0
+for KRR_SH in bash dash; do
+    if ! command -v "$KRR_SH" > /dev/null 2>&1; then KRR_BAD="$KRR_BAD [$KRR_SH not installed]"; continue; fi
+    for KRR_CASE in "A|$KRR_D/a|$KRR_D/b|$KRR_A" "B||$KRR_D/b|$KRR_B" "B-unset|-|$KRR_D/b|$KRR_B" "D|-|-|$KRR_TMP" "L|$KRR_D/l|-|$KRR_A"; do
+        KRR_NM=${KRR_CASE%%|*}; KRR_R=${KRR_CASE#*|}; KRR_K=${KRR_R%%|*}; KRR_R=${KRR_R#*|}; KRR_T=${KRR_R%%|*}; KRR_W=${KRR_R#*|}
+        KRR_ENV="env -u KR_TEST_TMP -u TMPDIR"
+        [ "$KRR_K" = "-" ] || KRR_ENV="$KRR_ENV KR_TEST_TMP=$KRR_K"
+        [ "$KRR_T" = "-" ] || KRR_ENV="$KRR_ENV TMPDIR=$KRR_T"
+        KRR_GOT=$($KRR_ENV "$KRR_SH" -c '. "$1/helpers/test_tmp.sh"; kr_test_root "$1/.."' krr "$DIR" 2> "$KRR_D/err"); KRR_RC=$?
+        if [ "$KRR_RC" = 0 ] && [ "$KRR_GOT" = "$KRR_W" ] && [ ! -s "$KRR_D/err" ]; then KRR_N=$((KRR_N + 1))
+        else KRR_BAD="$KRR_BAD [$KRR_SH $KRR_NM: rc $KRR_RC, got '$KRR_GOT' want '$KRR_W', stderr '$(head -c 80 "$KRR_D/err")']"; fi
+    done
+    KRR_GOT=$(env KR_TEST_TMP=rel "$KRR_SH" -c '. "$1/helpers/test_tmp.sh"; kr_test_root "$1/.."' krr "$DIR" 2> "$KRR_D/err"); KRR_RC=$?
+    if [ "$KRR_RC" = 2 ] && [ -z "$KRR_GOT" ] && grep -q '^FATAL: scratch root .rel. (from KR_TEST_TMP)' "$KRR_D/err"; then KRR_N=$((KRR_N + 1))
+    else KRR_BAD="$KRR_BAD [$KRR_SH refusal: rc $KRR_RC, stdout '$KRR_GOT', stderr '$(head -c 80 "$KRR_D/err")']"; fi
+done
+rm -rf "$KRR_D"
+if [ -z "$KRR_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  suite_tmp_root_rule: PASS ($KRR_N cases under bash and dash: KR_TEST_TMP > TMPDIR > the default, canonical, FATAL on stderr only)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_root_rule ($KRR_BAD )"
+fi
+
+# suite_tmp_root_refusals: every root kr_test_root must refuse, each with exit
+# 2, nothing on stdout, and a FATAL naming the variable and the reason: one
+# that does not exist; a file; a read-only directory; a relative path; one
+# inside the checkout; one per character outside [A-Za-z0-9._/+@-] that a row
+# would splice unescaped (, | & # ' " \ space * % $); one where a file cannot
+# be executed. That last leg uses a REAL noexec directory when the host has a
+# writable one (/run/lock first -- on Ubuntu a sticky world-writable directory
+# on the noexec /run -- then any sticky writable directory on a noexec mount
+# in /proc/self/mountinfo); only without one does it fall back to the
+# test-only KR_TEST__EXEC_PROBE_MODE=0644, which writes the probe without the
+# x bit and is checked by the same code. The PASS text says which ran.
+TOTAL=$((TOTAL + 1))
+KRF_D=$(mktemp -d "$SUITE_TMP/krf.XXXXXX")
+KRF_BAD=""; KRF_N=0
+krf_leg() {   # krf_leg NAME VALUE WANT-TEXT [ENV...]
+    local nm=$1 v=$2 want=$3 got rc
+    shift 3
+    got=$(env "$@" KR_TEST_TMP="$v" bash -c '. "$1/helpers/test_tmp.sh"; kr_test_root "$1/.."' krf "$DIR" 2> "$KRF_D/err"); rc=$?
+    if [ "$rc" = 2 ] && [ -z "$got" ] && grep -q "(from KR_TEST_TMP)" "$KRF_D/err" && grep -qF -- "$want" "$KRF_D/err"; then KRF_N=$((KRF_N + 1))
+    else KRF_BAD="$KRF_BAD [$nm: rc $rc, stdout '$got', stderr '$(head -c 100 "$KRF_D/err")']"; fi
+}
+: > "$KRF_D/file"; mkdir -p "$KRF_D/ro"; chmod 555 "$KRF_D/ro"
+krf_leg missing "$KRF_D/nope" "does not exist"
+krf_leg file "$KRF_D/file" "is not a directory"
+if [ -w "$KRF_D/ro" ]; then KRF_BAD="$KRF_BAD [read-only: a 555 directory is writable here (root?)]"; else krf_leg read-only "$KRF_D/ro" "is not writable"; fi
+krf_leg relative "krf_rel" "is a relative path"
+krf_leg in-checkout "$DIR" "inside the checkout"
+KRF_I=0
+for KRF_C in ',' '|' '&' '#' "'" '"' '\' ' ' '*' '%' '$'; do
+    KRF_I=$((KRF_I + 1)); mkdir -p "$KRF_D/c${KRF_I}x${KRF_C}y"
+    krf_leg "char[$KRF_C]" "$KRF_D/c${KRF_I}x${KRF_C}y" "has a character outside"
+done
+KRF_NX=""
+for KRF_C in /run/lock $(awk '{ for (i = 1; i <= NF; i++) if ($i == "-") break; if ($6 ~ /(^|,)noexec(,|$)/) print $5 }' /proc/self/mountinfo 2> /dev/null); do
+    if [ -d "$KRF_C" ] && [ -w "$KRF_C" ] && [ -k "$KRF_C" ] && awk -v m="$KRF_C" '$5 == m || index(m, $5 "/") == 1 { print $6 }' /proc/self/mountinfo | grep -q 'noexec'; then
+        KRF_NX=$(mktemp -d "$KRF_C/krprobe.XXXXXX" 2> /dev/null) && break
+    fi
+    KRF_NX=""
+done
+if [ -n "$KRF_NX" ]; then
+    krf_leg "noexec[$KRF_NX]" "$KRF_NX" "cannot be executed"
+    rm -rf "$KRF_NX"; KRF_HOW="real noexec dir ${KRF_NX%/*}"
+else
+    krf_leg "noexec[knob]" "$KRF_D" "cannot be executed" KR_TEST__EXEC_PROBE_MODE=0644
+    KRF_HOW="fallback knob KR_TEST__EXEC_PROBE_MODE=0644 (no writable noexec directory on this host)"
+fi
+KRF_GOT=$(env KR_TEST_TMP="$KRF_D" KR_TEST__EXEC_PROBE_MODE=0700 bash -c '. "$1/helpers/test_tmp.sh"; kr_test_root "$1/.."' krf "$DIR" 2> "$KRF_D/err"); KRF_RC=$?
+if [ "$KRF_RC" = 2 ] && [ -z "$KRF_GOT" ] && grep -q "the only accepted value is 0644" "$KRF_D/err"; then KRF_N=$((KRF_N + 1)); else KRF_BAD="$KRF_BAD [knob 0700 accepted: rc $KRF_RC]"; fi
+chmod 755 "$KRF_D/ro" 2> /dev/null; rm -rf "$KRF_D"
+if [ -z "$KRF_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  suite_tmp_root_refusals: PASS ($KRF_N refusals, exit 2 + FATAL each; noexec leg: $KRF_HOW)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_root_refusals ($KRF_BAD )"
+fi
+
+# suite_tmp_headroom_refuses: a root below the free-space floor stops the
+# suite before it creates anything or runs a row: exit 2, a FATAL naming the
+# root, the source (quota/statvfs) and what is short. Legs: a byte floor no
+# disk meets; an inode floor no disk meets; a floor that is not an integer.
+# The child gets KRC=/bin/false and KRC_ALLOW_STALE=1: it must never get as
+# far as a compile.
+TOTAL=$((TOTAL + 1))
+KHR_BAD=""; KHR_N=0
+for KHR_LEG in "bytes|KR_TEST_MIN_FREE_GIB=999999|too full" "inodes|KR_TEST_MIN_FREE_INODES=999999999999|inodes free, the floor is 999999999999" "nonint|KR_TEST_MIN_FREE_GIB=abc|is not a non-negative integer"; do
+    KHR_NM=${KHR_LEG%%|*}; KHR_R=${KHR_LEG#*|}; KHR_EV=${KHR_R%%|*}; KHR_W=${KHR_R#*|}
+    KHR_D=$(mktemp -d "$SUITE_TMP/khr.XXXXXX")
+    env KR_TEST_TMP="$KHR_D" "$KHR_EV" KRC=/bin/false KRC_ALLOW_STALE=1 timeout 60 bash "$DIR/run_tests.sh" > "$KHR_D.out" 2> "$KHR_D.err" < /dev/null; KHR_RC=$?
+    KHR_ROWS=$(grep -cE '^  [A-Za-z0-9_]+: (PASS|SKIP)|^FAIL: ' "$KHR_D.out")
+    if [ "$KHR_RC" = 2 ] && [ "$KHR_ROWS" = 0 ] && grep -q '^FATAL: ' "$KHR_D.err" && grep -qF -- "$KHR_W" "$KHR_D.err" \
+        && { [ "$KHR_NM" = nonint ] || grep -q "scratch root $KHR_D is too full (\(quota\|statvfs\|df\);" "$KHR_D.err"; } && [ -z "$(ls -A "$KHR_D")" ]; then
+        KHR_N=$((KHR_N + 1))
+    else
+        KHR_BAD="$KHR_BAD [$KHR_NM: rc $KHR_RC, $KHR_ROWS row lines, root has '$(ls -A "$KHR_D" | tr '\n' ' ')', stderr '$(head -c 160 "$KHR_D.err")']"
+    fi
+    rm -rf "$KHR_D" "$KHR_D.out" "$KHR_D.err"
+done
+if [ -z "$KHR_BAD" ]; then
+    PASS=$((PASS + 1)); echo "  suite_tmp_headroom_refuses: PASS ($KHR_N legs: byte floor, inode floor, non-integer floor -- exit 2 before any row, nothing created)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_headroom_refuses ($KHR_BAD )"
+fi
+
+# suite_tmp_headroom_reads_quota: tests/helpers/tmp_headroom.py sees a quota
+# that statvfs (and `df`) cannot. One-directional: when the mount holding the
+# scratch root has a quota option (usrquota/uquota/quota/grpquota) in
+# /proc/self/mountinfo, the helper must say source=quota and report bytes that
+# lie between min(statvfs, quota) decoded INDEPENDENTLY here (its own struct
+# layout, user and group) just before and just after the helper ran. Without
+# a quota option it must say source=statvfs with bytes > 0.
+TOTAL=$((TOTAL + 1))
+KHQ_OUT=$(python3 -I - "$KR_TEST_ROOT" "$DIR/helpers/tmp_headroom.py" <<'KHQ_PYEOF' 2>&1
+import ctypes, os, struct, subprocess, sys
+root, helper = sys.argv[1], sys.argv[2]
+best, opts = '', ''
+for line in open('/proc/self/mountinfo'):
+    f = line.split()
+    mp = f[4]
+    sep = f.index('-')
+    o = f[5] + ',' + (f[sep + 3] if len(f) > sep + 3 else '')
+    if (root == mp or root.startswith(mp.rstrip('/') + '/')) and len(mp) >= len(best):
+        best, opts = mp, o
+has_q = any(x in opts.split(',') for x in ('usrquota', 'uquota', 'quota', 'grpquota', 'gquota'))
+libc = ctypes.CDLL(None, use_errno=True)
+def indep():
+    s = os.statvfs(root)
+    v = s.f_bavail * s.f_frsize
+    if sys.platform == 'linux':
+        for t, i in ((0, os.geteuid()), (1, os.getegid())):
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+            b = ctypes.create_string_buffer(80)
+            r = libc.syscall(443, fd, ctypes.c_uint((0x800007 << 8) | t), ctypes.c_int(i), b)
+            os.close(fd)
+            if r == 0:
+                bh, bs, cur = struct.unpack_from('<QQQ', b.raw, 0)
+                lim = min([x for x in (bh, bs) if x] or [0])
+                if lim:
+                    v = min(v, max(0, lim * 1024 - cur))
+    return v
+lo = indep()
+out = subprocess.run([sys.executable, '-I', helper, root], capture_output=True, text=True).stdout.strip()
+hi = indep()
+kv = dict(x.split('=', 1) for x in out.split() if '=' in x)
+by = int(kv.get('bytes', '-1'))
+if has_q:
+    ok = kv.get('source') == 'quota' and min(lo, hi) <= by <= max(lo, hi)
+else:
+    ok = kv.get('source') == 'statvfs' and by > 0
+print('%s mount=%s quota-option=%s helper=[%s] independent=%d..%d' % ('OK' if ok else 'BAD', best, has_q, out, lo, hi))
+KHQ_PYEOF
+)
+if printf '%s' "$KHQ_OUT" | grep -q '^OK '; then
+    PASS=$((PASS + 1)); echo "  suite_tmp_headroom_reads_quota: PASS (${KHQ_OUT#OK })"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_headroom_reads_quota ($(printf '%s' "$KHQ_OUT" | tr '\n' '|' | cut -c1-400))"
+fi
 
 # --- ARM64 cross-compilation tests via QEMU ---
 QEMU_A64="$ARCH_QEMU_A64"
@@ -12800,7 +13067,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev
 elif [ ! -f "$MG_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: mouse_gui_example_runs (no image from the row above)"
 else
-    mg_out=$(timeout 200 python3 "$MG_DIR/check.py" "$MG_IMG" 2>&1)
+    ckpy_run 200 "$MG_DIR/check.py" "$MG_IMG"; mg_out=$CKPY_OUT
     if printf '%s' "$mg_out" | grep -q '^PASS: cursor moved'; then
         PASS=$((PASS + 1)); echo "  mouse_gui_example_runs: PASS (cursor, click-changes-pixels, keyboard alive)"
     else
@@ -12808,7 +13075,7 @@ else
         printf '%s\n' "$mg_out" | grep -E '^BAD|^FAIL' | sed 's/^/    /' | head -6
     fi
 fi
-rm -f "$MG_IMG"
+# $MG_IMG is kept for check_py_cleans_up_on_term (it removes it).
 
 # std/mouse.kr must never read the shared port itself. This is a SOURCE
 # invariant rather than a behavioural one because the failure it prevents is
@@ -13121,7 +13388,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev
 elif [ ! -f "$RFB_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: ramfb_example_draws (no image from the row above)"
 else
-    rfb_out=$(timeout 60 python3 "$RFB_DIR/check.py" "$RFB_IMG" 2>&1)
+    ckpy_run 60 "$RFB_DIR/check.py" "$RFB_IMG"; rfb_out=$CKPY_OUT
     if printf '%s' "$rfb_out" | grep -q '^PASS: 13/13 pixel checks$'; then
         PASS=$((PASS + 1)); echo "  ramfb_example_draws: PASS (13/13 pixels verified via QMP screendump)"
     else
@@ -13129,7 +13396,7 @@ else
         printf '%s\n' "$rfb_out" | sed 's/^/    /' | head -8
     fi
 fi
-rm -f "$RFB_IMG"
+# $RFB_IMG is kept for check_py_cleans_up_on_term (it removes it).
 
 # std/fw_cfg.kr's whole surface must compile freestanding, including the paths
 # the demo does not exercise (DMA read, whole-file read, the LE item readers).
@@ -13448,7 +13715,7 @@ if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev
 elif [ ! -f "$BCON_IMG" ]; then
     FAIL=$((FAIL + 1)); echo "FAIL: bare_console_example_runs (no image from the row above)"
 else
-    bcon_out=$(timeout 120 python3 "$BCON_DIR/check.py" "$BCON_IMG" 2>&1)
+    ckpy_run 120 "$BCON_DIR/check.py" "$BCON_IMG"; bcon_out=$CKPY_OUT
     if printf '%s' "$bcon_out" | grep -q '^PASS: PS/2 input echoed'; then
         PASS=$((PASS + 1)); echo "  bare_console_example_runs: PASS (PS/2 typed, echoed on vga+serial)"
     else
@@ -13456,7 +13723,55 @@ else
         printf '%s\n' "$bcon_out" | grep -E '^BAD|^FAIL' | sed 's/^/    /' | head -6
     fi
 fi
-rm -f "$BCON_IMG"
+
+# --- check_py_cleans_up_on_term (#261) ---------------------------------------
+# The three qemu checkers (examples/{mouse-gui,ramfb-demo,bare-console}/
+# check.py) used to write their serial log and PPM dumps to fixed /tmp names
+# and leave them -- and the QMP socket -- behind whenever the suite's time
+# limit TERMed them. Now the log and dumps go to $TMPDIR and a SIGTERM handler
+# runs the cleanup. For each checker, with the image its row above built: run
+# it in the background with TMPDIR=<private dir D>; wait until its serial log
+# exists IN D (the positive witness that it honours TMPDIR) AND its socket
+# exists in /tmp (qemu is up); TERM it; then the log, the dumps and the socket
+# must be gone and its qemu must have exited. Socket / log prefixes:
+# mgui_<pid>.sock / mgui_<pid>.txt (+ .ppm, _b.ppm); ramfb_qmp_<pid>.sock /
+# ramfb_check_<pid>.txt (+ .ppm); bcon_<pid>.sock / bcon_<pid>.txt.
+TOTAL=$((TOTAL + 1))
+if ! command -v qemu-system-x86_64 >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+    skip_row check_py_cleans_up_on_term "no qemu-system-x86_64/python3"
+else
+    CKT_WHY=""; CKT_N=0
+    for CKT_C in "mouse-gui:$MG_IMG:mgui:mgui" "ramfb-demo:$RFB_IMG:ramfb_qmp:ramfb_check" "bare-console:$BCON_IMG:bcon:bcon"; do
+        CKT_EX=${CKT_C%%:*}; CKT_R=${CKT_C#*:}; CKT_IMG=${CKT_R%%:*}; CKT_R=${CKT_R#*:}; CKT_SK=${CKT_R%%:*}; CKT_SE=${CKT_R#*:}
+        if [ ! -f "$CKT_IMG" ]; then CKT_WHY="$CKT_WHY [$CKT_EX: no image from its row]"; continue; fi
+        CKT_D=$(mktemp -d "$SUITE_TMP/ckterm.XXXXXX")
+        TMPDIR="$CKT_D" python3 "$DIR/../examples/$CKT_EX/check.py" "$CKT_IMG" > "$CKT_D.out" 2>&1 &
+        CKT_P=$!
+        echo "$CKT_P" >> "$SUITE_TMP/checker_pids"
+        CKT_LOG="$CKT_D/${CKT_SE}_$CKT_P.txt"; CKT_SOCK="/tmp/${CKT_SK}_$CKT_P.sock"
+        CKT_I=0
+        while [ "$CKT_I" -lt 300 ] && ! { [ -e "$CKT_LOG" ] && [ -e "$CKT_SOCK" ]; }; do sleep 0.1; CKT_I=$((CKT_I + 1)); done
+        if [ -e "$CKT_LOG" ] && [ -e "$CKT_SOCK" ]; then
+            kill -TERM "$CKT_P" 2> /dev/null
+            wait "$CKT_P" 2> /dev/null
+            CKT_LEFT=$(ls -A "$CKT_D" | tr '\n' ' ')
+            [ -z "$CKT_LEFT" ] || CKT_WHY="$CKT_WHY [$CKT_EX: left in TMPDIR after TERM: $CKT_LEFT]"
+            [ -e "$CKT_SOCK" ] && CKT_WHY="$CKT_WHY [$CKT_EX: socket $CKT_SOCK left after TERM]"
+            pgrep -f "${CKT_SK}_$CKT_P.sock" > /dev/null 2>&1 && CKT_WHY="$CKT_WHY [$CKT_EX: its qemu still runs after TERM]"
+            CKT_N=$((CKT_N + 1))
+        else
+            CKT_WHY="$CKT_WHY [$CKT_EX: after 30 s $( [ -e "$CKT_LOG" ] || printf 'no serial log %s in TMPDIR ' "${CKT_SE}_<pid>.txt")$( [ -e "$CKT_SOCK" ] || printf 'no socket %s' "$CKT_SOCK")]"
+            kill -TERM "$CKT_P" 2> /dev/null; wait "$CKT_P" 2> /dev/null
+        fi
+        rm -rf "$CKT_D" "$CKT_D.out"
+    done
+    if [ -z "$CKT_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  check_py_cleans_up_on_term: PASS ($CKT_N checkers: serial log seen in TMPDIR and socket up, then TERM left neither, nor a running qemu)"
+    else
+        FAIL=$((FAIL + 1)); echo "FAIL: check_py_cleans_up_on_term ($CKT_WHY )"
+    fi
+fi
+rm -f "$MG_IMG" "$RFB_IMG" "$BCON_IMG"
 
 # std/vga_text.kr, std/serial.kr and std/ps2.kr must each compile freestanding
 # across their whole surface, including what the example does not call.
@@ -17337,15 +17652,26 @@ if [ ! -f "$BEX_DIR/main.kr" ] || [ ! -f "$BEX_DIR/pager.kr" ]; then
 elif ! $KRC --arch="$RUN_ARCH" "$BEX_DIR/main.kr" -o "$BEX_BIN" >/dev/null 2>&1; then
     FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (compile failed)"
 else
+    # The database goes where #263 says: $TMPDIR/kr_tutorial_btree.db (here
+    # SUITE_TMP; it used to be a fixed /tmp name two suites shared), or the
+    # path given as argv[1]. Both must exist at 64 KiB afterwards.
+    BEX_WHY=""
+    rm -f "$SUITE_TMP/kr_tutorial_btree.db" "$SUITE_TMP/krc_btree_argv_$$.db"
     timeout -k 5 "$RUN_TEST_TIMEOUT" "$BEX_BIN" >/dev/null 2>&1
     bex_rc=$?
-    if [ "$bex_rc" = "0" ]; then
-        PASS=$((PASS + 1)); echo "  tutorial_btree_example_runs: PASS (magic + value survive msync and reopen)"
+    [ "$bex_rc" = "0" ] || BEX_WHY="$BEX_WHY exit $bex_rc (1=open 2=msync 3=reopen 4=magic 5=value);"
+    [ "$(stat -c %s "$SUITE_TMP/kr_tutorial_btree.db" 2>/dev/null)" = "65536" ] || BEX_WHY="$BEX_WHY no 64 KiB \$TMPDIR/kr_tutorial_btree.db;"
+    timeout -k 5 "$RUN_TEST_TIMEOUT" "$BEX_BIN" "$SUITE_TMP/krc_btree_argv_$$.db" >/dev/null 2>&1
+    bex_rc=$?
+    [ "$bex_rc" = "0" ] || BEX_WHY="$BEX_WHY argv run exit $bex_rc;"
+    [ "$(stat -c %s "$SUITE_TMP/krc_btree_argv_$$.db" 2>/dev/null)" = "65536" ] || BEX_WHY="$BEX_WHY no 64 KiB file at the argv[1] path;"
+    if [ -z "$BEX_WHY" ]; then
+        PASS=$((PASS + 1)); echo "  tutorial_btree_example_runs: PASS (magic + value survive msync and reopen; db at \$TMPDIR and at argv[1], 64 KiB each)"
     else
-        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs (exit $bex_rc; 1=open 2=msync 3=reopen 4=magic 5=value)"
+        FAIL=$((FAIL + 1)); echo "FAIL: tutorial_btree_example_runs ($BEX_WHY)"
     fi
 fi
-rm -f "$BEX_BIN" /tmp/kr_tutorial_btree.db
+rm -f "$BEX_BIN" "$SUITE_TMP/kr_tutorial_btree.db" "$SUITE_TMP/krc_btree_argv_$$.db"
 
 # `krc lc --ci` applies a DEFAULT fitness gate of 50, so it does not fail on
 # every pattern. docs/LIVING_COMPILER.md said it did, which is the dangerous
@@ -39145,6 +39471,41 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: compiler_builds_itself_every_target_and_mode ($SB_OK built, $SB_REF refused by the syscall_raw rule:$SB_BAD)"
 fi
 rm -rf "$SB_D"
+
+# --- suite_tmp_nothing_outside_root (#250, #261) ------------------------------
+# The last scratch check of the run: nothing this run wrote is left OUTSIDE
+# its SUITE_TMP. Looks for entries directly in /tmp and in the scratch root
+# (outside SUITE_TMP) whose names carry this suite's pid (_<pid> -- the naming
+# every row used for /tmp scratch before #250), and for the sockets, serial
+# logs and PPM dumps of THIS run's qemu checkers (pids recorded by ckpy_run and
+# check_py_cleans_up_on_term in $SUITE_TMP/checker_pids; a suite running the
+# same checkers in another worktree has other pids and cannot make this red).
+TOTAL=$((TOTAL + 1))
+STO_LEFT=""
+for STO_D in /tmp "$KR_TEST_ROOT"; do
+    for STO_F in "$STO_D"/*_$$ "$STO_D"/*_$$.* "$STO_D"/*_$$_*; do
+        [ -e "$STO_F" ] && [ "$STO_F" != "$SUITE_TMP" ] && STO_LEFT="$STO_LEFT $STO_F"
+    done
+done
+if [ -f "$SUITE_TMP/checker_pids" ]; then
+    while read -r STO_PID; do
+        for STO_P in mgui ramfb_qmp bcon; do
+            STO_SOCK="/tmp/${STO_P}_$STO_PID.sock"
+            [ -e "$STO_SOCK" ] && STO_LEFT="$STO_LEFT $STO_SOCK"
+        done
+        for STO_S in mgui ramfb_check bcon; do
+            for STO_F in /tmp/${STO_S}_$STO_PID.* /tmp/${STO_S}_${STO_PID}_*; do
+                [ -e "$STO_F" ] && STO_LEFT="$STO_LEFT $STO_F"
+            done
+        done
+    done < "$SUITE_TMP/checker_pids"
+fi
+STO_NPID=$( { wc -l < "$SUITE_TMP/checker_pids"; } 2> /dev/null || echo 0)
+if [ -z "$STO_LEFT" ]; then
+    PASS=$((PASS + 1)); echo "  suite_tmp_nothing_outside_root: PASS (no _<suite pid> entry in the system temp dir or the scratch root outside SUITE_TMP; no socket, log or dump of this run's $STO_NPID checker runs)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_nothing_outside_root (left outside SUITE_TMP:$STO_LEFT)"
+fi
 
 # rc_tools FILE: the tools the README gate below requires for a full run --
 # every literal `command -v <tool>` in FILE, and every `qemu_bin <name>` call
