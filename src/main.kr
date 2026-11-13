@@ -6898,9 +6898,9 @@ fn restore_src_and_tokens(uint64 source, uint64 size, uint64 src_snap, uint64 to
 //   0 linux-x64, 1 linux-arm64, 2 win-x64, 3 win-arm64,
 //   4 macos-x64, 5 macos-arm64, 6 android-arm64, 7 android-x64.
 static uint64 target_mask = 0
-// 1 once any --targets= was given, even one whose names were all unknown
-// (target_mask then stays 0). Read by the --emit=lkm refusal, which is
-// about the flag on the command line, not about the mask it produced.
+// 1 once a --targets= was given (every --targets= list is validated, so
+// target_mask is then non-zero). Read by R5's fat-vs-single verdict, R8 and
+// the --emit=lkm refusal, which are about the flag on the command line.
 static uint64 targets_arg_given = 0
 
 // Compare a fixed-length string `s` of length `len` against a nul-terminated
@@ -6932,55 +6932,107 @@ fn parse_target_name(uint64 s, uint64 len) -> uint64 {
     return 0xFF
 }
 
-// Parse "a,b,c" or "all" into target_mask. Unknown names produce a warning
-// on stderr; recognised ones each flip one bit. "all" sets all 8 bits.
+// The --targets= value as given (for the repeated-flag check); 0 = none yet.
+static uint64 targets_arg_str = 0
+
+// The names --targets= accepts, in parse_target_name's order, plus `all`.
+// targets_valid_list_is_complete (tests/run_tests.sh) pins this list against
+// parse_target_name both ways.
+fn targets_valid_names() -> uint64 {
+    return "linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all"
+}
+
+// Parse "a,b,c" or "all" into target_mask (#234 = #129, C1). Every name is
+// validated: the first unknown one (exact, lower-case match), an empty list
+// and an empty element are errors. They used to be a warning, and an
+// all-unknown list left mask 0 = "all 8 slices" -- a typo built every slice.
+// Duplicates are accepted (set semantics).
 fn parse_targets_arg(uint64 list) {
     uint64 mask = 0
     uint64 i = 0
     uint64 c = 0
-    uint64 p0 = list + i
-    unsafe { *(p0 as uint8) -> c }
-    while c != 0 {
+    if load8(list) == 0 {
+        c1_w("error: --targets= is empty: name at least one target, e.g. --targets=linux-x64,win-x64, or drop --targets= for the default fat binary of all 8 (valid names: ")
+        c1_w(targets_valid_names())
+        c1_w(")\n")
+        fatal_exit()
+    }
+    loop {
         uint64 start = i
+        c = load8(list + i)
         while c != 0 && c != 44 {
             i = i + 1
-            uint64 pn = list + i
-            unsafe { *(pn as uint8) -> c }
+            c = load8(list + i)
         }
         uint64 tok_start = list + start
         uint64 tok_len = i - start
-        if tok_len > 0 {
-            if targets_name_eq(tok_start, tok_len, "all") != 0 {
-                mask = mask | 0xFF
-            } else if targets_name_eq(tok_start, tok_len, "none") != 0 {
-                // --target=none is a bare-metal, no-OS image: the fat-binary
-                // runner extracts one of the 8 hosted slices and execs it
-                // under a live OS, and a bare-metal image has neither an OS
-                // to exec it nor a slice ID of its own. This must be a hard
-                // error, not the generic "unknown --targets name" warning
-                // below (which lets the build proceed with mask 0 and
-                // silently falls through to building all 8 hosted slices).
-                uint64 tn_msg = "error: --targets=...,none: 'none' cannot appear in a fat binary; use --arch=<arch> --target=none for a single bare-metal binary instead\n"
-                write(2, tn_msg, str_len(tn_msg))
-                exit(1)
-            } else {
-                uint64 bit = parse_target_name(tok_start, tok_len)
-                if bit != 0xFF {
-                    mask = mask | (1 << bit)
-                } else {
-                    write(2, "warning: unknown --targets name: ", 33)
-                    write(2, tok_start, tok_len)
-                    write(2, "\n", 1)
-                }
+        if tok_len == 0 {
+            c1_w("error: --targets= has an empty name: write the list with no empty entries, e.g. --targets=linux-x64,win-x64 (valid names: ")
+            c1_w(targets_valid_names())
+            c1_w(")\n")
+            fatal_exit()
+        }
+        if targets_name_eq(tok_start, tok_len, "all") != 0 {
+            mask = mask | 0xFF
+        } else if targets_name_eq(tok_start, tok_len, "none") != 0 {
+            // --target=none is a bare-metal, no-OS image: the fat-binary
+            // runner extracts one of the 8 hosted slices and execs it
+            // under a live OS, and a bare-metal image has neither an OS
+            // to exec it nor a slice ID of its own. A hard error with its
+            // own remedy, ahead of the generic unknown-name one below.
+            uint64 tn_msg = "error: --targets=...,none: 'none' cannot appear in a fat binary; use --arch=<arch> --target=none for a single bare-metal binary instead\n"
+            write(2, tn_msg, str_len(tn_msg))
+            fatal_exit()
+        } else {
+            uint64 bit = parse_target_name(tok_start, tok_len)
+            if bit == 0xFF {
+                c1_w("error: unknown --targets= name '")
+                write(2, tok_start, tok_len)
+                c1_w("': valid names are ")
+                c1_w(targets_valid_names())
+                c1_w(" (lower-case)\n")
+                fatal_exit()
             }
+            mask = mask | (1 << bit)
         }
-        if c == 44 {
-            i = i + 1
-            uint64 pc = list + i
-            unsafe { *(pc as uint8) -> c }
-        }
+        if c == 0 { break }
+        i = i + 1
     }
     target_mask = mask
+}
+
+// R8 (#234 = #129, C1): --targets= builds a fat binary whose slices each
+// choose their own OS and architecture, so a hosted --target=, a TYPED --arch=
+// (never one R9 derived from an --emit= spelling), an --emit= or -c next to it
+// would be silently ignored -- refused instead, in that order. Either
+// precedence would silently drop a flag the user typed, which is the defect.
+fn c1_r8_target_die(uint64 tstr) {
+    c1_w("error: --targets= conflicts with --target=")
+    c1_w(tstr)
+    c1_w(": --targets= builds a fat binary and every name in its list already chooses the OS (linux-x64, macos-arm64, win-x64, ...), so --target=")
+    c1_w(tstr)
+    c1_w(" would be ignored. Name the slices you want in --targets=, or drop --targets= for a single-target binary\n")
+    fatal_exit()
+}
+
+fn c1_r8_arch_die() {
+    c1_w("error: --targets= conflicts with --arch=")
+    c1_w(cli_arch_flag)
+    c1_w(": --targets= builds a fat binary and every name in its list already chooses the architecture (linux-x64 or linux-arm64, ...), so --arch=")
+    c1_w(cli_arch_flag)
+    c1_w(" would be ignored. Name the slices you want in --targets=, or drop --targets= for a single-architecture binary\n")
+    fatal_exit()
+}
+
+fn c1_r8_emit_die() {
+    c1_w("error: --targets= conflicts with ")
+    c1_w(cli_emit_flag)
+    c1_w(": --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so ")
+    c1_w(cli_emit_flag)
+    c1_w(" would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop ")
+    if str_eq_full(cli_emit_flag, "-c") != 0 { c1_w("-c") } else { c1_w("--emit=") }
+    c1_w("\n")
+    fatal_exit()
 }
 
 // compile_fat compiles ALL 8 (OS, arch) slices on every run and only then
@@ -10463,8 +10515,19 @@ fn main() {
                 write(2, "error: -c takes no value\n", 25)
                 exit(1)
             } else if str_starts_with(arg, "--targets=", 10) != 0 {
-                targets_arg_given = 1
+                // Validated at once (R7), like an unknown --arch=; a second
+                // --targets= must repeat the first, never replace it.
                 parse_targets_arg(arg + 10)
+                if targets_arg_given != 0 && str_eq_full(targets_arg_str, arg + 10) == 0 {
+                    c1_w("error: conflicting --targets= values: '")
+                    c1_w(targets_arg_str)
+                    c1_w("' and '")
+                    c1_w(arg + 10)
+                    c1_w("' - pass --targets= once\n")
+                    fatal_exit()
+                }
+                targets_arg_given = 1
+                targets_arg_str = arg + 10
             } else if str_starts_with(arg, "--target=", 9) != 0 {
                 uint64 tgt_str = arg + 9
                 uint64 tgt_kind = 0
@@ -11904,6 +11967,46 @@ fn main() {
         xt_esp32_target = 1
     }
 
+    // A fat binary carries only x86_64/arm64 slices, and no bare-metal one:
+    // these two refusals used to sit in the dispatch below; they come first
+    // here so that R8 (next) never names a flag these explain better, and so
+    // that they also hold for check/lc/fmt, which exit before the dispatch.
+    // --targets= with --arch=riscv32 would otherwise silently drop the
+    // requested arch.
+    if arch == 2 && targets_arg_given != 0 {
+        uint64 tmsg = "error: fat binaries (--targets) have no riscv32 slice; use --arch=riscv32 without --targets\n"
+        write(2, tmsg, str_len(tmsg))
+        fatal_exit()
+    }
+    if arch == 3 && targets_arg_given != 0 {
+        uint64 xtmsg = "error: fat binaries (--targets) have no xtensa slice; use --arch=xtensa without --targets\n"
+        write(2, xtmsg, str_len(xtmsg))
+        fatal_exit()
+    }
+    // --target=none must never reach compile_fat, from ANY entrance (no
+    // --arch given at all, or an explicit --targets=<list> that does not
+    // happen to spell "none" as one of its elements -- parse_targets_arg's
+    // refusal only catches that spelling). Checked on cli_is_fat, the single
+    // predicate that decides fat-vs-single: freestanding is a static global,
+    // and compile_fat compiles all 8 hosted slices in one process without
+    // resetting it between them, so a bare-metal build's freestanding=1 would
+    // strip startup/exit from every hosted slice -- a fat binary that builds
+    // cleanly (exit 0, no diagnostic) and crashes at runtime on every
+    // architecture.
+    if cli_is_fat != 0 && target_os == 4 {
+        uint64 tnf_msg = "error: --target=none cannot build a fat binary: pass --arch=<arch> for a single bare-metal binary (a fat binary bundles 8 hosted OS slices and there is no OS here to run any of them)\n"
+        write(2, tnf_msg, str_len(tnf_msg))
+        fatal_exit()
+    }
+    // R8: --targets= is exclusive (see c1_r8_target_die). Order: a hosted
+    // --target=, a typed --arch=, then --emit=/-c. With --freestanding it
+    // stays accepted, as the default fat build with --freestanding is.
+    if targets_arg_given != 0 {
+        if target_arg_kind >= 1 && target_arg_kind <= 4 { c1_r8_target_die(target_arg_str) }
+        if arch_set != 0 { c1_r8_arch_die() }
+        if emit_set != 0 { c1_r8_emit_die() }
+    }
+
     // Derive output name from input if not specified with -o
     if str_eq_full(output_path, "a.krbo") != 0 && input_path != 0 {
         uint64 ilen = str_len(input_path)
@@ -12124,42 +12227,11 @@ fn main() {
         exit(0)
     }
 
-    // Default: produce fat binary unless --arch or --emit specified.
-    // On Windows / macOS: default to the host's native format so that
-    // `krc hello.kr` just works without flags. The user can still
-    // explicitly request a fat binary with `krc hello.kr -o hello.krbo`
-    // via --emit=... if they want cross-platform output.
-    // --targets=<list> always forces fat-binary emission (custom slice set).
-    // Fat binaries carry only x86_64/arm64 slices — combining --targets
-    // with --arch=riscv32 would silently drop the requested arch, so
-    // refuse instead of misrouting into compile_fat.
-    if arch == 2 && target_mask != 0 {
-        uint64 tmsg = "error: fat binaries (--targets) have no riscv32 slice; use --arch=riscv32 without --targets\n"
-        write(2, tmsg, str_len(tmsg))
-        exit(1)
-    }
-    if arch == 3 && target_mask != 0 {
-        uint64 xtmsg = "error: fat binaries (--targets) have no xtensa slice; use --arch=xtensa without --targets\n"
-        write(2, xtmsg, str_len(xtmsg))
-        exit(1)
-    }
+    // Fat or single was decided once, by resolve_os_container (R5): fat iff
+    // --targets= was given, or none of --arch=, --emit=/-c or a hosted
+    // --target= was. The fat-path refusals (riscv32/xtensa, --target=none)
+    // and R8 ran above.
     if cli_is_fat != 0 {
-        // --target=none must never reach compile_fat, from ANY entrance
-        // (no --arch given at all, or an explicit --targets=<list> that
-        // does not happen to spell "none" as one of its elements — the
-        // :5889 refusal above only catches the latter spelling). Checked
-        // here, at the single point that actually decides fat-vs-single,
-        // rather than per-entrance: freestanding is a static global, and
-        // compile_fat compiles all 8 hosted slices in one process without
-        // resetting it between them, so a bare-metal build's freestanding=1
-        // would strip startup/exit from every hosted slice — a fat binary
-        // that builds cleanly (exit 0, no diagnostic) and crashes at
-        // runtime on every architecture.
-        if target_os == 4 {
-            uint64 tnf_msg = "error: --target=none cannot build a fat binary: pass --arch=<arch> for a single bare-metal binary (a fat binary bundles 8 hosted OS slices and there is no OS here to run any of them)\n"
-            write(2, tnf_msg, str_len(tnf_msg))
-            exit(1)
-        }
         compile_fat(input_path, output_path)
     } else if emit_mode == 11 {
         // --emit=fatimage never reaches compile() as itself. It drives

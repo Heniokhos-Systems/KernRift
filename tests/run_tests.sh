@@ -108,12 +108,12 @@ arch_runner() {
 # --targets= row (and the c1_* block, whose rows are about which flags were
 # typed) goes through here. KRC_RAW when set; else build/krc2, else
 # build/krc3 -- the fallback the other raw-binary rows use (win_syscall_raw's
-# default case, TN_RAW_KRC).
-krc_raw() {
-    if [ -n "${KRC_RAW:-}" ]; then "$KRC_RAW" "$@"
-    elif [ -f "$DIR/../build/krc2" ]; then "$DIR/../build/krc2" "$@"
-    else "$DIR/../build/krc3" "$@"; fi
-}
+# default case, TN_RAW_KRC). KRC_RAW_CC names the same binary, for a row that
+# runs it under `timeout`.
+if [ -n "${KRC_RAW:-}" ]; then KRC_RAW_CC="$KRC_RAW"
+elif [ -f "$DIR/../build/krc2" ]; then KRC_RAW_CC="$DIR/../build/krc2"
+else KRC_RAW_CC="$DIR/../build/krc3"; fi
+krc_raw() { "$KRC_RAW_CC" "$@"; }
 PASS=0
 FAIL=0
 SKIP=0
@@ -16103,7 +16103,7 @@ for rwi in "win_import_routes_fat_win_x64 win-x64 3 x86_64 32" "win_import_route
     set -- $rwi
     TOTAL=$((TOTAL + 1))
     rm -f "$RWI_DIR/o.krbo" "$RWI_DIR/o.exe"
-    RWI_ERR=$($KRC --targets="$2" "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/o.krbo" 2>&1 >/dev/null)
+    RWI_ERR=$(krc_raw --targets="$2" "$DIR/fixtures/os_prune.kr" -o "$RWI_DIR/o.krbo" 2>&1 >/dev/null)
     if [ ! -s "$RWI_DIR/o.krbo" ]; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(echo "$RWI_ERR" | head -1))"
     elif ! command -v python3 > /dev/null 2>&1; then
@@ -16422,14 +16422,21 @@ done
 #      point: an LKM is one module for one kernel. It used to compile the
 #      module as 8 hosted programs and die on "no 'main' function found".
 #      Refused for a real slice list and for an all-unknown one alike -- the
-#      refusal is about the flag.
+#      refusal is about the flag. (Since C1, #234, an unknown name is refused
+#      on its own first, while the arguments are read: `bogus` gets the
+#      unknown --targets= name message.)
 TOTAL=$((TOTAL + 1))
 WSR_WHY=""
 for wsr_t in linux-x64 android-x64 all bogus; do
     rm -f "$WSR_DIR/m.ko"
     WSR_ERR=$($KRC --emit=lkm --targets="$wsr_t" "$DIR/../examples/hello_lkm.kr" -o "$WSR_DIR/m.ko" 2>&1 >/dev/null)
     [ -s "$WSR_DIR/m.ko" ] && WSR_WHY="$WSR_WHY $wsr_t:built"
-    printf '%s' "$WSR_ERR" | grep -qxF "error: --emit=lkm conflicts with --targets=: a loadable kernel module (.ko) is a single-target Linux/Android kernel module, not a fat binary; drop --targets= and build it with --arch=x86_64 --target=linux (or android)" \
+    if [ "$wsr_t" = bogus ]; then
+        WSR_WANT="error: unknown --targets= name 'bogus': valid names are linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all (lower-case)"
+    else
+        WSR_WANT="error: --emit=lkm conflicts with --targets=: a loadable kernel module (.ko) is a single-target Linux/Android kernel module, not a fat binary; drop --targets= and build it with --arch=x86_64 --target=linux (or android)"
+    fi
+    printf '%s' "$WSR_ERR" | grep -qxF "$WSR_WANT" \
         || WSR_WHY="$WSR_WHY $wsr_t:wrong-error($(printf '%s' "$WSR_ERR" | grep error | head -1))"
 done
 if [ -z "$WSR_WHY" ]; then
@@ -16537,20 +16544,17 @@ for wsr in "win_syscall_raw_fat_win_x64_refused --targets=win-x64 win-x64 ir" \
            "win_syscall_raw_fat_legacy_win_arm64_refused --legacy+--targets=win-arm64 win-arm64 legacy" \
            "win_syscall_raw_fat_default_refused - win-x64 ir"; do
     set -- $wsr
-    # The default case is the ONE fat row that cannot go through $KRC: it
-    # needs NO --arch and NO --targets (that absence is the default-fat
-    # entrance), and `make test`'s $KRC is a wrapper that always injects
-    # --arch=x86_64, which no later flag can take back. So it runs the raw
-    # compiler -- the same build/krc2-then-krc3 fallback the other raw-binary
-    # rows use (TN_RAW_KRC, GOV_KRC) -- and a harness that swaps $KRC for a
-    # wrapper must swap this binary too, or set KRC_RAW to it.
-    WSR_K="$KRC"; WSR_T="${2//+/ }"
-    if [ "$WSR_T" = "-" ]; then
-        WSR_T=""
-        if [ -n "${KRC_RAW:-}" ]; then WSR_K="$KRC_RAW"
-        elif [ -f "$DIR/../build/krc2" ]; then WSR_K="$DIR/../build/krc2"
-        else WSR_K="$DIR/../build/krc3"; fi
-    fi
+    # None of these fat rows can go through $KRC: `make test`'s $KRC is a
+    # wrapper that always injects --arch=x86_64, which no later flag can take
+    # back. The default case needs NO --arch and NO --targets (that absence is
+    # the default-fat entrance), and since C1 (#234) the --targets= cases
+    # cannot carry an --arch= either -- it used to be silently dropped next to
+    # --targets=, and is now refused. So every case runs the raw compiler
+    # (krc_raw's KRC_RAW, else build/krc2, else build/krc3 -- the fallback the
+    # other raw-binary rows use, TN_RAW_KRC, GOV_KRC); a harness that swaps
+    # $KRC for a wrapper must set KRC_RAW to the bare compiler too.
+    WSR_K="$KRC_RAW_CC"; WSR_T="${2//+/ }"
+    if [ "$WSR_T" = "-" ]; then WSR_T=""; fi
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.krbo"
     WSR_ERR=$($WSR_K $WSR_T "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
@@ -16559,7 +16563,7 @@ done
 TOTAL=$((TOTAL + 1))
 if [ "$RUN_ARCH" = "arm64" ]; then WSR_HOST=linux-arm64; WSR_ID=2; else WSR_HOST=linux-x64; WSR_ID=1; fi
 rm -f "$WSR_DIR/o.krbo" "$WSR_DIR/o.bin"
-WSR_ERR=$($KRC --targets="$WSR_HOST" "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
+WSR_ERR=$(krc_raw --targets="$WSR_HOST" "$DIR/fixtures/win_syscall_raw.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
 if [ ! -s "$WSR_DIR/o.krbo" ]; then
     FAIL=$((FAIL + 1)); echo "  win_syscall_raw_fat_linux_only_builds: FAIL (refused: $(printf '%s' "$WSR_ERR" | head -1))"
 elif ! command -v python3 > /dev/null 2>&1; then
@@ -16583,7 +16587,7 @@ for wsr in "win_import_unguarded_fat_win_x64 win-x64 3 x86_64 32" "win_import_un
     set -- $wsr
     TOTAL=$((TOTAL + 1))
     rm -f "$WSR_DIR/o.krbo" "$WSR_DIR/o.exe"
-    WSR_ERR=$($KRC --targets="$2" "$DIR/fixtures/win_import_unguarded.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
+    WSR_ERR=$(krc_raw --targets="$2" "$DIR/fixtures/win_import_unguarded.kr" -o "$WSR_DIR/o.krbo" 2>&1 >/dev/null)
     if [ ! -s "$WSR_DIR/o.krbo" ]; then
         FAIL=$((FAIL + 1)); echo "  $1: FAIL (fat build refused: $(printf '%s' "$WSR_ERR" | head -1))"
     elif ! command -v python3 > /dev/null 2>&1; then
@@ -16595,7 +16599,7 @@ for wsr in "win_import_unguarded_fat_win_x64 win-x64 3 x86_64 32" "win_import_un
     fi
 done
 TOTAL=$((TOTAL + 1))
-WSR_ERR=$($KRC --targets=linux-x64,win-x64 "$DIR/fixtures/win_import_unguarded.kr" -o "$WSR_DIR/o2.krbo" 2>&1 >/dev/null)
+WSR_ERR=$(krc_raw --targets=linux-x64,win-x64 "$DIR/fixtures/win_import_unguarded.kr" -o "$WSR_DIR/o2.krbo" 2>&1 >/dev/null)
 if [ ! -s "$WSR_DIR/o2.krbo" ] && printf '%s' "$WSR_ERR" | grep -qF "win_import_unguarded.kr:5:11: error: extern fn 'WSAStartup' is never defined"; then
     PASS=$((PASS + 1)); echo "  win_import_unguarded_fat_with_linux_refused: PASS"
 else
@@ -16610,12 +16614,12 @@ fi
 TOTAL=$((TOTAL + 1))
 WSR_WHY=""
 rm -f "$WSR_DIR/fl.krbo"
-WSR_ERR=$($KRC --targets=linux-x64 "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
+WSR_ERR=$(krc_raw --targets=linux-x64 "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
 [ -s "$WSR_DIR/fl.krbo" ] || WSR_WHY="$WSR_WHY linux-x64:refused($(printf '%s' "$WSR_ERR" | grep 'error:' | head -1))"
 rm -f "$WSR_DIR/fl.krbo"
 for wsr_t in win-x64 win-arm64; do
     rm -f "$WSR_DIR/fl.krbo"
-    WSR_ERR=$($KRC --targets="$wsr_t" "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
+    WSR_ERR=$(krc_raw --targets="$wsr_t" "$DIR/fixtures/win_import_float_guarded.kr" -o "$WSR_DIR/fl.krbo" 2>&1 >/dev/null)
     if [ -s "$WSR_DIR/fl.krbo" ]; then WSR_WHY="$WSR_WHY $wsr_t:built"
     elif ! printf '%s' "$WSR_ERR" | grep -qF "win_import_float_guarded.kr:6:11: error: routed Windows import 'WSAStartup' has a float parameter or return type"; then
         WSR_WHY="$WSR_WHY $wsr_t:wrong-error($(printf '%s' "$WSR_ERR" | head -1))"
@@ -16641,7 +16645,7 @@ for wsr_t in "linux-x64 1" "linux-arm64 2" "win-x64 3" "win-arm64 4" \
         set -- "$1" "$2" $wsr_op
         printf 'extern fn kr_wsr_nowhere() -> uint64\nfn main() -> uint32 {\n    if get_arch_id() %s %s { kr_wsr_nowhere() }\n    return 0\n}\n' "$3" "$2" > "$WSR_DIR/bit.kr"
         rm -f "$WSR_DIR/bit.krbo"
-        WSR_ERR=$($KRC --targets="$1" "$WSR_DIR/bit.kr" -o "$WSR_DIR/bit.krbo" 2>&1 >/dev/null)
+        WSR_ERR=$(krc_raw --targets="$1" "$WSR_DIR/bit.kr" -o "$WSR_DIR/bit.krbo" 2>&1 >/dev/null)
         if [ "$4" = "build" ] && [ ! -s "$WSR_DIR/bit.krbo" ]; then WSR_WHY="$WSR_WHY $1:refused-an-unshipped-slice"; fi
         if [ "$4" = "refuse" ] && { [ -s "$WSR_DIR/bit.krbo" ] || ! printf '%s' "$WSR_ERR" | grep -q "extern fn 'kr_wsr_nowhere' is never defined"; }; then
             WSR_WHY="$WSR_WHY $1:shipped-slice-not-refused"
@@ -18567,7 +18571,7 @@ HOST_TGT="linux-x64"
 if [ "$HOST_ARCH" = "aarch64" ] || [ "$HOST_ARCH" = "arm64" ]; then
     HOST_TGT="linux-arm64"
 fi
-if timeout 30 "$KRC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o $SUITE_TMP/krc_fat_$$ > /dev/null 2>&1; then
+if timeout 30 "$KRC_RAW_CC" --targets="$HOST_TGT" "$REPO_ROOT/test_tmp_$$.kr" -o $SUITE_TMP/krc_fat_$$ > /dev/null 2>&1; then
     KR_BIN="$REPO_ROOT/dist/kr"
     [ -x "$KR_BIN" ] || KR_BIN="$REPO_ROOT/dist/kr-android-$HOST_ARCH"
     [ -x "$KR_BIN" ] || KR_BIN="$RT_RUNNER"
@@ -18593,8 +18597,8 @@ rm -f "$REPO_ROOT/test_tmp_$$.kr" $SUITE_TMP/krc_fat_$$
 TOTAL=$((TOTAL + 1))
 printf 'fn main() { exit(0) }\n' > "$REPO_ROOT/test_tmp_$$.kr"
 ALL="linux-x64,linux-arm64,win-x64,win-arm64,macos-x64,macos-arm64,android-x64,android-arm64"
-if timeout 30 "$KRC" --targets="$ALL" "$REPO_ROOT/test_tmp_$$.kr" -o $SUITE_TMP/krc_fat_all_$$ > /dev/null 2>&1 && \
-   timeout 30 "$KRC" --targets=linux-x64,macos-arm64 "$REPO_ROOT/test_tmp_$$.kr" -o $SUITE_TMP/krc_fat_two_$$ > /dev/null 2>&1; then
+if timeout 30 "$KRC_RAW_CC" --targets="$ALL" "$REPO_ROOT/test_tmp_$$.kr" -o $SUITE_TMP/krc_fat_all_$$ > /dev/null 2>&1 && \
+   timeout 30 "$KRC_RAW_CC" --targets=linux-x64,macos-arm64 "$REPO_ROOT/test_tmp_$$.kr" -o $SUITE_TMP/krc_fat_two_$$ > /dev/null 2>&1; then
     all_sz=$(wc -c < $SUITE_TMP/krc_fat_all_$$)
     two_sz=$(wc -c < $SUITE_TMP/krc_fat_two_$$)
     if [ "$two_sz" -lt "$all_sz" ]; then
@@ -39646,9 +39650,7 @@ echo ""
 echo "--- C1 option compatibility: tests/c1_matrix.lst and the c1_* rows ---"
 C1_D=$(mktemp -d "$SUITE_TMP/c1.XXXXXX")
 C1_ROOT="$(cd "$DIR/.." && pwd)"
-if [ -n "${KRC_RAW:-}" ]; then C1_CC="$KRC_RAW"
-elif [ -f "$DIR/../build/krc2" ]; then C1_CC="$DIR/../build/krc2"
-else C1_CC="$DIR/../build/krc3"; fi
+C1_CC="$KRC_RAW_CC"
 case "$C1_CC" in /*) ;; *) C1_CC="$(cd "$(dirname "$C1_CC")" 2> /dev/null && pwd)/$(basename "$C1_CC")" ;; esac
 C1_PY=1; command -v python3 > /dev/null 2>&1 || C1_PY=0
 C1_NOTE_A='note: the error above is in the '
