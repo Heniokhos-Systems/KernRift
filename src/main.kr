@@ -8740,6 +8740,86 @@ fn parse_uint_arg(uint64 s) -> uint64 {
     return val
 }
 
+// #258 (C1): a decimal flag value must be ALL digits and non-empty.
+// parse_uint_arg stops at the first non-digit, so `abc` read as 0 and `12abc`
+// as 12, silently. flag: the flag as written ("--min-fitness=", or
+// "--min-fitness" for the next-argument form).
+fn parse_uint_or_die(uint64 v, uint64 flag) -> uint64 {
+    uint64 n = 0
+    uint64 digits_only = 1
+    uint64 c = load8(v)
+    while c != 0 {
+        if c < 48 || c > 57 { digits_only = 0 }
+        n = n + 1
+        c = load8(v + n)
+    }
+    if n == 0 || digits_only == 0 {
+        c1_w("error: ")
+        c1_w(flag)
+        c1_w(" wants a non-negative decimal number, got '")
+        c1_w(v)
+        c1_w("'\n")
+        fatal_exit()
+    }
+    return parse_uint_arg(v)
+}
+
+// #258 (C1): a value that is a flag (it starts with `-`) is refused rather
+// than swallowed: `-o --arch=arm64` wrote a file named `--arch=arm64` and
+// dropped the architecture. `-` alone is not a flag (it is check's stdin
+// input), so it gets its own wording. For -o (is_o) the message says how to
+// name such a file anyway.
+fn c1_value_not_flag(uint64 flag, uint64 what, uint64 v, uint64 is_o) {
+    if load8(v) != 45 { return }
+    c1_w("error: ")
+    c1_w(flag)
+    c1_w(" expects ")
+    c1_w(what)
+    if str_eq_full(v, "-") != 0 { c1_w(", got '") } else { c1_w(", got the flag '") }
+    c1_w(v)
+    c1_w("'")
+    if is_o != 0 {
+        c1_w("; to name a file starting with '-', write ./")
+        c1_w(v)
+    }
+    c1_w("\n")
+    fatal_exit()
+}
+
+// #258 (C1): the value of a flag that takes the NEXT argument (-o, --promote,
+// --deprecate, --reject, --min-fitness). There may be none -- `krc p.kr -o`
+// read past argv (exit 139) and `--promote` with nothing after it silently
+// ran the report -- or it may be a flag. Returns argv[i + 1]; the caller
+// steps over it.
+fn next_arg_or_die(uint64 i, uint64 flag, uint64 what, uint64 is_o) -> uint64 {
+    if i + 1 >= cli_argc {
+        c1_w("error: ")
+        c1_w(flag)
+        c1_w(" requires ")
+        c1_w(what)
+        c1_w("\n")
+        fatal_exit()
+    }
+    uint64 np = cli_argv + (i + 1) * 8
+    uint64 v = 0
+    unsafe { *(np as uint64) -> v }
+    c1_value_not_flag(flag, what, v, is_o)
+    return v
+}
+
+// #258 (C1): an `=` value that must not be empty.
+fn c1_eq_value_or_die(uint64 v, uint64 flag, uint64 what) -> uint64 {
+    if load8(v) == 0 {
+        c1_w("error: ")
+        c1_w(flag)
+        c1_w(" requires ")
+        c1_w(what)
+        c1_w("\n")
+        fatal_exit()
+    }
+    return v
+}
+
 // Legal --arch x --target(OS) pairs, ENUMERATED.
 //
 //   arch: 0 x86_64, 1 arm64, 2 riscv32, 3 xtensa
@@ -8801,12 +8881,18 @@ fn arch_os_pair_supported(uint64 arch, uint64 os) -> uint64 {
     return 0
 }
 
-// One message, one place. Every --load-addr= parse failure exits through here
+// One message, one place. Every parse_load_addr failure exits through here
 // rather than repeating the literal at each rejection site: the suite greps
 // this text, and three copies is three chances for one of them to drift.
-fn load_addr_die() {
-    uint64 la_bad = "error: --load-addr= wants a decimal or 0x-prefixed hex address\n"
-    write(2, la_bad, str_len(la_bad))
+// It names the flag being parsed (#259, C1): --mod-abi= and --mod-version=
+// use the same grammar and used to be reported as --load-addr= errors.
+// noun: "address" for --load-addr=, "number" for the module fields.
+fn load_addr_die(uint64 flag, uint64 noun) {
+    c1_w("error: ")
+    c1_w(flag)
+    c1_w(" wants a decimal or 0x-prefixed hex ")
+    c1_w(noun)
+    c1_w("\n")
     fatal_exit()
 }
 
@@ -8814,7 +8900,7 @@ fn load_addr_die() {
 // empty, stray characters, bare "0x", more than 16 digits — refuses loudly:
 // this value feeds the arm64 alignment check, and a malformed input that
 // silently parsed as 0 would PASS that check while meaning nothing.
-fn parse_load_addr(uint64 s) -> uint64 {
+fn parse_load_addr(uint64 s, uint64 flag, uint64 noun) -> uint64 {
     uint64 p = s
     uint64 base = 10
     uint64 c0 = 0
@@ -8838,16 +8924,16 @@ fn parse_load_addr(uint64 s) -> uint64 {
         if c >= 48 && c <= 57 { d = c - 48 }
         if base == 16 && c >= 97 && c <= 102 { d = c - 87 }
         if base == 16 && c >= 65 && c <= 70 { d = c - 55 }
-        if d == 99 { load_addr_die() }
+        if d == 99 { load_addr_die(flag, noun) }
         v = v * base + d
         ndigits = ndigits + 1
         // Overflow guard: 16 hex digits is a full uint64, and anything longer
         // has already wrapped silently by the time we could notice.
-        if ndigits > 16 { load_addr_die() }
+        if ndigits > 16 { load_addr_die(flag, noun) }
         p = p + 1
     }
     // Catches both "--load-addr=" (empty) and "--load-addr=0x" (prefix only).
-    if ndigits == 0 { load_addr_die() }
+    if ndigits == 0 { load_addr_die(flag, noun) }
     return v
 }
 
@@ -8966,6 +9052,10 @@ static uint64 cli_emit_arch = 0xFF
 static uint64 cli_arch_flag = 0
 // R5's verdict: 1 = compile_fat, 0 = one single-target build.
 static uint64 cli_is_fat = 0
+// -o was typed (#257): the output name is derived from the input only
+// without one -- `-o a.krbo` used to be mistaken for "no -o", since
+// "a.krbo" is also main()'s initial output_path.
+static uint64 cli_output_set = 0
 
 fn c1_w(uint64 s) { write(2, s, str_len(s)) }
 
@@ -9362,7 +9452,7 @@ fn parse_fat_addr_arg(uint64 v, uint64 ci, uint64 kind) {
     }
     fatimg_refuse_arch(a, "the per-architecture form of --load-addr=/--stack-top=")
     if kind == 0 {
-        uint64 lv = parse_load_addr(v + ci + 1)
+        uint64 lv = parse_load_addr(v + ci + 1, "--load-addr=", "address")
         if a == 0 {
             fat_load_x86 = lv
             fat_load_x86_set = 1
@@ -10243,12 +10333,15 @@ fn main() {
             if str_starts_with(arg, "-o", 2) != 0 {
                 uint64 arg_len = str_len(arg)
                 if arg_len == 2 {
+                    output_path = next_arg_or_die(i, "-o", "an output path", 1)
                     i = i + 1
-                    uint64 next_ptr = cli_argv + i * 8
-                    unsafe { *(next_ptr as uint64) -> output_path }
                 } else {
                     output_path = arg + 2
+                    c1_value_not_flag("-o", "an output path", output_path, 1)
                 }
+                // #257: a TYPED -o, even `-o a.krbo` -- the internal default
+                // name -- is honoured; the name is derived only without one.
+                cli_output_set = 1
             } else if str_starts_with(arg, "--arch=", 7) != 0 {
                 arch_set = 1
                 uint64 arch_str = arg + 7
@@ -10446,10 +10539,10 @@ fn main() {
             } else if str_starts_with(arg, "--mod-name=", 11) != 0 {
                 mod_name = arg + 11
             } else if str_starts_with(arg, "--mod-abi=", 10) != 0 {
-                mod_abi = parse_load_addr(arg + 10)
+                mod_abi = parse_load_addr(arg + 10, "--mod-abi=", "number")
                 mod_abi_set = 1
             } else if str_starts_with(arg, "--mod-version=", 14) != 0 {
-                mod_version = parse_load_addr(arg + 14)
+                mod_version = parse_load_addr(arg + 14, "--mod-version=", "number")
             } else if str_starts_with(arg, "--load-addr=", 12) != 0 {
                 // An explicit arm, and it must precede the final
                 // `else { input_path = arg }` fallthrough: before this,
@@ -10467,7 +10560,7 @@ fn main() {
                 if la_ci != 0xFFFFFFFF {
                     parse_fat_addr_arg(la_v, la_ci, 0)
                 } else {
-                    load_addr = parse_load_addr(la_v)
+                    load_addr = parse_load_addr(la_v, "--load-addr=", "address")
                     load_addr_set = 1
                 }
             } else if str_starts_with(arg, "--stack-top=", 12) != 0 {
@@ -10834,10 +10927,14 @@ fn main() {
                 // under qemu-aarch64-static on Linux -- there is no
                 // Windows-arm64 runner -- and proves these are the bytes a
                 // PE build embeds.
-                c7_dump_parser_path = arg + 19
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                c7_dump_parser_path = c1_eq_value_or_die(arg + 19, "--dump-argv-parser=", "a path")
             } else if str_starts_with(arg, "--dump-argv-quoter=", 19) != 0 {
                 // Same, for the op-114 command-line quoting leaf.
-                c7_dump_quoter_path = arg + 19
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                c7_dump_quoter_path = c1_eq_value_or_die(arg + 19, "--dump-argv-quoter=", "a path")
             } else if str_eq_full(arg, "--selftest-a64-win-sp") != 0 {
                 // Internal, undocumented in --help, test-only (#143 option C):
                 // the arm64 IR allow-list and the SP-word sizes, then exit.
@@ -10856,12 +10953,16 @@ fn main() {
                 // Internal, undocumented in --help, test-only (#143 option C):
                 // append the site id of every SP-move report of a Windows
                 // compile to the path (the emitter-coverage row reads it).
-                uw_sp_log_path = arg + 19
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                uw_sp_log_path = c1_eq_value_or_die(arg + 19, "--test-sp-site-log=", "a value")
             } else if str_starts_with(arg, "--test-listing=", 15) != 0 {
                 // Internal, undocumented in --help, test-only (#143): with
                 // --emit=pe / --emit=obj for Windows, also write the asm
                 // listing of the code this compile emitted to the path.
-                uw_test_listing_path = arg + 15
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                uw_test_listing_path = c1_eq_value_or_die(arg + 15, "--test-listing=", "a value")
             } else if str_starts_with(arg, "--test-coff-reloc-limit=", 24) != 0 {
                 // Internal, undocumented in --help, test-only (#143 A13): lower
                 // the 65535 .pdata relocations a Windows object may hold, so
@@ -10872,7 +10973,10 @@ fn main() {
                 // 256 MiB limit of a Windows arm64 frame's low area, so the
                 // refusal row can reach the located error (no program the
                 // compiler accepts comes near 256 MiB).
-                ir_a64_win_low_limit = parse_uint_arg(arg + 21)
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                c1_eq_value_or_die(arg + 21, "--test-a64-low-limit=", "a value")
+                ir_a64_win_low_limit = parse_uint_or_die(arg + 21, "--test-a64-low-limit=")
             } else if str_eq_full(arg, "--test-a64-pe-header-0x200") != 0 {
                 // Internal, undocumented in --help, test-only (#143): build a
                 // Windows arm64 image with the pre-#143 0x200-byte headers, so
@@ -10914,44 +11018,50 @@ fn main() {
                 lc_list_proposals = 1
                 mode = 2
             } else if str_starts_with(arg, "--promote=", 10) != 0 {
-                lc_promote_name = arg + 10
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                lc_promote_name = c1_eq_value_or_die(arg + 10, "--promote=", "a value")
                 mode = 2
             } else if str_starts_with(arg, "--promote", 9) != 0 {
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                lc_promote_name = next_arg_or_die(i, "--promote", "a proposal name", 0)
                 i = i + 1
-                uint64 pnext_ptr = cli_argv + i * 8
-                uint64 pnext_arg = 0
-                unsafe { *(pnext_ptr as uint64) -> pnext_arg }
-                lc_promote_name = pnext_arg
                 mode = 2
             } else if str_starts_with(arg, "--deprecate=", 12) != 0 {
-                lc_deprecate_name = arg + 12
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                lc_deprecate_name = c1_eq_value_or_die(arg + 12, "--deprecate=", "a value")
                 mode = 2
             } else if str_starts_with(arg, "--deprecate", 11) != 0 {
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                lc_deprecate_name = next_arg_or_die(i, "--deprecate", "a proposal name", 0)
                 i = i + 1
-                uint64 dnext_ptr = cli_argv + i * 8
-                uint64 dnext_arg = 0
-                unsafe { *(dnext_ptr as uint64) -> dnext_arg }
-                lc_deprecate_name = dnext_arg
                 mode = 2
             } else if str_starts_with(arg, "--reject=", 9) != 0 {
-                lc_reject_name = arg + 9
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                lc_reject_name = c1_eq_value_or_die(arg + 9, "--reject=", "a value")
                 mode = 2
             } else if str_starts_with(arg, "--reject", 8) != 0 {
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                lc_reject_name = next_arg_or_die(i, "--reject", "a proposal name", 0)
                 i = i + 1
-                uint64 rnext_ptr = cli_argv + i * 8
-                uint64 rnext_arg = 0
-                unsafe { *(rnext_ptr as uint64) -> rnext_arg }
-                lc_reject_name = rnext_arg
                 mode = 2
             } else if str_starts_with(arg, "--min-fitness=", 14) != 0 {
-                lc_min_fitness = parse_uint_arg(arg + 14)
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                c1_eq_value_or_die(arg + 14, "--min-fitness=", "a value")
+                lc_min_fitness = parse_uint_or_die(arg + 14, "--min-fitness=")
             } else if str_starts_with(arg, "--min-fitness", 13) != 0 {
                 // --min-fitness N (next arg)
+                // K7 hook: a `check`-mode refusal of this flag goes here, ahead of C1's
+                // value checks below (C1 note 3.4 "Interplay with K7").
+                uint64 mf_v = next_arg_or_die(i, "--min-fitness", "a number", 0)
                 i = i + 1
-                uint64 next_ptr = cli_argv + i * 8
-                uint64 next_arg = 0
-                unsafe { *(next_ptr as uint64) -> next_arg }
-                lc_min_fitness = parse_uint_arg(next_arg)
+                lc_min_fitness = parse_uint_or_die(mf_v, "--min-fitness")
             } else if str_starts_with(arg, "check", 5) != 0 && str_len(arg) == 5 {
                 mode = 1
             } else if str_eq_full(arg, "undo") != 0 {
@@ -12072,8 +12182,9 @@ fn main() {
         }
     }
 
-    // Derive output name from input if not specified with -o
-    if str_eq_full(output_path, "a.krbo") != 0 && input_path != 0 {
+    // Derive output name from input if not specified with -o (#257: by
+    // whether -o was typed, never by comparing the name with the default)
+    if cli_output_set == 0 && input_path != 0 {
         uint64 ilen = str_len(input_path)
         // Strip .kr extension if present, then add appropriate extension
         uint64 base_len = ilen
