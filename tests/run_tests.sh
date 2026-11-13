@@ -5705,10 +5705,11 @@ done
 QRS_P=$(mktemp -d "${TMPDIR:-/tmp}/qrs.XXXXXX")
 mkdir -p "$QRS_P/both" "$QRS_P/plain" "$QRS_P/none"
 QRS_S=-static   # spelled apart so this row does not match its own pattern
+QRS_Z=zz9        # a variable, so the README gate's rc_tools does not list qemu-zz9
 for QRS_N in both/qemu-zz9$QRS_S both/qemu-zz9 plain/qemu-zz9; do printf '#!/bin/sh\nexit 0\n' > "$QRS_P/$QRS_N"; chmod +x "$QRS_P/$QRS_N"; done
-QRS_G=$(PATH="$QRS_P/both" qemu_bin zz9); [ "$QRS_G" = "$QRS_P/both/qemu-zz9$QRS_S" ] || QRS_BAD="$QRS_BAD both names: got '$QRS_G' (want the -static one);"
-QRS_G=$(PATH="$QRS_P/plain" qemu_bin zz9); [ "$QRS_G" = "$QRS_P/plain/qemu-zz9" ] || QRS_BAD="$QRS_BAD plain name only: got '$QRS_G';"
-QRS_G=$(PATH="$QRS_P/none" qemu_bin zz9); QRS_RC=$?
+QRS_G=$(PATH="$QRS_P/both" qemu_bin $QRS_Z); [ "$QRS_G" = "$QRS_P/both/qemu-zz9$QRS_S" ] || QRS_BAD="$QRS_BAD both names: got '$QRS_G' (want the -static one);"
+QRS_G=$(PATH="$QRS_P/plain" qemu_bin $QRS_Z); [ "$QRS_G" = "$QRS_P/plain/qemu-zz9" ] || QRS_BAD="$QRS_BAD plain name only: got '$QRS_G';"
+QRS_G=$(PATH="$QRS_P/none" qemu_bin $QRS_Z); QRS_RC=$?
 [ -z "$QRS_G" ] && [ "$QRS_RC" = 1 ] || QRS_BAD="$QRS_BAD neither: got '$QRS_G' rc $QRS_RC (want nothing, rc 1);"
 rm -rf "$QRS_P"
 if [ -z "$QRS_BAD" ]; then PASS=$((PASS + 1)); echo "  qemu_resolver_single_site: PASS (no literal -static site in tests/**/*.sh, the diff scripts source qemu_bin, which prefers -static, falls back to the plain name and reports neither)"
@@ -39072,6 +39073,42 @@ else
 fi
 rm -rf "$SB_D"
 
+# rc_tools FILE: the tools the README gate below requires for a full run --
+# every literal `command -v <tool>` in FILE, and every `qemu_bin <name>` call
+# as qemu-<name> (a call: after `$(` or first on its line, so prose naming the
+# helper is not a tool). The qemu-user rows find their binary through qemu_bin
+# (tests/helpers/qemu_bin.sh, #227), whose own `command -v "qemu-$1-static"`
+# names no tool; without the second grep a host lacking qemu-aarch64 looked
+# fully equipped, and the rows qemu_bin skipped there were reported as skips
+# outside SKIP_ALLOW (naked_alternative_out_constraint_works) instead of a
+# partial toolchain. A call with a variable argument (`qemu_bin $X`) is not a
+# literal tool and is not listed.
+rc_tools() {
+    {
+        grep -oE 'command -v [A-Za-z0-9_.+-]+' "$1" | awk '{print $3}'
+        grep -oE '(\$\(|^[[:space:]]*)qemu_bin [a-z0-9_]+' "$1" | awk '{print "qemu-" $NF}'
+    } | sort -u
+}
+# --- readme_count_gate_sees_qemu_bin -----------------------------------------
+# rc_tools over a fixture with a literal probe, a qemu_bin call in each shape
+# the suite uses ($(...) and `&& return 0`), a variable-argument call and a
+# comment naming the helper must list the probed tool and both qemu-<name>s,
+# and nothing for the variable or the comment; over this file it must list
+# exactly the three qemu-user binaries the suite resolves (so prose here is
+# never mistaken for a tool, which would make every run a partial one).
+TOTAL=$((TOTAL + 1))
+RCQ_F=$(mktemp "${TMPDIR:-/tmp}/rcq.XXXXXX")
+# qemu_%s, so these fixture calls are not themselves calls rc_tools finds here
+printf 'command -v clang > /dev/null\nQA="$(qemu_%s aarch64)"\nqemu_%s riscv32 && return 0\nqemu_%s $RCQ_X\n# rows qemu_%s skipped\n' bin bin bin bin > "$RCQ_F"
+RCQ_GOT=$(rc_tools "$RCQ_F" | tr '\n' ' ')
+rm -f "$RCQ_F"
+RCQ_SELF=$(rc_tools "$DIR/run_tests.sh" | grep '^qemu-[a-z0-9_]*$' | grep -v '^qemu-system-' | tr '\n' ' ')
+if [ "$RCQ_GOT" = "clang qemu-aarch64 qemu-riscv32 " ] && [ "$RCQ_SELF" = "qemu-aarch64 qemu-riscv32 qemu-x86_64 " ]; then
+    PASS=$((PASS + 1)); echo "  readme_count_gate_sees_qemu_bin: PASS (fixture -> $RCQ_GOT; run_tests.sh qemu-user -> $RCQ_SELF)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: readme_count_gate_sees_qemu_bin (fixture -> '$RCQ_GOT', want 'clang qemu-aarch64 qemu-riscv32 '; run_tests.sh qemu-user -> '$RCQ_SELF', want 'qemu-aarch64 qemu-riscv32 qemu-x86_64 ')"
+fi
+
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
 # README.md advertises this suite's test count. Compare it against the total
 # only now, when $TOTAL is final and already includes this row (Part A did the
@@ -39081,7 +39118,8 @@ rm -rf "$SB_D"
 # ROWS RUN, NOT ROWS DEFINED. Rows behind an optional tool are not counted at
 # all when it is missing, so a count below README's is ambiguous on a partial
 # toolchain. It is NOT ambiguous on a full one: when every tool this file
-# probes for is present (a qemu-X-static is satisfied by qemu-X), the host is
+# probes for is present (rc_tools: its `command -v` probes and qemu_bin calls;
+# a qemu-X-static is satisfied by qemu-X and the reverse), the host is
 # x86_64 and the opt-in ANDROID_EMULATOR is off, every row runs and counts,
 # so TOTAL must equal README exactly and a deleted row is red. On any other
 # run a count below README's is a SKIP that names what is missing, never a
@@ -39101,7 +39139,7 @@ done <<RC_SKIPS_EOF
 $SKIP_NAMES
 RC_SKIPS_EOF
 RC_MISSING=""
-for RC_TOOL in $(grep -oE 'command -v [A-Za-z0-9_.+-]+' "$DIR/run_tests.sh" | awk '{print $3}' | sort -u); do
+for RC_TOOL in $(rc_tools "$DIR/run_tests.sh"); do
     case $RC_TOOL in *-) continue ;; esac   # a prefix in prose, not a tool
     [ "$RC_TOOL" = "adb" ] && continue      # used only under ANDROID_EMULATOR=1
     command -v "$RC_TOOL" > /dev/null 2>&1 && continue

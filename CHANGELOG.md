@@ -116,6 +116,13 @@ way.
 prove it audited all of it; from a `git archive` or tarball copy it now fails at once, naming
 #221 and the reason, instead of running ~560 builds first and failing among unrelated reasons.
 
+**The README test-count gate sees the qemu-user rows' tools.** It decides whether a run had every
+tool (and so must count every row) from the `command -v <tool>` probes in `tests/run_tests.sh`;
+the rows that find qemu through `qemu_bin` named no tool, so on a host without `qemu-aarch64` the
+rows that skipped there were reported as unexplained skips of a full run instead of a partial
+toolchain. Each `qemu_bin <name>` call now counts as a probe for `qemu-<name>` (row
+`readme_count_gate_sees_qemu_bin`).
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF
