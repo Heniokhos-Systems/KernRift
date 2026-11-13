@@ -7410,6 +7410,46 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         fatal_exit()
     }
 
+    // --asm-strict (#253, C1): every fat build used to ignore it -- the
+    // check ran only on the single-build path. It is per ARCHITECTURE, so it
+    // runs once for each architecture that has a wanted slice, x86_64 then
+    // arm64 (fat order), against the first pass's parse, before any backend
+    // -- where the single build runs it -- and its errors carry the note of
+    // the first wanted slice of that architecture in fat order: the build
+    // would have failed in that slice first.
+    if asm_strict != 0 {
+        uint64 as_a = 0
+        while as_a < 2 {
+            uint64 as_os = 0xFF
+            uint64 as_lab = 0
+            if fat_slice_wanted(3, as_a) != 0 { as_os = 3 }
+            if fat_slice_wanted(1, as_a) != 0 { as_os = 1 }
+            if fat_slice_wanted(2, as_a) != 0 { as_os = 2 }
+            if fat_slice_wanted(0, as_a) != 0 { as_os = 0 }
+            if as_os != 0xFF {
+                if as_a == 0 {
+                    as_lab = "linux-x64"
+                    if as_os == 2 { as_lab = "win-x64" }
+                    if as_os == 1 { as_lab = "mac-x64" }
+                    if as_os == 3 { as_lab = "android-x64" }
+                } else {
+                    as_lab = "linux-arm64"
+                    if as_os == 2 { as_lab = "win-arm64" }
+                    if as_os == 1 { as_lab = "mac-arm64" }
+                    if as_os == 3 { as_lab = "android-arm64" }
+                }
+                set_target_arch(as_a)
+                target_os = as_os
+                fat_slice_label = as_lab
+                asm_check_module()
+                fat_slice_label = 0
+            }
+            as_a = as_a + 1
+        }
+        set_target_arch(0)
+        target_os = 0
+    }
+
     // From here on each pass runs its BACKEND (inline_pass onward, down to
     // the copy of its output) only if its slice ships (#244, C1):
     // fat_slice_wanted. The front ends are unchanged, so diagnostics are
