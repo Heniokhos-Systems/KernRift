@@ -31,6 +31,8 @@ REPO="$(cd "$DIR/.." && pwd)"
 # else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
 . "$DIR/../helpers/test_tmp.sh"
 KRT_R=$(kr_test_root "$REPO") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
 KRC="${KRC:-$REPO/../build/krc2}"
 if [ ! -x "$KRC" ]; then KRC="$REPO/build/krc2"; fi
 if [ ! -x "$KRC" ]; then echo "fuzz: krc not found ($KRC)" >&2; exit 2; fi

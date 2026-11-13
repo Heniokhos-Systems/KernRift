@@ -24,6 +24,8 @@ fi
 # else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
 . "$(dirname "$0")/helpers/test_tmp.sh"
 KRT_R=$(kr_test_root "$(dirname "$0")/..") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
 # arm64 natively on an aarch64 host ("env" is a no-op prefix), else qemu (#227).
 if [ "$(uname -m)" = aarch64 ]; then QEMU=env; else QEMU="$(qemu_bin aarch64)"; fi
 TMP=$KRT_R/difftest_$$

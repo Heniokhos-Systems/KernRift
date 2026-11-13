@@ -40,6 +40,8 @@ RUNNER="${DIFF_RUNNER:-}"
 # else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
 . "$DIR/../helpers/test_tmp.sh"
 KRT_R=$(kr_test_root "$REPO") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
 QEMU_RUNNER="${QEMU_RUNNER:-$(qemu_bin aarch64)}"
 
 PASS=0

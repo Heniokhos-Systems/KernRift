@@ -99,6 +99,8 @@ REPO="$(cd "$DIR/../.." && pwd)"
 # else /tmp (tests/helpers/test_tmp.sh; refuses a bad root, exit 2).
 . "$DIR/../helpers/test_tmp.sh"
 KRT_R=$(kr_test_root "$REPO") || exit 2
+# ...and every plain mktemp (no template) of this script lands there too.
+export TMPDIR="$KRT_R"
 KRC="${KRC:-$REPO/build/krc2}"
 
 # REFUSE A $KRC THAT INJECTS AN --arch=, because gate 1 cannot measure anything
