@@ -7098,6 +7098,91 @@ fn c1_r8_emit_die() {
 // default/`all` fat build, else the slice's --targets bit (see target_mask).
 static uint64 in_compile_fat = 0
 
+// The start of every compile_fat pass, right after set_target_arch (#254,
+// #256, C1). Each pass re-parses the program, and parsing re-registers
+// per-program facts in global tables; codegen_init runs once, before the first
+// pass, so a table no pass reset accumulated x8. Two of them were HARD errors:
+// 9 or more @builtin_override functions hit "too many builtin overrides (max
+// 64 ...)" and 65 or more signed-returning functions "too many
+// signed-returning functions (max 512 ...)" in every fat build, while the
+// single build of the same program compiled. This is the one reset list --
+// the seven hand-written copies it replaces (one per later pass) could, and
+// did, drift apart -- and it sets target_os explicitly: the win-arm64 and
+// mac-arm64 passes used to inherit it from the pass before them, which was
+// right only because of the pass order.
+//   os: 0 linux, 1 macos, 2 windows, 3 android.
+// Every registry the per-pass front end writes was audited; the rest are
+// reset by ast_init, parser_init, asm_seen_reset, tc_init/tc_locals_reset,
+// fn_method_reset, inline_init and dce_init, or are storage whose counters are
+// reset here. module_info_* setters are last-writer and idempotent (no reset).
+// fn_ret_float_count is safe to reset: this runs BEFORE the pass's parse, and
+// parse_fn_decl re-registers every float-returning function (an older reset
+// that ran without a re-registration emptied the table for later slices).
+// Registration order is the same in every pass, so the static and function
+// name-hash caches are rebuilt from scratch rather than left pointing at the
+// previous pass's indices: built_n back to 0 and every slot's index set to
+// the empty marker 0xFFFFFFFF.
+fn fat_pass_reset(uint64 os) {
+    target_os = os
+    out_len = 0
+    fn_count = 0
+    fixup_count = 0
+    static_fixup_count = 0
+    str_fixup_count = 0
+    str_len = 0
+    extern_fn_count = 0
+    extern_call_count = 0
+    fnaddr_fixup_count = 0
+    static_count = 0
+    static_data_size = 0
+    struct_count = 0
+    struct_var_count = 0
+    enum_count = 0
+    type_alias_count = 0
+    arr_elem_count = 0
+    fn_ret_struct_count = 0
+    line_table_count = 0
+    last_recorded_line = 0
+    debug_file_count = 0
+    diag_count = 0
+    diag_error_count = 0
+    diag_warn_count = 0
+    slice_len_count = 0
+    device_count = 0
+    device_field_count = 0
+    var_type_count = 0
+    win_iat_fixup_count = 0
+    a64_win_iat_fixup_count = 0
+    // the parse-time registries no pass reset before C1
+    builtin_override_count = 0
+    fn_ret_signed_count = 0
+    fn_ret_float_count = 0
+    fn_section_count = 0
+    static_struct_count = 0
+    ann_count = 0
+    lock_edge_count = 0
+    static_hash_built_n = 0
+    if static_hash_tbl != 0 {
+        uint64 hi = 0
+        while hi < static_hash_cap {
+            uint64 hp = static_hash_tbl + hi * 8 + 4
+            uint32 hff = 0xFFFFFFFF
+            unsafe { *(hp as uint32) = hff }
+            hi = hi + 1
+        }
+    }
+    tc_fn_hash_built_n = 0
+    if tc_fn_hash_tbl != 0 {
+        uint64 ti = 0
+        while ti < 4096 {
+            uint64 tp = tc_fn_hash_tbl + ti * 8 + 4
+            uint32 tff = 0xFFFFFFFF
+            unsafe { *(tp as uint32) = tff }
+            ti = ti + 1
+        }
+    }
+}
+
 fn fat_slice_ships() -> uint64 {
     if in_compile_fat == 0 { return 1 }
     if target_mask == 0 { return 1 }
@@ -7223,6 +7308,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
     // === Compile x86_64 ELF (Linux) ===
     target_os = 0
     set_target_arch(0)
+    fat_pass_reset(0)
     ast_init(524288)
     codegen_init(4194304, source, my_tokens)
     parser_init(my_tokens, saved_tcount)
@@ -7350,45 +7436,8 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
 
     // === Compile ARM64 ===
     set_target_arch(1)
-    // Reset codegen for ARM64 pass
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    fat_pass_reset(0)
 
-    // Re-parse (need fresh AST; restore source+tokens to pristine state first)
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
     parser_init(my_tokens, saved_tcount)
@@ -7464,44 +7513,7 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
 
     // === Compile x86_64 PE (Windows) ===
     set_target_arch(0)
-    target_os = 2
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    win_iat_fixup_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    fat_pass_reset(2)
     uw_reset()
     // #143 A12: this slice is a Windows PE -- record and write its unwind
     // tables (unless --test-no-unwind); cleared again after pe_finalize_x64.
@@ -7572,45 +7584,9 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         pxi = pxi + 1
     }
 
-    set_target_arch(1)
     // === Compile ARM64 PE (Windows) ===
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    a64_win_iat_fixup_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    set_target_arch(1)
+    fat_pass_reset(2)
     uw_reset()
     // #143 A12: the arm64 Windows slice records and writes its tables too.
     uw_emit_tables = 0
@@ -7680,45 +7656,9 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         pai = pai + 1
     }
 
-    set_target_arch(0)
     // === Compile x86_64 Mach-O (macOS) ===
-    target_os = 1
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    set_target_arch(0)
+    fat_pass_reset(1)
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -7788,45 +7728,9 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         unsafe { *(dp as uint8) = bb }
         mxi = mxi + 1
     }
-    set_target_arch(1)
-
     // === Compile ARM64 Mach-O (macOS) ===
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    set_target_arch(1)
+    fat_pass_reset(1)
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -7931,46 +7835,9 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         unsafe { *(dp as uint8) = bb }
         mai = mai + 1
     }
-    set_target_arch(0)
-
     // === Compile x86_64 Android PIE ELF ===
-    target_os = 3
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    set_target_arch(0)
+    fat_pass_reset(3)
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
@@ -8057,47 +7924,11 @@ fn compile_fat(uint64 input_path, uint64 output_path) {
         uint8 bb = bv
         unsafe { *(dp as uint8) = bb }
         axi = axi + 1
-    set_target_arch(1)
     }
 
     // === Compile ARM64 Android PIE ELF ===
-    target_os = 3
-    out_len = 0
-    fn_count = 0
-    fixup_count = 0
-    static_fixup_count = 0
-    str_fixup_count = 0
-    str_len = 0
-    extern_fn_count = 0
-    extern_call_count = 0
-    fnaddr_fixup_count = 0
-    static_count = 0
-    static_data_size = 0
-    struct_count = 0
-    struct_var_count = 0
-    enum_count = 0
-    type_alias_count = 0
-    arr_elem_count = 0
-    // fn_ret_float_count is deliberately NOT reset here. The float-return
-    // table is seeded once at parse time (parser.kr, parse_fn_decl) — same
-    // as fn_ret_signed, which this reset never touched either. Clearing it
-    // per slice left every slice after the first with an empty table, and
-    // only the x86 IR emitter re-registered as it went; the arm64 emitter
-    // never did, so `f32_fn() * x` lowered to an integer MUL there.
-    // fn_ret_float_register is idempotent, so nothing accumulates.
-    fn_ret_struct_count = 0
-    line_table_count = 0
-    last_recorded_line = 0
-    debug_file_count = 0
-    diag_count = 0
-    diag_error_count = 0
-    diag_warn_count = 0
-    slice_len_count = 0
-    device_count = 0
-    device_field_count = 0
-    var_type_count = 0
-    win_iat_fixup_count = 0
-    a64_win_iat_fixup_count = 0
+    set_target_arch(1)
+    fat_pass_reset(3)
 
     restore_src_and_tokens(source, size, src_snapshot, my_tokens, tok_bytes, tok_snapshot)
     ast_init(524288)
