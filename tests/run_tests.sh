@@ -198,6 +198,8 @@ KRT_INODES=$(printf '%s\n' "$KRT_HR" | sed -n 's/.*inodes=\([0-9-]*\).*/\1/p')
 KRT_SRC=$(printf '%s\n' "$KRT_HR" | sed -n 's/.*source=\([a-z]*\).*/\1/p')
 KRT_NOTE=$(printf '%s\n' "$KRT_HR" | sed -n 's/.*note=\(.*\)$/\1/p')
 KRT_GIBS=$(awk -v b="$KRT_BYTES" 'BEGIN { printf "%.2f", b / 1073741824 }')
+case "$KRT_NOTE" in *quota-unreadable*) echo "WARN: the quota of $KR_TEST_ROOT is not readable here ($KRT_NOTE: quotactl_fd needs Linux 5.14); a user or group quota is not counted, so the headroom may be overstated" ;; esac
+case "$KRT_NOTE" in *no-python3*) echo "WARN: no python3: the headroom of $KR_TEST_ROOT comes from df and ignores any quota; it may be overstated" ;; esac
 KRT_SHORT=""
 if [ "$KRT_GIB" = 0 ]; then echo "WARN: headroom check for bytes disabled by KR_TEST_MIN_FREE_GIB=0"
 elif [ "$KRT_BYTES" -lt $((KRT_GIB * 1073741824)) ]; then KRT_SHORT="$KRT_GIBS GiB free, the floor is $KRT_GIB GiB ($KRT_GIB_FROM)"; fi
@@ -5859,8 +5861,11 @@ for f in files:
             bad.append('%s:%d: cd into the run\'s scratch directory itself: %s' % (f, n, l.strip()[:60]))
 for f in ('tests/diff/run.sh', 'tests/diff_ir_legacy.sh', 'tests/diff_ir_legacy_stdout.sh',
           'tests/smoke/run.sh', 'tests/fuzz/run.sh', 'tests/target_none/prove_no_syscalls.sh'):
-    if 'helpers/test_tmp.sh"' not in open(f).read():
+    t = open(f).read()
+    if 'helpers/test_tmp.sh"' not in t:
         bad.append('%s: does not source tests/helpers/test_tmp.sh' % f)
+    if 'export TMPDIR="$KRT_R"' not in t:
+        bad.append('%s: does not export TMPDIR="$KRT_R" (its plain mktemp would land outside the root)' % f)
 for k, u in enumerate(used):
     if not u:
         bad.append('allow-list entry no longer matches: %s %r' % (ALLOW[k][0], ALLOW[k][1]))
@@ -5886,7 +5891,11 @@ TOTAL=$((TOTAL + 1))
 KRT_TMPS=/tmp
 KRR_D=$(mktemp -d "$SUITE_TMP/krr.XXXXXX"); mkdir -p "$KRR_D/a" "$KRR_D/b"; ln -s "$KRR_D/a" "$KRR_D/l"
 KRR_A=$(cd "$KRR_D/a" && pwd -P); KRR_B=$(cd "$KRR_D/b" && pwd -P); KRR_TMP=$(cd "$KRT_TMPS" && pwd -P)
-KRR_BAD=""; KRR_N=0
+KRR_BAD=""; KRR_N=0; KRR_NOTE=""
+# Leg D (#267): when the default root itself is on a noexec mount, the rule's
+# answer there is the noexec refusal, which is what the leg then requires.
+KRR_DNX=$(awk -v t="$KRR_TMP" '{ m = $5; if ((t == m || index(t, m "/") == 1 || m == "/") && length(m) >= length(b)) { b = m; o = $6 } } END { print (o ~ /(^|,)noexec(,|$)/) ? 1 : 0 }' /proc/self/mountinfo 2> /dev/null)
+[ "$KRR_DNX" = 1 ] && KRR_NOTE="; leg D: the default root is on a noexec mount here, so its refusal was required"
 for KRR_SH in bash dash; do
     if ! command -v "$KRR_SH" > /dev/null 2>&1; then KRR_BAD="$KRR_BAD [$KRR_SH not installed]"; continue; fi
     for KRR_CASE in "A|$KRR_D/a|$KRR_D/b|$KRR_A" "B||$KRR_D/b|$KRR_B" "B-unset|-|$KRR_D/b|$KRR_B" "D|-|-|$KRR_TMP" "L|$KRR_D/l|-|$KRR_A"; do
@@ -5895,7 +5904,10 @@ for KRR_SH in bash dash; do
         [ "$KRR_K" = "-" ] || KRR_ENV="$KRR_ENV KR_TEST_TMP=$KRR_K"
         [ "$KRR_T" = "-" ] || KRR_ENV="$KRR_ENV TMPDIR=$KRR_T"
         KRR_GOT=$($KRR_ENV "$KRR_SH" -c '. "$1/helpers/test_tmp.sh"; kr_test_root "$1/.."' krr "$DIR" 2> "$KRR_D/err"); KRR_RC=$?
-        if [ "$KRR_RC" = 0 ] && [ "$KRR_GOT" = "$KRR_W" ] && [ ! -s "$KRR_D/err" ]; then KRR_N=$((KRR_N + 1))
+        if [ "$KRR_NM" = D ] && [ "$KRR_DNX" = 1 ]; then
+            if [ "$KRR_RC" = 2 ] && [ -z "$KRR_GOT" ] && grep -q 'cannot be executed' "$KRR_D/err"; then KRR_N=$((KRR_N + 1))
+            else KRR_BAD="$KRR_BAD [$KRR_SH D on a noexec default root: rc $KRR_RC, got '$KRR_GOT', stderr '$(head -c 80 "$KRR_D/err")']"; fi
+        elif [ "$KRR_RC" = 0 ] && [ "$KRR_GOT" = "$KRR_W" ] && [ ! -s "$KRR_D/err" ]; then KRR_N=$((KRR_N + 1))
         else KRR_BAD="$KRR_BAD [$KRR_SH $KRR_NM: rc $KRR_RC, got '$KRR_GOT' want '$KRR_W', stderr '$(head -c 80 "$KRR_D/err")']"; fi
     done
     KRR_GOT=$(env KR_TEST_TMP=rel "$KRR_SH" -c '. "$1/helpers/test_tmp.sh"; kr_test_root "$1/.."' krr "$DIR" 2> "$KRR_D/err"); KRR_RC=$?
@@ -5904,7 +5916,7 @@ for KRR_SH in bash dash; do
 done
 rm -rf "$KRR_D"
 if [ -z "$KRR_BAD" ]; then
-    PASS=$((PASS + 1)); echo "  suite_tmp_root_rule: PASS ($KRR_N cases under bash and dash: KR_TEST_TMP > TMPDIR > the default, canonical, FATAL on stderr only)"
+    PASS=$((PASS + 1)); echo "  suite_tmp_root_rule: PASS ($KRR_N cases under bash and dash: KR_TEST_TMP > TMPDIR > the default, canonical, FATAL on stderr only$KRR_NOTE)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_root_rule ($KRR_BAD )"
 fi
@@ -5933,7 +5945,12 @@ krf_leg() {   # krf_leg NAME VALUE WANT-TEXT [ENV...]
 : > "$KRF_D/file"; mkdir -p "$KRF_D/ro"; chmod 555 "$KRF_D/ro"
 krf_leg missing "$KRF_D/nope" "does not exist"
 krf_leg file "$KRF_D/file" "is not a directory"
-if [ -w "$KRF_D/ro" ]; then KRF_BAD="$KRF_BAD [read-only: a 555 directory is writable here (root?)]"; else krf_leg read-only "$KRF_D/ro" "is not writable"; fi
+KRF_RONOTE=""
+if [ -w "$KRF_D/ro" ]; then
+    # #267: as root (or with CAP_DAC_OVERRIDE) a mode-555 directory is still
+    # writable, so there is no read-only directory to refuse; said, not skipped.
+    KRF_RONOTE="; read-only leg not applicable: a mode-555 directory is writable for uid $(id -u)"
+else krf_leg read-only "$KRF_D/ro" "is not writable"; fi
 krf_leg relative "krf_rel" "is a relative path"
 krf_leg in-checkout "$DIR" "inside the checkout"
 KRF_I=0
@@ -5959,7 +5976,7 @@ KRF_GOT=$(env KR_TEST_TMP="$KRF_D" KR_TEST__EXEC_PROBE_MODE=0700 bash -c '. "$1/
 if [ "$KRF_RC" = 2 ] && [ -z "$KRF_GOT" ] && grep -q "the only accepted value is 0644" "$KRF_D/err"; then KRF_N=$((KRF_N + 1)); else KRF_BAD="$KRF_BAD [knob 0700 accepted: rc $KRF_RC]"; fi
 chmod 755 "$KRF_D/ro" 2> /dev/null; rm -rf "$KRF_D"
 if [ -z "$KRF_BAD" ]; then
-    PASS=$((PASS + 1)); echo "  suite_tmp_root_refusals: PASS ($KRF_N refusals, exit 2 + FATAL each; noexec leg: $KRF_HOW)"
+    PASS=$((PASS + 1)); echo "  suite_tmp_root_refusals: PASS ($KRF_N refusals, exit 2 + FATAL each; noexec leg: $KRF_HOW$KRF_RONOTE)"
 else
     FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_root_refusals ($KRF_BAD )"
 fi
@@ -5992,57 +6009,122 @@ else
 fi
 
 # suite_tmp_headroom_reads_quota: tests/helpers/tmp_headroom.py sees a quota
-# that statvfs (and `df`) cannot. One-directional: when the mount holding the
-# scratch root has a quota option (usrquota/uquota/quota/grpquota) in
-# /proc/self/mountinfo, the helper must say source=quota and report bytes that
-# lie between min(statvfs, quota) decoded INDEPENDENTLY here (its own struct
-# layout, user and group) just before and just after the helper ran. Without
-# a quota option it must say source=statvfs with bytes > 0.
+# that statvfs (and `df`) cannot, and does not invent an inode limit.
+# One-directional per directory: when its mount has a quota option
+# (usrquota/uquota/quota/grpquota/gquota) in /proc/self/mountinfo, the helper
+# must say source=quota and report bytes between min(statvfs, quota) decoded
+# INDEPENDENTLY here (own struct layout, user and group) just before and just
+# after it ran; without one, source=statvfs and bytes > 0. Checked on the
+# scratch root AND on the first quota-mounted directory of the host (the root
+# under ~/.cache has none, so the quota arithmetic would otherwise go unrun;
+# the PASS text says whether that leg ran). Inodes (#265): a filesystem that
+# reports f_files == 0 (btrfs, tmpfs nr_inodes=0, vfat, CIFS) has no inode
+# limit, and the helper must say inodes=- rather than 0 -- checked with a
+# statvfs that reports zeros, and on a real such mount when the host has one.
 TOTAL=$((TOTAL + 1))
 KHQ_OUT=$(python3 -I - "$KR_TEST_ROOT" "$DIR/helpers/tmp_headroom.py" <<'KHQ_PYEOF' 2>&1
 import ctypes, os, struct, subprocess, sys
 root, helper = sys.argv[1], sys.argv[2]
-best, opts = '', ''
+mounts = []
 for line in open('/proc/self/mountinfo'):
     f = line.split()
-    mp = f[4]
     sep = f.index('-')
-    o = f[5] + ',' + (f[sep + 3] if len(f) > sep + 3 else '')
-    if (root == mp or root.startswith(mp.rstrip('/') + '/')) and len(mp) >= len(best):
-        best, opts = mp, o
-has_q = any(x in opts.split(',') for x in ('usrquota', 'uquota', 'quota', 'grpquota', 'gquota'))
+    mounts.append((f[4].replace('\\040', ' '), f[5] + ',' + (f[sep + 3] if len(f) > sep + 3 else '')))
+QOPT = ('usrquota', 'uquota', 'quota', 'grpquota', 'gquota')
+def mount_of(p):
+    best, opts = '', ''
+    for mp, o in mounts:
+        if (p == mp or p.startswith(mp.rstrip('/') + '/')) and len(mp) >= len(best):
+            best, opts = mp, o
+    return best, any(x in opts.split(',') for x in QOPT)
 libc = ctypes.CDLL(None, use_errno=True)
-def indep():
-    s = os.statvfs(root)
+def indep(d):
+    s = os.statvfs(d)
     v = s.f_bavail * s.f_frsize
-    if sys.platform == 'linux':
-        for t, i in ((0, os.geteuid()), (1, os.getegid())):
-            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-            b = ctypes.create_string_buffer(80)
-            r = libc.syscall(443, fd, ctypes.c_uint((0x800007 << 8) | t), ctypes.c_int(i), b)
-            os.close(fd)
-            if r == 0:
-                bh, bs, cur = struct.unpack_from('<QQQ', b.raw, 0)
-                lim = min([x for x in (bh, bs) if x] or [0])
-                if lim:
-                    v = min(v, max(0, lim * 1024 - cur))
+    for t, i in ((0, os.geteuid()), (1, os.getegid())):
+        fd = os.open(d, os.O_RDONLY | os.O_DIRECTORY)
+        b = ctypes.create_string_buffer(80)
+        r = libc.syscall(443, fd, ctypes.c_uint((0x800007 << 8) | t), ctypes.c_int(i), b)
+        os.close(fd)
+        if r == 0:
+            bh, bs, cur = struct.unpack_from('<QQQ', b.raw, 0)
+            lim = min([x for x in (bh, bs) if x] or [0])
+            if lim:
+                v = min(v, max(0, lim * 1024 - cur))
     return v
-lo = indep()
-out = subprocess.run([sys.executable, '-I', helper, root], capture_output=True, text=True).stdout.strip()
-hi = indep()
-kv = dict(x.split('=', 1) for x in out.split() if '=' in x)
-by = int(kv.get('bytes', '-1'))
-if has_q:
-    ok = kv.get('source') == 'quota' and min(lo, hi) <= by <= max(lo, hi)
+def helper_kv(args):
+    out = subprocess.run([sys.executable, '-I'] + args, capture_output=True, text=True).stdout.strip()
+    return out, dict(x.split('=', 1) for x in out.split() if '=' in x)
+def leg(d):
+    mp, has_q = mount_of(d)
+    lo = indep(d)
+    out, kv = helper_kv([helper, d])
+    hi = indep(d)
+    by = int(kv.get('bytes', '-1'))
+    if has_q:
+        ok = kv.get('source') == 'quota' and min(lo, hi) <= by <= max(lo, hi)
+    else:
+        ok = kv.get('source') == 'statvfs' and by > 0
+    return ok, '%s (mount %s, quota option %s): [%s] independent %d..%d' % (d, mp, has_q, out, lo, hi)
+bad, notes = [], []
+ok, m = leg(root); notes.append('root ' + m); ok or bad.append(m)
+qdir = next((mp for mp, o in mounts if any(x in o.split(',') for x in QOPT) and os.path.isdir(mp) and os.access(mp, os.R_OK | os.X_OK)), None)
+if qdir and mount_of(root)[0] != qdir:
+    ok, m = leg(qdir); notes.append('QUOTA LEG RAN on ' + m); ok or bad.append(m)
+elif qdir:
+    notes.append('QUOTA LEG RAN (the root itself is on quota mount %s)' % qdir)
 else:
-    ok = kv.get('source') == 'statvfs' and by > 0
-print('%s mount=%s quota-option=%s helper=[%s] independent=%d..%d' % ('OK' if ok else 'BAD', best, has_q, out, lo, hi))
+    notes.append('quota leg not run: no quota-mounted directory on this host')
+mock = ("import os, runpy, sys\n"
+        "real = os.statvfs\n"
+        "class Z:\n"
+        "    def __init__(self, s): self.s = s\n"
+        "    def __getattr__(self, k): return 0 if k in ('f_files', 'f_ffree', 'f_favail') else getattr(self.s, k)\n"
+        "os.statvfs = lambda p: Z(real(p))\n"
+        "sys.argv = ['tmp_headroom.py', sys.argv[1]]\n"
+        "runpy.run_path(%r, run_name='__main__')\n" % helper)
+out, kv = helper_kv(['-c', mock, root])
+if kv.get('inodes') != '-':
+    bad.append('statvfs with f_files=0: helper said [%s], want inodes=-' % out)
+else:
+    notes.append('f_files=0 mock -> inodes=-')
+zero = next((mp for mp, o in mounts if os.path.isdir(mp) and os.access(mp, os.R_OK | os.X_OK) and not mount_of(mp)[1]
+             and (lambda s: s.f_files == 0 and s.f_blocks > 0)(os.statvfs(mp))), None)
+if zero:
+    out, kv = helper_kv([helper, zero])
+    if kv.get('inodes') != '-':
+        bad.append('%s reports f_files=0, helper said [%s], want inodes=-' % (zero, out))
+    else:
+        notes.append('real f_files=0 mount %s -> inodes=-' % zero)
+print(('BAD ' + ' || '.join(bad)) if bad else ('OK ' + '; '.join(notes)))
 KHQ_PYEOF
 )
 if printf '%s' "$KHQ_OUT" | grep -q '^OK '; then
     PASS=$((PASS + 1)); echo "  suite_tmp_headroom_reads_quota: PASS (${KHQ_OUT#OK })"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_headroom_reads_quota ($(printf '%s' "$KHQ_OUT" | tr '\n' '|' | cut -c1-400))"
+    FAIL=$((FAIL + 1)); echo "FAIL: suite_tmp_headroom_reads_quota ($(printf '%s' "$KHQ_OUT" | tr '\n' '|' | cut -c1-600))"
+fi
+
+# standalone_scripts_stay_in_root (#266): the scripts `make check` and CI run
+# outside the suite resolve the scratch root AND export it as TMPDIR, so their
+# plain `mktemp` / `mktemp -d` (build logs, outputs, per-run cwd) land there
+# too, not in whatever TMPDIR the caller had. Run tests/smoke/run.sh with
+# KR_TEST_TMP=<private dir> and TMPDIR pointing at a directory nobody may write
+# (mode 500): every program must still build and run, nothing may appear in
+# the unwritable one, and the private dir must be clean afterwards.
+TOTAL=$((TOTAL + 1))
+SSR_D=$(mktemp -d "$SUITE_TMP/ssr.XXXXXX"); mkdir -p "$SSR_D/root" "$SSR_D/ro"; chmod 500 "$SSR_D/ro"
+KR_TEST_TMP="$SSR_D/root" TMPDIR="$SSR_D/ro" KRC="${KRC_RAW:-$KRC}" timeout 600 bash "$DIR/smoke/run.sh" > "$SSR_D/out" 2>&1; SSR_RC=$?
+SSR_WHY=""
+[ "$SSR_RC" = 0 ] || SSR_WHY="$SSR_WHY smoke exit $SSR_RC ($(grep -m1 -E 'failed|FAIL|mktemp' "$SSR_D/out" | cut -c1-120));"
+grep -q '^=== smoke: [1-9][0-9]* passed, 0 failed' "$SSR_D/out" || SSR_WHY="$SSR_WHY no all-pass summary: $(tail -1 "$SSR_D/out" | cut -c1-80);"
+[ -z "$(ls -A "$SSR_D/ro")" ] || SSR_WHY="$SSR_WHY wrote into the caller's TMPDIR;"
+[ -z "$(ls -A "$SSR_D/root")" ] || SSR_WHY="$SSR_WHY left in the root: $(ls -A "$SSR_D/root" | head -3 | tr '\n' ' ');"
+chmod 700 "$SSR_D/ro"; rm -rf "$SSR_D"
+if [ -z "$SSR_WHY" ]; then
+    PASS=$((PASS + 1)); echo "  standalone_scripts_stay_in_root: PASS (tests/smoke/run.sh with an unwritable caller TMPDIR: every program built and ran under KR_TEST_TMP, nothing left behind)"
+else
+    FAIL=$((FAIL + 1)); echo "FAIL: standalone_scripts_stay_in_root ($SSR_WHY)"
 fi
 
 # --- ARM64 cross-compilation tests via QEMU ---
