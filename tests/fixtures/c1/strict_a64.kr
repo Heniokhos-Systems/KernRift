@@ -1,0 +1,4 @@
+fn never() {
+    asm { "wfi" }
+}
+fn main() { exit(5) }

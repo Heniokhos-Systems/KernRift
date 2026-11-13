@@ -102,6 +102,18 @@ arch_runner() {
     [ -n "$ARCH_RUNNER" ] && { ARCH_NORUN=""; return 0; }
     return 1
 }
+# krc_raw <args...>: the compiler under test with NO flags injected. `make
+# test`'s $KRC is a wrapper that always adds --arch=, and since C1 (#234) an
+# --arch= next to --targets= is refused rather than silently dropped, so every
+# --targets= row (and the c1_* block, whose rows are about which flags were
+# typed) goes through here. KRC_RAW when set; else build/krc2, else
+# build/krc3 -- the fallback the other raw-binary rows use (win_syscall_raw's
+# default case, TN_RAW_KRC).
+krc_raw() {
+    if [ -n "${KRC_RAW:-}" ]; then "$KRC_RAW" "$@"
+    elif [ -f "$DIR/../build/krc2" ]; then "$DIR/../build/krc2" "$@"
+    else "$DIR/../build/krc3" "$@"; fi
+}
 PASS=0
 FAIL=0
 SKIP=0
@@ -37835,9 +37847,11 @@ else pe_row_bad native_exec_stdin_selftest "rc=$PEU_RC $(grep -m2 WRONG <<< "$PE
 # (native_corpus_nonrows.lst); every corpus row is a name here or made by a
 # $-template here; a template making Windows-pattern names matches a corpus
 # row. Red before the review fix: 17 rows were missing from the corpus.
+# tests/c1_matrix.lst is the 4th input: its rows are run by a loop here, so
+# their names (the first field) are not in this file's text (C1).
 if ! command -v python3 > /dev/null 2>&1; then pe_row_skip native_corpus_matches_suite "no python3"
 else
-    PEU_O=$(python3 -B "$DIR/windows/native_corpus_check.py" "$DIR/run_tests.sh" "$DIR/windows/native_corpus.lst" "$DIR/windows/native_corpus_nonrows.lst" 2>&1); PEU_RC=$?
+    PEU_O=$(python3 -B "$DIR/windows/native_corpus_check.py" "$DIR/run_tests.sh" "$DIR/windows/native_corpus.lst" "$DIR/windows/native_corpus_nonrows.lst" "$DIR/c1_matrix.lst" 2>&1); PEU_RC=$?
     if [ "$PEU_RC" = 0 ]; then pe_row_ok native_corpus_matches_suite "$(tail -1 <<< "$PEU_O" | sed 's/^native_corpus_check: //')"
     else pe_row_bad native_corpus_matches_suite "rc=$PEU_RC $(head -3 <<< "$PEU_O" | sed 's/^native_corpus_check: //' | tr '\n' '|' | cut -c1-300)"; fi
 fi
@@ -39553,6 +39567,326 @@ else
     FAIL=$((FAIL + 1)); echo "FAIL: compiler_builds_itself_every_target_and_mode ($SB_OK built, $SB_REF refused by the syscall_raw rule:$SB_BAD)"
 fi
 rm -rf "$SB_D"
+
+# --- C1: --target=, --emit=, --arch=, --targets=, -g and -o agree or are refused --
+# (#233 #234/#129 #236 #237 #238 #240 #244 #253 #254 #257 #258 #259)
+# One row per line of tests/c1_matrix.lst (its header says what each expectation
+# checks), then the c1_* rows outside the matrix. Every build runs the RAW
+# compiler: `make test`'s $KRC injects --arch=, and these rows are about exactly
+# which of --arch=/--target=/--emit=/--targets= the user typed.
+echo ""
+echo "--- C1 option compatibility: tests/c1_matrix.lst and the c1_* rows ---"
+C1_D=$(mktemp -d "$SUITE_TMP/c1.XXXXXX")
+C1_ROOT="$(cd "$DIR/.." && pwd)"
+if [ -n "${KRC_RAW:-}" ]; then C1_CC="$KRC_RAW"
+elif [ -f "$DIR/../build/krc2" ]; then C1_CC="$DIR/../build/krc2"
+else C1_CC="$DIR/../build/krc3"; fi
+case "$C1_CC" in /*) ;; *) C1_CC="$(cd "$(dirname "$C1_CC")" 2> /dev/null && pwd)/$(basename "$C1_CC")" ;; esac
+C1_PY=1; command -v python3 > /dev/null 2>&1 || C1_PY=0
+C1_NOTE_A='note: the error above is in the '
+C1_NOTE_B=' slice of the fat binary; a fat build compiles every slice it ships, so code only some targets accept must be guarded (`if get_arch_id() == N`, `if get_target_os() == N`) or that slice left out of --targets='
+c1_ok() { PASS=$((PASS + 1)); echo "  $1: PASS${2:+ ($2)}"; }
+c1_bad() { FAIL=$((FAIL + 1)); echo "FAIL: $1 ($2)"; }
+c1_fresh() { rm -rf "$C1_D/w"; mkdir -p "$C1_D/w"; }
+# c1_cc <flags...>: the raw compiler, run inside $C1_D/w (stdout and stderr are
+# the caller's to redirect)
+c1_cc() { ( cd "$C1_D/w" && ulimit -v 2000000 && exec timeout -k 5 120 "$C1_CC" "$@" ); }
+c1_files() { ( cd "$C1_D/w" && ls -A | grep -vx 'p.kr' | LC_ALL=C sort | tr '\n' ' ' ); }
+# the get_arch_id() probes: sink = get_arch_id() (arch_e.kr; arch_e_bm.kr with
+# `loop { }` for --target=none rows) and sink = N, N = 1..11
+mkdir -p "$C1_D/pr"
+for C1_N in 1 2 3 4 5 6 7 8 9 10 11; do
+    sed "s/get_arch_id()/$C1_N/" "$DIR/fixtures/c1/arch_e.kr" > "$C1_D/pr/w$C1_N.kr"
+    sed "s/get_arch_id()/$C1_N/" "$DIR/fixtures/c1/arch_e_bm.kr" > "$C1_D/pr/bmw$C1_N.kr"
+done
+# c1_note_ok <stderr file> <slice>: C1's note naming <slice> is the LAST line
+# and appears once
+c1_note_ok() {
+    [ "$(tail -1 "$1")" = "$C1_NOTE_A$2$C1_NOTE_B" ] && [ "$(grep -c "^note: the error above is in the " "$1")" = 1 ]
+}
+c1_matrix_row() {
+    local n="$1" f="$2" e="$3" aid="$4" src="$C1_ROOT/$5" st first want got sub rest x fa ae aw
+    c1_fresh
+    case "$e" in
+    name:*|oname:*|orefuse:*)
+        cp "$src" "$C1_D/w/p.kr"
+        sub=""; rest="$f"
+        if [ "${e%%:*}" != name ]; then
+            case "$f" in check|check\ *|lc|lc\ *) sub="${f%% *}"; rest="${f#"$sub"}" ;; esac
+        fi
+        if [ "${e%%:*}" = name ]; then
+            # shellcheck disable=SC2086
+            c1_cc $f p.kr > /dev/null 2> "$C1_D/err"; st=$?
+        else
+            # shellcheck disable=SC2086
+            c1_cc $sub p.kr $rest > /dev/null 2> "$C1_D/err"; st=$?
+        fi
+        got=$(c1_files)
+        if [ "${e%%:*}" = orefuse ]; then
+            want="${e#orefuse:}"
+            if [ "$st" = 1 ] && [ -z "$got" ] && head -1 "$C1_D/err" | grep -qxF -- "$want"; then c1_ok "$n"
+            else c1_bad "$n" "want exit 1, nothing written, first line '$want'; got exit $st, files [$got], '$(head -1 "$C1_D/err" | cut -c1-160)'"; fi
+        else
+            want="${e#*:}"; [ -n "$want" ] && want="$want "
+            if [ "$st" = 0 ] && [ "$got" = "$want" ]; then c1_ok "$n" "wrote [${e#*:}]"
+            else c1_bad "$n" "want exit 0 and exactly [${e#*:}]; got exit $st, files [$got] $(grep -m1 'error' "$C1_D/err" | cut -c1-140)"; fi
+        fi
+        return ;;
+    esac
+    # shellcheck disable=SC2086
+    c1_cc $f "$src" -o "$C1_D/w/o.bin" > "$C1_D/out" 2> "$C1_D/err"; st=$?
+    first=$(head -1 "$C1_D/err")
+    case "$e" in
+    refuse:*)
+        want="${e#refuse:}"
+        if [ "$st" = 1 ] && [ -z "$(c1_files)" ] && head -1 "$C1_D/err" | grep -qxF -- "$want"; then c1_ok "$n"
+        else c1_bad "$n" "want exit 1, no output, first line '$(printf '%s' "$want" | cut -c1-120)'; got exit $st, files [$(c1_files)], '$(printf '%s' "$first" | cut -c1-160)'"; fi
+        return ;;
+    refnote:*|refnoteu:*)
+        x="${e#*:}"
+        if [ "${e%%:*}" = refnote ]; then want='^[^ ]*:[0-9][0-9]*:[0-9][0-9]*: error: '; else want='^error: '; fi
+        if [ "$st" = 1 ] && [ -z "$(c1_files)" ] && grep -q "$want" "$C1_D/err" && c1_note_ok "$C1_D/err" "$x"; then c1_ok "$n" "note names $x"
+        else c1_bad "$n" "want exit 1, no output, an error ($( [ "${e%%:*}" = refnote ] && echo located || echo unlocated)) and as the last line the note naming $x; got exit $st, files [$(c1_files)], first '$(printf '%s' "$first" | cut -c1-110)', last '$(tail -1 "$C1_D/err" | cut -c1-70)'"; fi
+        return ;;
+    ir:*)
+        # shellcheck disable=SC2086
+        c1_cc ${e#ir:} "$src" -o "$C1_D/w/c.bin" > "$C1_D/canon" 2> /dev/null
+        if [ "$st" = 0 ] && grep -q '^function main:' "$C1_D/out" && cmp -s "$C1_D/out" "$C1_D/canon"; then c1_ok "$n" "dump == '${e#ir:}'"
+        else c1_bad "$n" "want exit 0 and the dump of '${e#ir:}'; got exit $st, $(wc -l < "$C1_D/out") lines vs $(wc -l < "$C1_D/canon"), '$(printf '%s' "$first" | cut -c1-120)'"; fi
+        return ;;
+    control:*)
+        x="${e#control:}"; local pa="$C1_D/pr/w$x.kr" pb="$C1_D/pr/w$((x + 1)).kr"
+        [ "$x" -ge 9 ] && { pa="$C1_D/pr/bmw$x.kr"; pb="$C1_D/pr/bmw$((x + 1)).kr"; }
+        # shellcheck disable=SC2086
+        c1_cc $f "$pa" -o "$C1_D/w/ca" > /dev/null 2>&1
+        # shellcheck disable=SC2086
+        c1_cc $f "$pb" -o "$C1_D/w/cb" > /dev/null 2>&1
+        if [ -s "$C1_D/w/ca" ] && [ -s "$C1_D/w/cb" ] && ! cmp -s "$C1_D/w/ca" "$C1_D/w/cb"; then c1_ok "$n" "sink = $x and sink = $((x + 1)) differ"
+        else c1_bad "$n" "sink = $x and sink = $((x + 1)) builds are identical or missing: the get_arch_id() probe cannot fail here"; fi
+        return ;;
+    esac
+    if [ "$C1_PY" = 0 ]; then skip_row "$n" "needs python3 (container_kind.py, krbo_slices.py)"; return; fi
+    case "$e" in
+    krbo:*)
+        got=""
+        if [ "$st" = 0 ]; then got=$(python3 -B "$DIR/helpers/krbo_slices.py" "$C1_D/w/o.bin" "$C1_D/sl" 2> /dev/null | awk '{print $1}' | LC_ALL=C sort | tr '\n' ','); fi
+        rm -rf "$C1_D/sl"
+        want=$(tr ',' '\n' <<< "${e#krbo:}" | LC_ALL=C sort | tr '\n' ',')
+        if [ "$got" = "$want" ]; then c1_ok "$n" "slices ${e#krbo:}"
+        else c1_bad "$n" "want slices $want; got exit $st, slices [$got] '$(printf '%s' "$first" | cut -c1-120)'"; fi
+        return ;;
+    esac
+    got=$(python3 -B "$DIR/helpers/container_kind.py" "$C1_D/w/o.bin")
+    if [ "$st" != 0 ] || [ "$got" != "$e" ]; then
+        c1_bad "$n" "want exit 0 and $e; got exit $st, $got '$(printf '%s' "$first" | cut -c1-140)'"; return
+    fi
+    if [ -z "$aid" ]; then c1_ok "$n" "$e"; return; fi
+    fa=""; for x in $f; do [ "$x" = -g ] || fa="$fa $x"; done
+    ae="$DIR/fixtures/c1/arch_e.kr"; aw="$C1_D/pr/w$aid.kr"
+    case "$src" in */bm.kr) ae="$DIR/fixtures/c1/arch_e_bm.kr"; aw="$C1_D/pr/bmw$aid.kr" ;; esac
+    # shellcheck disable=SC2086
+    c1_cc $fa "$ae" -o "$C1_D/w/ae" > /dev/null 2>&1
+    # shellcheck disable=SC2086
+    c1_cc $fa "$aw" -o "$C1_D/w/aw" > /dev/null 2>&1
+    if [ -s "$C1_D/w/ae" ] && cmp -s "$C1_D/w/ae" "$C1_D/w/aw"; then c1_ok "$n" "$e, get_arch_id() folds to $aid"
+    else c1_bad "$n" "$e as wanted, but get_arch_id() does not fold to $aid"; fi
+}
+C1_NROWS=0
+while IFS='|' read -r C1_N C1_F C1_E C1_A C1_S <&3; do
+    case "$C1_N" in ''|'#'*) continue ;; esac
+    TOTAL=$((TOTAL + 1)); C1_NROWS=$((C1_NROWS + 1))
+    c1_matrix_row "$C1_N" "$C1_F" "$C1_E" "$C1_A" "${C1_S:-tests/fixtures/c1/p.kr}"
+done 3< "$DIR/c1_matrix.lst"
+echo "  (c1 matrix: $C1_NROWS rows from tests/c1_matrix.lst)"
+
+# c1_default_eq_explicit: a hosted --target= with no --emit= builds exactly
+# what the matching --emit= builds, and an --emit= spelling that names an
+# architecture builds what --arch= plus the plain spelling builds.
+TOTAL=$((TOTAL + 1))
+C1_WHY=""; C1_K=0
+c1_same() {   # <flags A> <flags B> [source]
+    local s="${3:-$DIR/fixtures/c1/p.kr}"
+    c1_fresh
+    # shellcheck disable=SC2086
+    c1_cc $1 "$s" -o "$C1_D/w/a" > /dev/null 2>&1
+    # shellcheck disable=SC2086
+    c1_cc $2 "$s" -o "$C1_D/w/b" > /dev/null 2>&1
+    C1_K=$((C1_K + 1))
+    if [ ! -s "$C1_D/w/a" ] || [ ! -s "$C1_D/w/b" ]; then C1_WHY="$C1_WHY [$1 | $2: a build failed]"
+    elif ! cmp -s "$C1_D/w/a" "$C1_D/w/b"; then C1_WHY="$C1_WHY [$1 != $2]"; fi
+}
+for C1_X in x86_64 arm64; do
+    c1_same "--arch=$C1_X --target=macos" "--arch=$C1_X --target=macos --emit=macho"
+    c1_same "--arch=$C1_X --target=windows" "--arch=$C1_X --target=windows --emit=pe"
+    c1_same "--arch=$C1_X --target=android" "--arch=$C1_X --target=android --emit=android"
+    c1_same "--arch=$C1_X --target=linux" "--arch=$C1_X --target=linux --emit=elfexe"
+done
+c1_same "--target=macos" "--arch=x86_64 --emit=macho"
+c1_same "--target=android" "--arch=arm64 --emit=android"
+c1_same "--emit=win-arm64" "--arch=arm64 --emit=pe"
+if [ -z "$C1_WHY" ]; then c1_ok c1_default_eq_explicit "$C1_K pairs byte-identical"
+else c1_bad c1_default_eq_explicit "$C1_WHY"; fi
+
+# c1_android_order: --target=android no longer rewrites the --emit= written
+# before it, so both orders build the same bytes.
+TOTAL=$((TOTAL + 1))
+C1_WHY=""; C1_K=0
+c1_same "--emit=obj --target=android" "--target=android --emit=obj"
+c1_same "--emit=asm --target=android" "--target=android --emit=asm"
+c1_same "-c --target=android" "--target=android -c"
+c1_same "--emit=lkm --target=android" "--target=android --emit=lkm" "$C1_ROOT/examples/hello_lkm.kr"
+if [ -z "$C1_WHY" ]; then c1_ok c1_android_order "$C1_K pairs, both orders byte-identical"
+else c1_bad c1_android_order "$C1_WHY"; fi
+
+# The single-target defaults RUN: --target=linux natively, --target=windows (a
+# PE now, no --emit=) under Wine -- natively on Windows through
+# tests/windows/native_corpus.lst -- and --arch=arm64 --target=linux through
+# the qemu-user resolver. Separate rows, so a missing tool skips one leg.
+TOTAL=$((TOTAL + 1))
+c1_fresh
+c1_cc --arch=$RUN_ARCH --target=linux "$DIR/fixtures/c1/p.kr" -o "$C1_D/w/p" > /dev/null 2> "$C1_D/err"
+( cd "$C1_D/w" && timeout -k 5 "$RUN_TEST_TIMEOUT" ./p > /dev/null 2>&1 ); C1_RC=$?
+if [ "$C1_RC" = 42 ]; then c1_ok c1_defaults_run_native "--arch=$RUN_ARCH --target=linux exits 42"
+else c1_bad c1_defaults_run_native "--arch=$RUN_ARCH --target=linux: exit $C1_RC, want 42 $(head -1 "$C1_D/err" | cut -c1-120)"; fi
+TOTAL=$((TOTAL + 1))
+C1_WINE=$(wine_path)
+if [ -z "$C1_WINE" ]; then
+    wine_na c1_defaults_run_wine
+else
+    c1_fresh
+    c1_cc --arch=x86_64 --target=windows "$DIR/fixtures/c1/p.kr" -o "$C1_D/w/p.exe" > /dev/null 2> "$C1_D/err"
+    if [ "$C1_PY" = 1 ]; then C1_K=$(python3 -B "$DIR/helpers/container_kind.py" "$C1_D/w/p.exe"); else C1_K=pe-exe-x86_64; fi
+    C1_RC=$( ( cd "$C1_D/w" && ulimit -c 0 && timeout -k 5 "$RUN_TEST_TIMEOUT" $C1_WINE ./p.exe < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if [ "$C1_K" = pe-exe-x86_64 ] && [ "$C1_RC" = 42 ]; then c1_ok c1_defaults_run_wine "--arch=x86_64 --target=windows: a PE, exits 42"
+    else c1_bad c1_defaults_run_wine "--arch=x86_64 --target=windows: $C1_K, exit $C1_RC, want pe-exe-x86_64 and 42"; fi
+fi
+TOTAL=$((TOTAL + 1))
+if ! arch_runner arm64; then
+    skip_row c1_defaults_run_qemu_arm64 "$ARCH_NORUN"
+else
+    c1_fresh
+    c1_cc --arch=arm64 --target=linux "$DIR/fixtures/c1/p.kr" -o "$C1_D/w/p" > /dev/null 2> "$C1_D/err"
+    C1_RC=$( ( cd "$C1_D/w" && timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER ./p > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if [ "$C1_RC" = 42 ]; then c1_ok c1_defaults_run_qemu_arm64 "--arch=arm64 --target=linux exits 42${ARCH_RUNNER:+ under $ARCH_RUNNER}"
+    else c1_bad c1_defaults_run_qemu_arm64 "--arch=arm64 --target=linux: exit $C1_RC, want 42 $(head -1 "$C1_D/err" | cut -c1-120)"; fi
+fi
+
+# c1_f244_run_arm64 (#244): an arm64-only asm program fat-built for
+# --targets=linux-arm64 alone runs -- through an arm64 build of the kr runner
+# (src/runner.kr + src/bcj.kr), natively on an arm64 host, else under qemu.
+TOTAL=$((TOTAL + 1))
+if ! arch_runner arm64; then
+    skip_row c1_f244_run_arm64 "$ARCH_NORUN"
+else
+    c1_fresh
+    cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$C1_D/kr.kr"
+    c1_cc --arch=arm64 "$C1_D/kr.kr" -o "$C1_D/w/kr" > /dev/null 2> "$C1_D/kerr"
+    c1_cc --targets=linux-arm64 "$DIR/fixtures/c1/asm_a64.kr" -o "$C1_D/w/a.krbo" > /dev/null 2> "$C1_D/err"
+    if [ ! -s "$C1_D/w/kr" ]; then c1_bad c1_f244_run_arm64 "the arm64 kr runner did not build: $(grep -m1 error "$C1_D/kerr" | cut -c1-120)"
+    elif [ ! -s "$C1_D/w/a.krbo" ]; then c1_bad c1_f244_run_arm64 "--targets=linux-arm64 of asm_a64.kr refused: $(head -1 "$C1_D/err" | cut -c1-140)"
+    else
+        C1_RC=$( ( cd "$C1_D/w" && timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER ./kr ./a.krbo > /dev/null 2>&1; echo $? ) 2> /dev/null )
+        if [ "$C1_RC" = 7 ]; then c1_ok c1_f244_run_arm64 "--targets=linux-arm64 of arm64-only asm built and ran: exit 7"
+        else c1_bad c1_f244_run_arm64 "the linux-arm64 slice exited $C1_RC, want 7"; fi
+    fi
+fi
+
+# c1_f244_slice_identity (#244): the permanent gate tests/gates/
+# fat_slice_identity.sh on two files -- every slice of 11 --targets= lists
+# byte-identical to the default fat build's, IR and --legacy.
+TOTAL=$((TOTAL + 1))
+if [ "$C1_PY" = 0 ]; then skip_row c1_f244_slice_identity "needs python3 (krbo_slices.py)"
+else
+    C1_O=$(bash "$DIR/gates/fat_slice_identity.sh" "$C1_CC" "$C1_D/fsi" tests/fixtures/c1/p.kr tests/fixtures/os_prune.kr 2>&1); C1_RC=$?
+    if [ "$C1_RC" = 0 ]; then c1_ok c1_f244_slice_identity "$(grep '^SAME ' <<< "$C1_O")"
+    else c1_bad c1_f244_slice_identity "rc=$C1_RC $(grep -m3 -E '^(SAME|FAIL|usage|fat_slice)' <<< "$C1_O" | tr '\n' '|') $(grep -m2 -E '^(DIFF|NEWREFUSE|NEWACCEPT|TIMEOUT) ' "$C1_D/fsi/results.txt" 2> /dev/null | tr '\n' '|' | cut -c1-200)"; fi
+fi
+
+# fatal_exit_single_site (#244): every fatal exit of the compiler goes through
+# fatal_exit() (src/main.kr), which adds the fat-slice note -- so in the
+# Makefile's SRCS files under src/ the only CODE `exit(1)` left is the one
+# inside fatal_exit(). Comments and string literals are stripped first (a
+# message may quote exit(1)); std/ is not the compiler's (std/sha256.kr is in
+# SRCS but user programs import it, and they have no fatal_exit()). One
+# declared exception: src/format_espimage.kr's esp_image_fail, because the
+# esp32 harness in this file imports that file on its own (see its esp_alloc
+# comment); an esp-image is a single build, never a fat slice.
+TOTAL=$((TOTAL + 1))
+if [ "$C1_PY" = 0 ]; then skip_row fatal_exit_single_site "needs python3"
+else
+    C1_O=$(python3 -B - "$DIR/.." <<'C1FEEOF' 2>&1
+import os, re, sys
+root = sys.argv[1]
+mk = open(os.path.join(root, 'Makefile')).read()
+m = re.search(r'^SRCS\s*=((?:.*\\\n)*.*)$', mk, re.M)
+srcs = [s for s in m.group(1).replace('\\\n', ' ').split() if s.startswith('src/')]
+def code(line, state):
+    # strip // comments and "..." literals (with \ escapes); state = in-string
+    out = []; i = 0; n = len(line); ins = state
+    while i < n:
+        c = line[i]
+        if ins:
+            if c == '\\': i += 2; continue
+            if c == '"': ins = False
+            i += 1; continue
+        if c == '"': ins = True; i += 1; continue
+        if line.startswith('//', i): break
+        out.append(c); i += 1
+    return ''.join(out), ins
+EX = re.compile(r'\bexit\s*\(\s*1\s*\)')
+hits = []; fe_def = 0; inside_ok = 0
+for f in srcs:
+    ins = False; cur = None; depth = 0
+    for no, line in enumerate(open(os.path.join(root, f), encoding='utf-8', errors='replace'), 1):
+        c, ins = code(line.rstrip('\n'), ins)
+        mf = re.match(r'\s*fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(', c)
+        if mf and depth == 0:
+            cur = mf.group(1)
+            if f == 'src/main.kr' and cur == 'fatal_exit': fe_def += 1
+        for _ in EX.finditer(c):
+            if f == 'src/main.kr' and cur == 'fatal_exit': inside_ok += 1
+            elif f == 'src/format_espimage.kr' and cur == 'esp_image_fail': pass
+            else: hits.append('%s:%d (in %s)' % (f, no, cur))
+        depth += c.count('{') - c.count('}')
+        if depth <= 0: depth = 0
+print('srcs=%d fatal_exit_defs=%d exit1_in_fatal_exit=%d other_code_exit1=%d' % (len(srcs), fe_def, inside_ok, len(hits)))
+for h in hits[:6]: print('  ' + h)
+sys.exit(0 if fe_def == 1 and inside_ok == 1 and not hits else 1)
+C1FEEOF
+); C1_RC=$?
+    if [ "$C1_RC" = 0 ]; then c1_ok fatal_exit_single_site "$(head -1 <<< "$C1_O"); the one declared exception: src/format_espimage.kr esp_image_fail"
+    else c1_bad fatal_exit_single_site "$(tr '\n' ' ' <<< "$C1_O" | cut -c1-300)"; fi
+fi
+
+# targets_valid_list_is_complete (#234): the names the unknown---targets=
+# message lists are exactly parse_target_name's literals plus `all`, both ways
+# (the same shape as emit_valid_list_is_complete).
+TOTAL=$((TOTAL + 1))
+c1_fresh
+c1_cc --targets=zz-not-a-target "$DIR/fixtures/c1/p.kr" -o "$C1_D/w/o" > /dev/null 2> "$C1_D/err"
+C1_MSG=$(sed -n "s/^error: unknown --targets= name 'zz-not-a-target': valid names are \(.*\) (lower-case)\$/\1/p" "$C1_D/err" | head -1 | sed 's/ and /, /' | tr ',' '\n' | sed 's/^ *//' | grep -v '^$' | LC_ALL=C sort)
+C1_SRC=$( { awk '/^fn parse_target_name\(/{f=1} f{print} f&&/^}/{exit}' "$DIR/../src/main.kr" | grep -oE 'targets_name_eq\(s, len, "[a-z0-9_-]+"\)' | sed 's/.*"\(.*\)").*/\1/'; echo all; } | LC_ALL=C sort)
+if [ -z "$C1_MSG" ]; then c1_bad targets_valid_list_is_complete "no 'unknown --targets= name ... valid names are ...' line: $(head -1 "$C1_D/err" | cut -c1-120)"
+elif [ "$C1_MSG" != "$C1_SRC" ]; then c1_bad targets_valid_list_is_complete "message lists [$(tr '\n' ' ' <<< "$C1_MSG")], parse_target_name + all [$(tr '\n' ' ' <<< "$C1_SRC")]"
+else c1_ok targets_valid_list_is_complete "$(wc -l <<< "$C1_SRC") names, message and parse_target_name agree both ways"; fi
+
+# c1_help_mentions_rules: --help states where each flag applies (note section 7).
+TOTAL=$((TOTAL + 1))
+c1_fresh
+c1_cc --help > "$C1_D/help" 2>&1
+C1_WHY=""
+while IFS= read -r C1_L; do
+    grep -qxF -- "$C1_L" "$C1_D/help" || C1_WHY="$C1_WHY [missing: $(printf '%s' "$C1_L" | sed 's/^ *//' | cut -c1-60)]"
+done <<'C1HELPEOF'
+  --target=linux|macos|windows|android|esp32|none   single-target binary in that OS's container (ELF, Mach-O, PE, Android PIE)
+                              with --freestanding, macos/windows keep the ELF container
+  --targets=<list>          custom fat binary subset (not with --arch/--target/--emit/-c/-g)
+  --emit=elfexe|macho|pe|android        single-target executable; must match --target= (and --arch= for win-arm64 etc.)
+  -g                        emit DWARF debug info (x86_64/arm64 ELF executables only)
+C1HELPEOF
+if [ -z "$C1_WHY" ]; then c1_ok c1_help_mentions_rules "the five --target/--targets/--emit/-g lines"
+else c1_bad c1_help_mentions_rules "$C1_WHY"; fi
+rm -rf "$C1_D"
 
 # --- suite_tmp_nothing_outside_root (#250, #261) ------------------------------
 # The last scratch check of the run: nothing this run wrote is left OUTSIDE

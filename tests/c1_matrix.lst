@@ -1,0 +1,475 @@
+# C1 option-compatibility matrix (#233 #234/#129 #236 #237 #238 #240 #244 #253 #254 #257 #258 #259).
+# One suite row per line, run by the c1_* block of tests/run_tests.sh with the RAW compiler
+# ($KRC_RAW: `make test`'s $KRC injects --arch=, which would change what every line asks for).
+#
+#   name|flags|expect|arch_id|source
+#
+# name: [A-Za-z0-9_] only (the native corpus tooling reads no other name): a spelling's "-" is
+# written "_", and linux-x86-64 as linux_x86dash64 (linux-x86_64 is already linux_x86_64).
+# source: a path from the repository root (empty = tests/fixtures/c1/p.kr, exit 42).
+# expect:
+#   <container token>  tests/helpers/container_kind.py's verdict on the output (elf-exec-x86_64,
+#                      pe-exe-arm64, macho-obj-x86_64, krbo-8, text, ...); exit 0.
+#                      arch_id N: the same flags (-g dropped) build `sink = get_arch_id()` and
+#                      `sink = N` (tests/fixtures/c1/arch_e.kr, arch_e_bm.kr for bm.kr rows)
+#                      to byte-identical files -- the code's folded OS and arch, not only the
+#                      container (1/2 Linux x86_64/arm64, 3/4 Windows, 5/6 macOS, 7/8 Android
+#                      arm64/x86_64, 9/10 --target=none).
+#   refuse:<line>      exit 1, no output file, stderr's FIRST line is exactly <line>.
+#   refnote:<slice>    exit 1, no output, a located error (file:line:col: error:) and, as the LAST
+#                      stderr line and exactly once, the fat-slice note naming <slice>.
+#   refnoteu:<slice>   the same with an unlocated error (a line starting `error: `).
+#   ir:<flags>         exit 0, an IR dump on stdout identical to the dump <flags> print.
+#   krbo:<names>       exit 0, a fat binary whose slices are exactly <names> (krbo_slices.py).
+#   control:<N>        `sink = N` and `sink = N+1` built with the flags DIFFER: the arch_id probe
+#                      can fail in this container family.
+#   name:<file>        run in an empty directory with no -o: exactly <file> appears.
+#   oname:<file>       the same with the row's own -o (source first; a leading check/lc
+#                      subcommand stays first); empty <file> = nothing may appear.
+#   orefuse:<line>     no -o of the runner's: exit 1, nothing written, first stderr line <line>.
+c1_noarch_none_noemit||krbo-8||
+c1_noarch_none_elfexe|--emit=elfexe|elf-exec-x86_64|1|
+c1_noarch_none_macho|--emit=macho|macho-exe-x86_64|5|
+c1_noarch_none_pe|--emit=pe|pe-exe-x86_64|3|
+c1_noarch_none_android|--emit=android|elf-android-arm64|7|
+c1_noarch_linux_noemit|--target=linux|elf-exec-x86_64|1|
+c1_noarch_linux_elfexe|--target=linux --emit=elfexe|elf-exec-x86_64|1|
+c1_noarch_linux_elfexe_rev|--emit=elfexe --target=linux|elf-exec-x86_64|1|
+c1_noarch_linux_macho|--target=linux --emit=macho|refuse:error: --emit=macho conflicts with --target=linux: --emit=macho builds a Mach-O executable for macOS but --target=linux names Linux. Drop --emit=macho (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=macho alone builds for macOS)||
+c1_noarch_linux_macho_rev|--emit=macho --target=linux|refuse:error: --emit=macho conflicts with --target=linux: --emit=macho builds a Mach-O executable for macOS but --target=linux names Linux. Drop --emit=macho (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=macho alone builds for macOS)||
+c1_noarch_linux_pe|--target=linux --emit=pe|refuse:error: --emit=pe conflicts with --target=linux: --emit=pe builds a PE executable for Windows but --target=linux names Linux. Drop --emit=pe (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=pe alone builds for Windows)||
+c1_noarch_linux_pe_rev|--emit=pe --target=linux|refuse:error: --emit=pe conflicts with --target=linux: --emit=pe builds a PE executable for Windows but --target=linux names Linux. Drop --emit=pe (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=pe alone builds for Windows)||
+c1_noarch_linux_android|--target=linux --emit=android|refuse:error: --emit=android conflicts with --target=linux: --emit=android builds an Android PIE ELF for Android but --target=linux names Linux. Drop --emit=android (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=android alone builds for Android)||
+c1_noarch_linux_android_rev|--emit=android --target=linux|refuse:error: --emit=android conflicts with --target=linux: --emit=android builds an Android PIE ELF for Android but --target=linux names Linux. Drop --emit=android (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=android alone builds for Android)||
+c1_noarch_linux_obj|--target=linux --emit=obj|elf-rel-x86_64|1|
+c1_noarch_linux_obj_rev|--emit=obj --target=linux|elf-rel-x86_64|1|
+c1_noarch_linux_c_rev|-c --target=linux|elf-rel-x86_64|1|
+c1_noarch_linux_asm_rev|--emit=asm --target=linux|text|1|
+c1_noarch_linux_ir_rev|--emit=ir --target=linux|ir:--target=linux --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_noarch_macos_noemit|--target=macos|macho-exe-x86_64|5|
+c1_noarch_macos_elfexe|--target=macos --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=macos: --emit=elfexe builds a static ELF executable for Linux but --target=macos names macOS. Drop --emit=elfexe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=elfexe alone builds for Linux)||
+c1_noarch_macos_elfexe_rev|--emit=elfexe --target=macos|refuse:error: --emit=elfexe conflicts with --target=macos: --emit=elfexe builds a static ELF executable for Linux but --target=macos names macOS. Drop --emit=elfexe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=elfexe alone builds for Linux)||
+c1_noarch_macos_macho|--target=macos --emit=macho|macho-exe-x86_64|5|
+c1_noarch_macos_macho_rev|--emit=macho --target=macos|macho-exe-x86_64|5|
+c1_noarch_macos_pe|--target=macos --emit=pe|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_noarch_macos_pe_rev|--emit=pe --target=macos|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_noarch_macos_android|--target=macos --emit=android|refuse:error: --emit=android conflicts with --target=macos: --emit=android builds an Android PIE ELF for Android but --target=macos names macOS. Drop --emit=android (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=android alone builds for Android)||
+c1_noarch_macos_android_rev|--emit=android --target=macos|refuse:error: --emit=android conflicts with --target=macos: --emit=android builds an Android PIE ELF for Android but --target=macos names macOS. Drop --emit=android (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=android alone builds for Android)||
+c1_noarch_macos_obj|--target=macos --emit=obj|macho-obj-x86_64|5|
+c1_noarch_macos_obj_rev|--emit=obj --target=macos|macho-obj-x86_64|5|
+c1_noarch_macos_c_rev|-c --target=macos|macho-obj-x86_64|5|
+c1_noarch_macos_asm_rev|--emit=asm --target=macos|text|5|
+c1_noarch_macos_ir_rev|--emit=ir --target=macos|ir:--target=macos --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_noarch_windows_noemit|--target=windows|pe-exe-x86_64|3|
+c1_noarch_windows_elfexe|--target=windows --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=windows: --emit=elfexe builds a static ELF executable for Linux but --target=windows names Windows. Drop --emit=elfexe (--target=windows alone builds a PE executable), or drop --target=windows (--emit=elfexe alone builds for Linux)||
+c1_noarch_windows_elfexe_rev|--emit=elfexe --target=windows|refuse:error: --emit=elfexe conflicts with --target=windows: --emit=elfexe builds a static ELF executable for Linux but --target=windows names Windows. Drop --emit=elfexe (--target=windows alone builds a PE executable), or drop --target=windows (--emit=elfexe alone builds for Linux)||
+c1_noarch_windows_macho|--target=windows --emit=macho|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_noarch_windows_macho_rev|--emit=macho --target=windows|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_noarch_windows_pe|--target=windows --emit=pe|pe-exe-x86_64|3|
+c1_noarch_windows_pe_rev|--emit=pe --target=windows|pe-exe-x86_64|3|
+c1_noarch_windows_android|--target=windows --emit=android|refuse:error: --emit=android conflicts with --target=windows: --emit=android builds an Android PIE ELF for Android but --target=windows names Windows. Drop --emit=android (--target=windows alone builds a PE executable), or drop --target=windows (--emit=android alone builds for Android)||
+c1_noarch_windows_android_rev|--emit=android --target=windows|refuse:error: --emit=android conflicts with --target=windows: --emit=android builds an Android PIE ELF for Android but --target=windows names Windows. Drop --emit=android (--target=windows alone builds a PE executable), or drop --target=windows (--emit=android alone builds for Android)||
+c1_noarch_windows_obj|--target=windows --emit=obj|coff-obj-x86_64|3|
+c1_noarch_windows_obj_rev|--emit=obj --target=windows|coff-obj-x86_64|3|
+c1_noarch_windows_c_rev|-c --target=windows|coff-obj-x86_64|3|
+c1_noarch_windows_asm_rev|--emit=asm --target=windows|text|3|
+c1_noarch_windows_ir_rev|--emit=ir --target=windows|ir:--target=windows --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_noarch_android_noemit|--target=android|elf-android-arm64|7|
+c1_noarch_android_elfexe|--target=android --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_noarch_android_elfexe_rev|--emit=elfexe --target=android|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_noarch_android_macho|--target=android --emit=macho|refuse:error: --emit=macho conflicts with --target=android: --emit=macho builds a Mach-O executable for macOS but --target=android names Android. Drop --emit=macho (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=macho alone builds for macOS)||
+c1_noarch_android_macho_rev|--emit=macho --target=android|refuse:error: --emit=macho conflicts with --target=android: --emit=macho builds a Mach-O executable for macOS but --target=android names Android. Drop --emit=macho (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=macho alone builds for macOS)||
+c1_noarch_android_pe|--target=android --emit=pe|refuse:error: --emit=pe conflicts with --target=android: --emit=pe builds a PE executable for Windows but --target=android names Android. Drop --emit=pe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=pe alone builds for Windows)||
+c1_noarch_android_pe_rev|--emit=pe --target=android|refuse:error: --emit=pe conflicts with --target=android: --emit=pe builds a PE executable for Windows but --target=android names Android. Drop --emit=pe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=pe alone builds for Windows)||
+c1_noarch_android_android|--target=android --emit=android|elf-android-arm64|7|
+c1_noarch_android_android_rev|--emit=android --target=android|elf-android-arm64|7|
+c1_noarch_android_obj|--target=android --emit=obj|elf-rel-x86_64|8|
+c1_noarch_android_obj_rev|--emit=obj --target=android|elf-rel-x86_64|8|
+c1_noarch_android_c_rev|-c --target=android|elf-rel-x86_64|8|
+c1_noarch_android_asm_rev|--emit=asm --target=android|text|8|
+c1_noarch_android_ir_rev|--emit=ir --target=android|ir:--arch=x86_64 --target=android --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_x86_64_none_noemit|--arch=x86_64|elf-exec-x86_64|1|
+c1_x86_64_none_elfexe|--arch=x86_64 --emit=elfexe|elf-exec-x86_64|1|
+c1_x86_64_none_macho|--arch=x86_64 --emit=macho|macho-exe-x86_64|5|
+c1_x86_64_none_pe|--arch=x86_64 --emit=pe|pe-exe-x86_64|3|
+c1_x86_64_none_android|--arch=x86_64 --emit=android|elf-android-x86_64|8|
+c1_x86_64_linux_noemit|--arch=x86_64 --target=linux|elf-exec-x86_64|1|
+c1_x86_64_linux_elfexe|--arch=x86_64 --target=linux --emit=elfexe|elf-exec-x86_64|1|
+c1_x86_64_linux_elfexe_rev|--arch=x86_64 --emit=elfexe --target=linux|elf-exec-x86_64|1|
+c1_x86_64_linux_macho|--arch=x86_64 --target=linux --emit=macho|refuse:error: --emit=macho conflicts with --target=linux: --emit=macho builds a Mach-O executable for macOS but --target=linux names Linux. Drop --emit=macho (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=macho alone builds for macOS)||
+c1_x86_64_linux_macho_rev|--arch=x86_64 --emit=macho --target=linux|refuse:error: --emit=macho conflicts with --target=linux: --emit=macho builds a Mach-O executable for macOS but --target=linux names Linux. Drop --emit=macho (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=macho alone builds for macOS)||
+c1_x86_64_linux_pe|--arch=x86_64 --target=linux --emit=pe|refuse:error: --emit=pe conflicts with --target=linux: --emit=pe builds a PE executable for Windows but --target=linux names Linux. Drop --emit=pe (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=pe alone builds for Windows)||
+c1_x86_64_linux_pe_rev|--arch=x86_64 --emit=pe --target=linux|refuse:error: --emit=pe conflicts with --target=linux: --emit=pe builds a PE executable for Windows but --target=linux names Linux. Drop --emit=pe (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=pe alone builds for Windows)||
+c1_x86_64_linux_android|--arch=x86_64 --target=linux --emit=android|refuse:error: --emit=android conflicts with --target=linux: --emit=android builds an Android PIE ELF for Android but --target=linux names Linux. Drop --emit=android (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=android alone builds for Android)||
+c1_x86_64_linux_android_rev|--arch=x86_64 --emit=android --target=linux|refuse:error: --emit=android conflicts with --target=linux: --emit=android builds an Android PIE ELF for Android but --target=linux names Linux. Drop --emit=android (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=android alone builds for Android)||
+c1_x86_64_linux_obj|--arch=x86_64 --target=linux --emit=obj|elf-rel-x86_64|1|
+c1_x86_64_linux_obj_rev|--arch=x86_64 --emit=obj --target=linux|elf-rel-x86_64|1|
+c1_x86_64_linux_c_rev|--arch=x86_64 -c --target=linux|elf-rel-x86_64|1|
+c1_x86_64_linux_asm_rev|--arch=x86_64 --emit=asm --target=linux|text|1|
+c1_x86_64_linux_ir_rev|--arch=x86_64 --emit=ir --target=linux|ir:--arch=x86_64 --target=linux --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_x86_64_macos_noemit|--arch=x86_64 --target=macos|macho-exe-x86_64|5|
+c1_x86_64_macos_elfexe|--arch=x86_64 --target=macos --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=macos: --emit=elfexe builds a static ELF executable for Linux but --target=macos names macOS. Drop --emit=elfexe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=elfexe alone builds for Linux)||
+c1_x86_64_macos_elfexe_rev|--arch=x86_64 --emit=elfexe --target=macos|refuse:error: --emit=elfexe conflicts with --target=macos: --emit=elfexe builds a static ELF executable for Linux but --target=macos names macOS. Drop --emit=elfexe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=elfexe alone builds for Linux)||
+c1_x86_64_macos_macho|--arch=x86_64 --target=macos --emit=macho|macho-exe-x86_64|5|
+c1_x86_64_macos_macho_rev|--arch=x86_64 --emit=macho --target=macos|macho-exe-x86_64|5|
+c1_x86_64_macos_pe|--arch=x86_64 --target=macos --emit=pe|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_x86_64_macos_pe_rev|--arch=x86_64 --emit=pe --target=macos|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_x86_64_macos_android|--arch=x86_64 --target=macos --emit=android|refuse:error: --emit=android conflicts with --target=macos: --emit=android builds an Android PIE ELF for Android but --target=macos names macOS. Drop --emit=android (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=android alone builds for Android)||
+c1_x86_64_macos_android_rev|--arch=x86_64 --emit=android --target=macos|refuse:error: --emit=android conflicts with --target=macos: --emit=android builds an Android PIE ELF for Android but --target=macos names macOS. Drop --emit=android (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=android alone builds for Android)||
+c1_x86_64_macos_obj|--arch=x86_64 --target=macos --emit=obj|macho-obj-x86_64|5|
+c1_x86_64_macos_obj_rev|--arch=x86_64 --emit=obj --target=macos|macho-obj-x86_64|5|
+c1_x86_64_macos_c_rev|--arch=x86_64 -c --target=macos|macho-obj-x86_64|5|
+c1_x86_64_macos_asm_rev|--arch=x86_64 --emit=asm --target=macos|text|5|
+c1_x86_64_macos_ir_rev|--arch=x86_64 --emit=ir --target=macos|ir:--arch=x86_64 --target=macos --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_x86_64_windows_noemit|--arch=x86_64 --target=windows|pe-exe-x86_64|3|
+c1_x86_64_windows_elfexe|--arch=x86_64 --target=windows --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=windows: --emit=elfexe builds a static ELF executable for Linux but --target=windows names Windows. Drop --emit=elfexe (--target=windows alone builds a PE executable), or drop --target=windows (--emit=elfexe alone builds for Linux)||
+c1_x86_64_windows_elfexe_rev|--arch=x86_64 --emit=elfexe --target=windows|refuse:error: --emit=elfexe conflicts with --target=windows: --emit=elfexe builds a static ELF executable for Linux but --target=windows names Windows. Drop --emit=elfexe (--target=windows alone builds a PE executable), or drop --target=windows (--emit=elfexe alone builds for Linux)||
+c1_x86_64_windows_macho|--arch=x86_64 --target=windows --emit=macho|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_x86_64_windows_macho_rev|--arch=x86_64 --emit=macho --target=windows|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_x86_64_windows_pe|--arch=x86_64 --target=windows --emit=pe|pe-exe-x86_64|3|
+c1_x86_64_windows_pe_rev|--arch=x86_64 --emit=pe --target=windows|pe-exe-x86_64|3|
+c1_x86_64_windows_android|--arch=x86_64 --target=windows --emit=android|refuse:error: --emit=android conflicts with --target=windows: --emit=android builds an Android PIE ELF for Android but --target=windows names Windows. Drop --emit=android (--target=windows alone builds a PE executable), or drop --target=windows (--emit=android alone builds for Android)||
+c1_x86_64_windows_android_rev|--arch=x86_64 --emit=android --target=windows|refuse:error: --emit=android conflicts with --target=windows: --emit=android builds an Android PIE ELF for Android but --target=windows names Windows. Drop --emit=android (--target=windows alone builds a PE executable), or drop --target=windows (--emit=android alone builds for Android)||
+c1_x86_64_windows_obj|--arch=x86_64 --target=windows --emit=obj|coff-obj-x86_64|3|
+c1_x86_64_windows_obj_rev|--arch=x86_64 --emit=obj --target=windows|coff-obj-x86_64|3|
+c1_x86_64_windows_c_rev|--arch=x86_64 -c --target=windows|coff-obj-x86_64|3|
+c1_x86_64_windows_asm_rev|--arch=x86_64 --emit=asm --target=windows|text|3|
+c1_x86_64_windows_ir_rev|--arch=x86_64 --emit=ir --target=windows|ir:--arch=x86_64 --target=windows --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_x86_64_android_noemit|--arch=x86_64 --target=android|elf-android-x86_64|8|
+c1_x86_64_android_elfexe|--arch=x86_64 --target=android --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_x86_64_android_elfexe_rev|--arch=x86_64 --emit=elfexe --target=android|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_x86_64_android_macho|--arch=x86_64 --target=android --emit=macho|refuse:error: --emit=macho conflicts with --target=android: --emit=macho builds a Mach-O executable for macOS but --target=android names Android. Drop --emit=macho (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=macho alone builds for macOS)||
+c1_x86_64_android_macho_rev|--arch=x86_64 --emit=macho --target=android|refuse:error: --emit=macho conflicts with --target=android: --emit=macho builds a Mach-O executable for macOS but --target=android names Android. Drop --emit=macho (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=macho alone builds for macOS)||
+c1_x86_64_android_pe|--arch=x86_64 --target=android --emit=pe|refuse:error: --emit=pe conflicts with --target=android: --emit=pe builds a PE executable for Windows but --target=android names Android. Drop --emit=pe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=pe alone builds for Windows)||
+c1_x86_64_android_pe_rev|--arch=x86_64 --emit=pe --target=android|refuse:error: --emit=pe conflicts with --target=android: --emit=pe builds a PE executable for Windows but --target=android names Android. Drop --emit=pe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=pe alone builds for Windows)||
+c1_x86_64_android_android|--arch=x86_64 --target=android --emit=android|elf-android-x86_64|8|
+c1_x86_64_android_android_rev|--arch=x86_64 --emit=android --target=android|elf-android-x86_64|8|
+c1_x86_64_android_obj|--arch=x86_64 --target=android --emit=obj|elf-rel-x86_64|8|
+c1_x86_64_android_obj_rev|--arch=x86_64 --emit=obj --target=android|elf-rel-x86_64|8|
+c1_x86_64_android_c_rev|--arch=x86_64 -c --target=android|elf-rel-x86_64|8|
+c1_x86_64_android_asm_rev|--arch=x86_64 --emit=asm --target=android|text|8|
+c1_x86_64_android_ir_rev|--arch=x86_64 --emit=ir --target=android|ir:--arch=x86_64 --target=android --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_arm64_none_noemit|--arch=arm64|elf-exec-arm64|2|
+c1_arm64_none_elfexe|--arch=arm64 --emit=elfexe|elf-exec-arm64|2|
+c1_arm64_none_macho|--arch=arm64 --emit=macho|macho-exe-arm64|6|
+c1_arm64_none_pe|--arch=arm64 --emit=pe|pe-exe-arm64|4|
+c1_arm64_none_android|--arch=arm64 --emit=android|elf-android-arm64|7|
+c1_arm64_linux_noemit|--arch=arm64 --target=linux|elf-exec-arm64|2|
+c1_arm64_linux_elfexe|--arch=arm64 --target=linux --emit=elfexe|elf-exec-arm64|2|
+c1_arm64_linux_elfexe_rev|--arch=arm64 --emit=elfexe --target=linux|elf-exec-arm64|2|
+c1_arm64_linux_macho|--arch=arm64 --target=linux --emit=macho|refuse:error: --emit=macho conflicts with --target=linux: --emit=macho builds a Mach-O executable for macOS but --target=linux names Linux. Drop --emit=macho (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=macho alone builds for macOS)||
+c1_arm64_linux_macho_rev|--arch=arm64 --emit=macho --target=linux|refuse:error: --emit=macho conflicts with --target=linux: --emit=macho builds a Mach-O executable for macOS but --target=linux names Linux. Drop --emit=macho (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=macho alone builds for macOS)||
+c1_arm64_linux_pe|--arch=arm64 --target=linux --emit=pe|refuse:error: --emit=pe conflicts with --target=linux: --emit=pe builds a PE executable for Windows but --target=linux names Linux. Drop --emit=pe (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=pe alone builds for Windows)||
+c1_arm64_linux_pe_rev|--arch=arm64 --emit=pe --target=linux|refuse:error: --emit=pe conflicts with --target=linux: --emit=pe builds a PE executable for Windows but --target=linux names Linux. Drop --emit=pe (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=pe alone builds for Windows)||
+c1_arm64_linux_android|--arch=arm64 --target=linux --emit=android|refuse:error: --emit=android conflicts with --target=linux: --emit=android builds an Android PIE ELF for Android but --target=linux names Linux. Drop --emit=android (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=android alone builds for Android)||
+c1_arm64_linux_android_rev|--arch=arm64 --emit=android --target=linux|refuse:error: --emit=android conflicts with --target=linux: --emit=android builds an Android PIE ELF for Android but --target=linux names Linux. Drop --emit=android (--target=linux alone builds a Linux ELF executable), or drop --target=linux (--emit=android alone builds for Android)||
+c1_arm64_linux_obj|--arch=arm64 --target=linux --emit=obj|elf-rel-arm64|2|
+c1_arm64_linux_obj_rev|--arch=arm64 --emit=obj --target=linux|elf-rel-arm64|2|
+c1_arm64_linux_c_rev|--arch=arm64 -c --target=linux|elf-rel-arm64|2|
+c1_arm64_linux_asm_rev|--arch=arm64 --emit=asm --target=linux|text|2|
+c1_arm64_linux_ir_rev|--arch=arm64 --emit=ir --target=linux|ir:--arch=arm64 --target=linux --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_arm64_macos_noemit|--arch=arm64 --target=macos|macho-exe-arm64|6|
+c1_arm64_macos_elfexe|--arch=arm64 --target=macos --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=macos: --emit=elfexe builds a static ELF executable for Linux but --target=macos names macOS. Drop --emit=elfexe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=elfexe alone builds for Linux)||
+c1_arm64_macos_elfexe_rev|--arch=arm64 --emit=elfexe --target=macos|refuse:error: --emit=elfexe conflicts with --target=macos: --emit=elfexe builds a static ELF executable for Linux but --target=macos names macOS. Drop --emit=elfexe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=elfexe alone builds for Linux)||
+c1_arm64_macos_macho|--arch=arm64 --target=macos --emit=macho|macho-exe-arm64|6|
+c1_arm64_macos_macho_rev|--arch=arm64 --emit=macho --target=macos|macho-exe-arm64|6|
+c1_arm64_macos_pe|--arch=arm64 --target=macos --emit=pe|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_arm64_macos_pe_rev|--arch=arm64 --emit=pe --target=macos|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_arm64_macos_android|--arch=arm64 --target=macos --emit=android|refuse:error: --emit=android conflicts with --target=macos: --emit=android builds an Android PIE ELF for Android but --target=macos names macOS. Drop --emit=android (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=android alone builds for Android)||
+c1_arm64_macos_android_rev|--arch=arm64 --emit=android --target=macos|refuse:error: --emit=android conflicts with --target=macos: --emit=android builds an Android PIE ELF for Android but --target=macos names macOS. Drop --emit=android (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=android alone builds for Android)||
+c1_arm64_macos_obj|--arch=arm64 --target=macos --emit=obj|macho-obj-arm64|6|
+c1_arm64_macos_obj_rev|--arch=arm64 --emit=obj --target=macos|macho-obj-arm64|6|
+c1_arm64_macos_c_rev|--arch=arm64 -c --target=macos|macho-obj-arm64|6|
+c1_arm64_macos_asm_rev|--arch=arm64 --emit=asm --target=macos|text|6|
+c1_arm64_macos_ir_rev|--arch=arm64 --emit=ir --target=macos|ir:--arch=arm64 --target=macos --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_arm64_windows_noemit|--arch=arm64 --target=windows|pe-exe-arm64|4|
+c1_arm64_windows_elfexe|--arch=arm64 --target=windows --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=windows: --emit=elfexe builds a static ELF executable for Linux but --target=windows names Windows. Drop --emit=elfexe (--target=windows alone builds a PE executable), or drop --target=windows (--emit=elfexe alone builds for Linux)||
+c1_arm64_windows_elfexe_rev|--arch=arm64 --emit=elfexe --target=windows|refuse:error: --emit=elfexe conflicts with --target=windows: --emit=elfexe builds a static ELF executable for Linux but --target=windows names Windows. Drop --emit=elfexe (--target=windows alone builds a PE executable), or drop --target=windows (--emit=elfexe alone builds for Linux)||
+c1_arm64_windows_macho|--arch=arm64 --target=windows --emit=macho|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_arm64_windows_macho_rev|--arch=arm64 --emit=macho --target=windows|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_arm64_windows_pe|--arch=arm64 --target=windows --emit=pe|pe-exe-arm64|4|
+c1_arm64_windows_pe_rev|--arch=arm64 --emit=pe --target=windows|pe-exe-arm64|4|
+c1_arm64_windows_android|--arch=arm64 --target=windows --emit=android|refuse:error: --emit=android conflicts with --target=windows: --emit=android builds an Android PIE ELF for Android but --target=windows names Windows. Drop --emit=android (--target=windows alone builds a PE executable), or drop --target=windows (--emit=android alone builds for Android)||
+c1_arm64_windows_android_rev|--arch=arm64 --emit=android --target=windows|refuse:error: --emit=android conflicts with --target=windows: --emit=android builds an Android PIE ELF for Android but --target=windows names Windows. Drop --emit=android (--target=windows alone builds a PE executable), or drop --target=windows (--emit=android alone builds for Android)||
+c1_arm64_windows_obj|--arch=arm64 --target=windows --emit=obj|coff-obj-arm64|4|
+c1_arm64_windows_obj_rev|--arch=arm64 --emit=obj --target=windows|coff-obj-arm64|4|
+c1_arm64_windows_c_rev|--arch=arm64 -c --target=windows|coff-obj-arm64|4|
+c1_arm64_windows_asm_rev|--arch=arm64 --emit=asm --target=windows|text|4|
+c1_arm64_windows_ir_rev|--arch=arm64 --emit=ir --target=windows|ir:--arch=arm64 --target=windows --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_arm64_android_noemit|--arch=arm64 --target=android|elf-android-arm64|7|
+c1_arm64_android_elfexe|--arch=arm64 --target=android --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_arm64_android_elfexe_rev|--arch=arm64 --emit=elfexe --target=android|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_arm64_android_macho|--arch=arm64 --target=android --emit=macho|refuse:error: --emit=macho conflicts with --target=android: --emit=macho builds a Mach-O executable for macOS but --target=android names Android. Drop --emit=macho (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=macho alone builds for macOS)||
+c1_arm64_android_macho_rev|--arch=arm64 --emit=macho --target=android|refuse:error: --emit=macho conflicts with --target=android: --emit=macho builds a Mach-O executable for macOS but --target=android names Android. Drop --emit=macho (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=macho alone builds for macOS)||
+c1_arm64_android_pe|--arch=arm64 --target=android --emit=pe|refuse:error: --emit=pe conflicts with --target=android: --emit=pe builds a PE executable for Windows but --target=android names Android. Drop --emit=pe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=pe alone builds for Windows)||
+c1_arm64_android_pe_rev|--arch=arm64 --emit=pe --target=android|refuse:error: --emit=pe conflicts with --target=android: --emit=pe builds a PE executable for Windows but --target=android names Android. Drop --emit=pe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=pe alone builds for Windows)||
+c1_arm64_android_android|--arch=arm64 --target=android --emit=android|elf-android-arm64|7|
+c1_arm64_android_android_rev|--arch=arm64 --emit=android --target=android|elf-android-arm64|7|
+c1_arm64_android_obj|--arch=arm64 --target=android --emit=obj|elf-rel-arm64|7|
+c1_arm64_android_obj_rev|--arch=arm64 --emit=obj --target=android|elf-rel-arm64|7|
+c1_arm64_android_c_rev|--arch=arm64 -c --target=android|elf-rel-arm64|7|
+c1_arm64_android_asm_rev|--arch=arm64 --emit=asm --target=android|text|7|
+c1_arm64_android_ir_rev|--arch=arm64 --emit=ir --target=android|ir:--arch=arm64 --target=android --emit=ir||tests/fixtures/c1/arch_e.kr
+c1_alias_darwin_win|--target=darwin --emit=win|refuse:error: --emit=win conflicts with --target=darwin: --emit=win builds a PE executable for Windows but --target=darwin names macOS. Drop --emit=win (--target=darwin alone builds a Mach-O executable), or drop --target=darwin (--emit=win alone builds for Windows)||
+c1_alias_win_macarm|--target=win --emit=mac-arm64|refuse:error: --emit=mac-arm64 conflicts with --target=win: --emit=mac-arm64 builds a Mach-O executable for macOS but --target=win names Windows. Drop --emit=mac-arm64 (--target=win alone builds a PE executable), or drop --target=win (--emit=mac-arm64 alone builds for macOS)||
+c1_alias_linux_elfarm|--target=linux --emit=linux-arm64|elf-exec-arm64|2|
+c1_rep_emit_last_ok|--target=macos --emit=pe --emit=macho|macho-exe-x86_64|5|
+c1_rep_emit_last_bad|--target=macos --emit=macho --emit=pe|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_ea_elf_arm64_noarch|--emit=elf-arm64|elf-exec-arm64|2|
+c1_ea_elf_arm64_same|--arch=arm64 --emit=elf-arm64|elf-exec-arm64|2|
+c1_ea_elf_arm64_other|--arch=x86_64 --emit=elf-arm64|refuse:error: --emit=elf-arm64 conflicts with --arch=x86_64: --emit=elf-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=elf-arm64 alone builds for arm64), or write --emit=elfexe to keep --arch=x86_64||
+c1_ea_elf_arm64_other_rev|--emit=elf-arm64 --arch=x86_64|refuse:error: --emit=elf-arm64 conflicts with --arch=x86_64: --emit=elf-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=elf-arm64 alone builds for arm64), or write --emit=elfexe to keep --arch=x86_64||
+c1_ea_linux_arm64_noarch|--emit=linux-arm64|elf-exec-arm64|2|
+c1_ea_linux_arm64_same|--arch=arm64 --emit=linux-arm64|elf-exec-arm64|2|
+c1_ea_linux_arm64_other|--arch=x86_64 --emit=linux-arm64|refuse:error: --emit=linux-arm64 conflicts with --arch=x86_64: --emit=linux-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=linux-arm64 alone builds for arm64), or write --emit=elfexe to keep --arch=x86_64||
+c1_ea_linux_arm64_other_rev|--emit=linux-arm64 --arch=x86_64|refuse:error: --emit=linux-arm64 conflicts with --arch=x86_64: --emit=linux-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=linux-arm64 alone builds for arm64), or write --emit=elfexe to keep --arch=x86_64||
+c1_ea_elf_x86_64_noarch|--emit=elf-x86_64|elf-exec-x86_64|1|
+c1_ea_elf_x86_64_same|--arch=x86_64 --emit=elf-x86_64|elf-exec-x86_64|1|
+c1_ea_elf_x86_64_other|--arch=arm64 --emit=elf-x86_64|refuse:error: --emit=elf-x86_64 conflicts with --arch=arm64: --emit=elf-x86_64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=elf-x86_64 alone builds for x86_64), or write --emit=elfexe to keep --arch=arm64||
+c1_ea_elf_x86_64_other_rev|--emit=elf-x86_64 --arch=arm64|refuse:error: --emit=elf-x86_64 conflicts with --arch=arm64: --emit=elf-x86_64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=elf-x86_64 alone builds for x86_64), or write --emit=elfexe to keep --arch=arm64||
+c1_ea_linux_x86_64_noarch|--emit=linux-x86_64|elf-exec-x86_64|1|
+c1_ea_linux_x86_64_same|--arch=x86_64 --emit=linux-x86_64|elf-exec-x86_64|1|
+c1_ea_linux_x86_64_other|--arch=arm64 --emit=linux-x86_64|refuse:error: --emit=linux-x86_64 conflicts with --arch=arm64: --emit=linux-x86_64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=linux-x86_64 alone builds for x86_64), or write --emit=elfexe to keep --arch=arm64||
+c1_ea_linux_x86_64_other_rev|--emit=linux-x86_64 --arch=arm64|refuse:error: --emit=linux-x86_64 conflicts with --arch=arm64: --emit=linux-x86_64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=linux-x86_64 alone builds for x86_64), or write --emit=elfexe to keep --arch=arm64||
+c1_ea_linux_x86dash64_noarch|--emit=linux-x86-64|elf-exec-x86_64|1|
+c1_ea_linux_x86dash64_same|--arch=x86_64 --emit=linux-x86-64|elf-exec-x86_64|1|
+c1_ea_linux_x86dash64_other|--arch=arm64 --emit=linux-x86-64|refuse:error: --emit=linux-x86-64 conflicts with --arch=arm64: --emit=linux-x86-64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=linux-x86-64 alone builds for x86_64), or write --emit=elfexe to keep --arch=arm64||
+c1_ea_linux_x86dash64_other_rev|--emit=linux-x86-64 --arch=arm64|refuse:error: --emit=linux-x86-64 conflicts with --arch=arm64: --emit=linux-x86-64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=linux-x86-64 alone builds for x86_64), or write --emit=elfexe to keep --arch=arm64||
+c1_ea_mac_x64_noarch|--emit=mac-x64|macho-exe-x86_64|5|
+c1_ea_mac_x64_same|--arch=x86_64 --emit=mac-x64|macho-exe-x86_64|5|
+c1_ea_mac_x64_other|--arch=arm64 --emit=mac-x64|refuse:error: --emit=mac-x64 conflicts with --arch=arm64: --emit=mac-x64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=mac-x64 alone builds for x86_64), or write --emit=macho to keep --arch=arm64||
+c1_ea_mac_x64_other_rev|--emit=mac-x64 --arch=arm64|refuse:error: --emit=mac-x64 conflicts with --arch=arm64: --emit=mac-x64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=mac-x64 alone builds for x86_64), or write --emit=macho to keep --arch=arm64||
+c1_ea_mac_arm64_noarch|--emit=mac-arm64|macho-exe-arm64|6|
+c1_ea_mac_arm64_same|--arch=arm64 --emit=mac-arm64|macho-exe-arm64|6|
+c1_ea_mac_arm64_other|--arch=x86_64 --emit=mac-arm64|refuse:error: --emit=mac-arm64 conflicts with --arch=x86_64: --emit=mac-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=mac-arm64 alone builds for arm64), or write --emit=macho to keep --arch=x86_64||
+c1_ea_mac_arm64_other_rev|--emit=mac-arm64 --arch=x86_64|refuse:error: --emit=mac-arm64 conflicts with --arch=x86_64: --emit=mac-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=mac-arm64 alone builds for arm64), or write --emit=macho to keep --arch=x86_64||
+c1_ea_windows_x64_noarch|--emit=windows-x64|pe-exe-x86_64|3|
+c1_ea_windows_x64_same|--arch=x86_64 --emit=windows-x64|pe-exe-x86_64|3|
+c1_ea_windows_x64_other|--arch=arm64 --emit=windows-x64|refuse:error: --emit=windows-x64 conflicts with --arch=arm64: --emit=windows-x64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=windows-x64 alone builds for x86_64), or write --emit=pe to keep --arch=arm64||
+c1_ea_windows_x64_other_rev|--emit=windows-x64 --arch=arm64|refuse:error: --emit=windows-x64 conflicts with --arch=arm64: --emit=windows-x64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=windows-x64 alone builds for x86_64), or write --emit=pe to keep --arch=arm64||
+c1_ea_windows_arm64_noarch|--emit=windows-arm64|pe-exe-arm64|4|
+c1_ea_windows_arm64_same|--arch=arm64 --emit=windows-arm64|pe-exe-arm64|4|
+c1_ea_windows_arm64_other|--arch=x86_64 --emit=windows-arm64|refuse:error: --emit=windows-arm64 conflicts with --arch=x86_64: --emit=windows-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=windows-arm64 alone builds for arm64), or write --emit=pe to keep --arch=x86_64||
+c1_ea_windows_arm64_other_rev|--emit=windows-arm64 --arch=x86_64|refuse:error: --emit=windows-arm64 conflicts with --arch=x86_64: --emit=windows-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=windows-arm64 alone builds for arm64), or write --emit=pe to keep --arch=x86_64||
+c1_ea_win_x64_noarch|--emit=win-x64|pe-exe-x86_64|3|
+c1_ea_win_x64_same|--arch=x86_64 --emit=win-x64|pe-exe-x86_64|3|
+c1_ea_win_x64_other|--arch=arm64 --emit=win-x64|refuse:error: --emit=win-x64 conflicts with --arch=arm64: --emit=win-x64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=win-x64 alone builds for x86_64), or write --emit=pe to keep --arch=arm64||
+c1_ea_win_x64_other_rev|--emit=win-x64 --arch=arm64|refuse:error: --emit=win-x64 conflicts with --arch=arm64: --emit=win-x64 names the x86_64 architecture but --arch=arm64 names arm64. Drop --arch=arm64 (--emit=win-x64 alone builds for x86_64), or write --emit=pe to keep --arch=arm64||
+c1_ea_win_arm64_noarch|--emit=win-arm64|pe-exe-arm64|4|
+c1_ea_win_arm64_same|--arch=arm64 --emit=win-arm64|pe-exe-arm64|4|
+c1_ea_win_arm64_other|--arch=x86_64 --emit=win-arm64|refuse:error: --emit=win-arm64 conflicts with --arch=x86_64: --emit=win-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=win-arm64 alone builds for arm64), or write --emit=pe to keep --arch=x86_64||
+c1_ea_win_arm64_other_rev|--emit=win-arm64 --arch=x86_64|refuse:error: --emit=win-arm64 conflicts with --arch=x86_64: --emit=win-arm64 names the arm64 architecture but --arch=x86_64 names x86_64. Drop --arch=x86_64 (--emit=win-arm64 alone builds for arm64), or write --emit=pe to keep --arch=x86_64||
+c1_ea_riscv|--arch=riscv32 --emit=elf-x86_64|refuse:error: --emit=elf-x86_64 conflicts with --arch=riscv32: --emit=elf-x86_64 names the x86_64 architecture but --arch=riscv32 names riscv32. Drop --arch=riscv32 (--emit=elf-x86_64 alone builds for x86_64), or write --emit=elfexe to keep --arch=riscv32||
+c1_ea_target|--target=windows --emit=win-arm64|pe-exe-arm64|4|
+c1_ea_none_kept|--emit=win-x64 --arch=arm64 --target=none|refuse:error: --emit=pe conflicts with --target=none: --emit=pe emits a WINDOWS PE -- it imports kernel32 and its entry instruction calls through an import-table slot that only the Windows loader fills, so on bare metal it jumps through a null pointer before your code runs. Firmware does load PE32+ images, so if that is what you want use --emit=uefi; otherwise use the default ELF, or --emit=obj for a relocatable object to link yourself||
+c1_fs_macos_x86_64_noemit|--arch=x86_64 --freestanding --target=macos|elf-exec-x86_64|5|
+c1_fs_macos_x86_64_elfexe|--arch=x86_64 --freestanding --target=macos --emit=elfexe|elf-exec-x86_64|5|
+c1_fs_macos_arm64_noemit|--arch=arm64 --freestanding --target=macos|elf-exec-arm64|6|
+c1_fs_macos_arm64_elfexe|--arch=arm64 --freestanding --target=macos --emit=elfexe|elf-exec-arm64|6|
+c1_fs_macos_noarch|--freestanding --target=macos|elf-exec-x86_64|5|
+c1_fs_windows_x86_64_noemit|--arch=x86_64 --freestanding --target=windows|elf-exec-x86_64|3|
+c1_fs_windows_x86_64_elfexe|--arch=x86_64 --freestanding --target=windows --emit=elfexe|elf-exec-x86_64|3|
+c1_fs_windows_arm64_noemit|--arch=arm64 --freestanding --target=windows|elf-exec-arm64|4|
+c1_fs_windows_arm64_elfexe|--arch=arm64 --freestanding --target=windows --emit=elfexe|elf-exec-arm64|4|
+c1_fs_windows_noarch|--freestanding --target=windows|elf-exec-x86_64|3|
+c1_fs_linux_noarch|--freestanding --target=linux|elf-exec-x86_64|1|
+c1_fs_macos_pe|--arch=x86_64 --freestanding --target=macos --emit=pe|refuse:error: --emit=pe conflicts with --target=macos: --emit=pe builds a PE executable for Windows but --target=macos names macOS. Drop --emit=pe (--target=macos alone builds a Mach-O executable), or drop --target=macos (--emit=pe alone builds for Windows)||
+c1_fs_windows_macho|--arch=x86_64 --freestanding --target=windows --emit=macho|refuse:error: --emit=macho conflicts with --target=windows: --emit=macho builds a Mach-O executable for macOS but --target=windows names Windows. Drop --emit=macho (--target=windows alone builds a PE executable), or drop --target=windows (--emit=macho alone builds for macOS)||
+c1_fs_android_noemit|--freestanding --target=android|elf-android-arm64|7|
+c1_fs_android_elfexe|--arch=x86_64 --freestanding --target=android --emit=elfexe|refuse:error: --emit=elfexe conflicts with --target=android: --emit=elfexe builds a static ELF executable for Linux but --target=android names Android. Drop --emit=elfexe (--target=android alone builds an Android PIE ELF), or drop --target=android (--emit=elfexe alone builds for Linux)||
+c1_fs_fat|--freestanding|krbo-8||
+c1_android_image|--arch=x86_64 --target=android --emit=image|refuse:error: --emit=image requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the flat blob would contain that OS's syscalls with no kernel behind them||tests/fixtures/c1/bm.kr
+c1_android_image_rev|--arch=x86_64 --emit=image --target=android|refuse:error: --emit=image requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the flat blob would contain that OS's syscalls with no kernel behind them||tests/fixtures/c1/bm.kr
+c1_android_image_la|--arch=x86_64 --target=android --emit=image --load-addr=0x400000|refuse:error: --emit=image requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the flat blob would contain that OS's syscalls with no kernel behind them||tests/fixtures/c1/bm.kr
+c1_android_image_la_rev|--arch=x86_64 --emit=image --load-addr=0x400000 --target=android|refuse:error: --emit=image requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the flat blob would contain that OS's syscalls with no kernel behind them||tests/fixtures/c1/bm.kr
+c1_android_uefi|--arch=x86_64 --target=android --emit=uefi|refuse:error: --emit=uefi requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the application would carry that OS's syscalls, which UEFI firmware does not provide||tests/fixtures/c1/bm.kr
+c1_android_uefi_rev|--arch=x86_64 --emit=uefi --target=android|refuse:error: --emit=uefi requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the application would carry that OS's syscalls, which UEFI firmware does not provide||tests/fixtures/c1/bm.kr
+c1_android_arx|--arch=x86_64 --target=android --emit=arx|refuse:error: --emit=arx requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by||tests/fixtures/c1/bm.kr
+c1_android_arx_rev|--arch=x86_64 --emit=arx --target=android|refuse:error: --emit=arx requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by||tests/fixtures/c1/bm.kr
+c1_android_arxmod|--arch=x86_64 --target=android --emit=arxmod --mod-name=a --mod-abi=1|refuse:error: --emit=arxmod requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by||tests/fixtures/c1/bm.kr
+c1_android_arxmod_rev|--arch=x86_64 --emit=arxmod --mod-name=a --mod-abi=1 --target=android|refuse:error: --emit=arxmod requires --target=none: without it the resolved target OS is a hosted one (the default is linux) and the program would carry that OS's syscalls, which ApexRift does not provide -- it is the OS the container is loaded by||tests/fixtures/c1/bm.kr
+c1_android_lkm|--target=android --emit=lkm|elf-rel-x86_64||examples/hello_lkm.kr
+c1_android_lkm_rev|--emit=lkm --target=android|elf-rel-x86_64||examples/hello_lkm.kr
+c1_riscv_linux|--arch=riscv32 --target=linux|elf-exec-riscv32||
+c1_g_elf_x86_64|--arch=x86_64 -g|elf-exec-x86_64|1|
+c1_g_elf_tlinux_x86_64|-g --arch=x86_64 --target=linux|elf-exec-x86_64|1|
+c1_g_carrier_x86_64|--arch=x86_64 --freestanding --target=windows -g|elf-exec-x86_64|3|
+c1_g_pe_x86_64|--arch=x86_64 --emit=pe -g|refuse:error: -g conflicts with --emit=pe: debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_pe_rev_x86_64|-g --arch=x86_64 --emit=pe|refuse:error: -g conflicts with --emit=pe: debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_tw_x86_64|--arch=x86_64 --target=windows -g|refuse:error: -g conflicts with --target=windows: --target=windows builds a PE executable, and debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_macho_x86_64|--arch=x86_64 --emit=macho -g|refuse:error: -g conflicts with --emit=macho: debug information for Mach-O executables (DWARF in a dSYM bundle) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_tm_x86_64|-g --arch=x86_64 --target=macos|refuse:error: -g conflicts with --target=macos: --target=macos builds a Mach-O executable, and debug information for Mach-O executables (DWARF in a dSYM bundle) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_android_x86_64|--arch=x86_64 --emit=android -g|refuse:error: -g conflicts with --emit=android: debug information for Android PIE executables is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_ta_x86_64|--arch=x86_64 --target=android -g|refuse:error: -g conflicts with --target=android: --target=android builds an Android PIE executable, and debug information for Android PIE executables is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_obj_x86_64|--arch=x86_64 --emit=obj -g|refuse:error: -g conflicts with --emit=obj: debug information for relocatable objects (ELF .o, Mach-O .o, COFF .obj) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_c_x86_64|--arch=x86_64 -c -g|refuse:error: -g conflicts with -c: debug information for relocatable objects (ELF .o, Mach-O .o, COFF .obj) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_asm_x86_64|--arch=x86_64 --emit=asm -g|refuse:error: -g conflicts with --emit=asm: debug information in an assembly listing is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_ir_x86_64|--arch=x86_64 --emit=ir -g|refuse:error: -g conflicts with --emit=ir: debug information in an IR dump is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_elf_arm64|--arch=arm64 -g|elf-exec-arm64|2|
+c1_g_elf_tlinux_arm64|-g --arch=arm64 --target=linux|elf-exec-arm64|2|
+c1_g_carrier_arm64|--arch=arm64 --freestanding --target=windows -g|elf-exec-arm64|4|
+c1_g_pe_arm64|--arch=arm64 --emit=pe -g|refuse:error: -g conflicts with --emit=pe: debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_pe_rev_arm64|-g --arch=arm64 --emit=pe|refuse:error: -g conflicts with --emit=pe: debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_tw_arm64|--arch=arm64 --target=windows -g|refuse:error: -g conflicts with --target=windows: --target=windows builds a PE executable, and debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_macho_arm64|--arch=arm64 --emit=macho -g|refuse:error: -g conflicts with --emit=macho: debug information for Mach-O executables (DWARF in a dSYM bundle) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_tm_arm64|-g --arch=arm64 --target=macos|refuse:error: -g conflicts with --target=macos: --target=macos builds a Mach-O executable, and debug information for Mach-O executables (DWARF in a dSYM bundle) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_android_arm64|--arch=arm64 --emit=android -g|refuse:error: -g conflicts with --emit=android: debug information for Android PIE executables is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_ta_arm64|--arch=arm64 --target=android -g|refuse:error: -g conflicts with --target=android: --target=android builds an Android PIE executable, and debug information for Android PIE executables is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_obj_arm64|--arch=arm64 --emit=obj -g|refuse:error: -g conflicts with --emit=obj: debug information for relocatable objects (ELF .o, Mach-O .o, COFF .obj) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_c_arm64|--arch=arm64 -c -g|refuse:error: -g conflicts with -c: debug information for relocatable objects (ELF .o, Mach-O .o, COFF .obj) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_asm_arm64|--arch=arm64 --emit=asm -g|refuse:error: -g conflicts with --emit=asm: debug information in an assembly listing is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_ir_arm64|--arch=arm64 --emit=ir -g|refuse:error: -g conflicts with --emit=ir: debug information in an IR dump is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_alias_win|--arch=x86_64 --emit=win-x64 -g|refuse:error: -g conflicts with --emit=win-x64: debug information for PE executables (CodeView/PDB) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_alias_darwin|--arch=x86_64 --target=darwin -g|refuse:error: -g conflicts with --target=darwin: --target=darwin builds a Mach-O executable, and debug information for Mach-O executables (DWARF in a dSYM bundle) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_coff|--arch=x86_64 --target=windows -c -g|refuse:error: -g conflicts with -c: debug information for relocatable objects (ELF .o, Mach-O .o, COFF .obj) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_lkm|--arch=x86_64 --emit=lkm -g|refuse:error: -g conflicts with --emit=lkm: debug information for kernel modules (.ko) is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||examples/hello_lkm.kr
+c1_g_fat|-g|refuse:error: -g conflicts with the default fat binary: a fat .krbo binary is built here (no --arch=, --target= or --emit=), and debug information for fat binary slices is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_targets|--targets=linux-x64 -g|refuse:error: -g conflicts with --targets=: debug information for fat binary slices is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_riscv|--arch=riscv32 -g|refuse:error: -g conflicts with --arch=riscv32: DWARF for riscv32 is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||
+c1_g_xtensa|--arch=xtensa --freestanding -g|refuse:error: -g conflicts with --arch=xtensa: DWARF for xtensa is not implemented yet, so -g would be silently dropped. Drop -g, or build an ELF with -g||tests/fixtures/c1/bm.kr
+c1_g_tnone|--arch=x86_64 --target=none -g|elf-exec-x86_64|9|tests/fixtures/c1/bm.kr
+c1_g_image_kept|--arch=x86_64 --target=none --emit=image --load-addr=0x400000 -g|refuse:error: -g conflicts with --emit=image: the DWARF footer and its section headers would land INSIDE the flat blob at addresses derived from the ELF layout the image does not have. Drop -g, or drop --emit=image to keep the ELF that -g understands||tests/fixtures/c1/bm.kr
+c1_g_arxmod_named|--arch=x86_64 --emit=arxmod --mod-name=a --mod-abi=1 -g|refuse:error: -g conflicts with --emit=arxmod: the DWARF footer and its section headers are laid out from an ELF geometry this container does not have, and would land inside the loaded image at offsets nothing maps. Drop -g, or drop --emit=arxmod to keep the ELF that -g understands||tests/fixtures/c1/bm.kr
+c1_ts_one|--targets=linux-x64|krbo:linux-x64||
+c1_ts_two|--targets=linux-x64,win-x64|krbo:linux-x64,win-x64||
+c1_ts_dup|--targets=linux-x64,linux-x64|krbo:linux-x64||
+c1_ts_all|--targets=all|krbo:linux-x64,linux-arm64,win-x64,win-arm64,mac-x64,mac-arm64,android-arm64,android-x64||
+c1_ts_all_plus|--targets=all,mac-arm64|krbo:linux-x64,linux-arm64,win-x64,win-arm64,mac-x64,mac-arm64,android-arm64,android-x64||
+c1_ts_aliases|--targets=linux-x86_64,linux-aarch64,windows-x64,windows-arm64,macos-x64,macos-arm64,android-arm64,android-x86_64|krbo:linux-x64,linux-arm64,win-x64,win-arm64,mac-x64,mac-arm64,android-arm64,android-x64||
+c1_ts_repeat_same|--targets=linux-x64 --targets=linux-x64|krbo:linux-x64||
+c1_ts_freestanding|--freestanding --targets=linux-x64|krbo:linux-x64||
+c1_ts_bogus|--targets=bogus-name|refuse:error: unknown --targets= name 'bogus-name': valid names are linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all (lower-case)||
+c1_ts_partbogus|--targets=linux-x64,bogus|refuse:error: unknown --targets= name 'bogus': valid names are linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all (lower-case)||
+c1_ts_upper|--targets=LINUX-X64|refuse:error: unknown --targets= name 'LINUX-X64': valid names are linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all (lower-case)||
+c1_ts_x86_64|--targets=x86_64|refuse:error: unknown --targets= name 'x86_64': valid names are linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all (lower-case)||
+c1_ts_empty|--targets=|refuse:error: --targets= is empty: name at least one target, e.g. --targets=linux-x64,win-x64, or drop --targets= for the default fat binary of all 8 (valid names: linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all)||
+c1_ts_empty_elem|--targets=linux-x64,,win-x64|refuse:error: --targets= has an empty name: write the list with no empty entries, e.g. --targets=linux-x64,win-x64 (valid names: linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all)||
+c1_ts_trailing_comma|--targets=linux-x64,|refuse:error: --targets= has an empty name: write the list with no empty entries, e.g. --targets=linux-x64,win-x64 (valid names: linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all)||
+c1_ts_repeat_diff|--targets=linux-x64 --targets=win-x64|refuse:error: conflicting --targets= values: 'linux-x64' and 'win-x64'||
+c1_ts_arch|--arch=arm64 --targets=linux-x64|refuse:error: --targets= conflicts with --arch=arm64: --targets= builds a fat binary and every name in its list already chooses the architecture (linux-x64 or linux-arm64, ...), so --arch=arm64 would be ignored. Name the slices you want in --targets=, or drop --targets= for a single-architecture binary||
+c1_ts_arch_x86|--arch=x86_64 --targets=linux-x64|refuse:error: --targets= conflicts with --arch=x86_64: --targets= builds a fat binary and every name in its list already chooses the architecture (linux-x64 or linux-arm64, ...), so --arch=x86_64 would be ignored. Name the slices you want in --targets=, or drop --targets= for a single-architecture binary||
+c1_ts_arch_bogus|--arch=arm64 --targets=bogus|refuse:error: unknown --targets= name 'bogus': valid names are linux-x64, linux-x86_64, linux-arm64, linux-aarch64, win-x64, windows-x64, win-arm64, windows-arm64, mac-x64, macos-x64, mac-arm64, macos-arm64, android-arm64, android-x64, android-x86_64 and all (lower-case)||
+c1_ts_target|--target=macos --targets=linux-x64|refuse:error: --targets= conflicts with --target=macos: --targets= builds a fat binary and every name in its list already chooses the OS (linux-x64, macos-arm64, win-x64, ...), so --target=macos would be ignored. Name the slices you want in --targets=, or drop --targets= for a single-target binary||
+c1_ts_target_linux|--target=linux --targets=linux-x64|refuse:error: --targets= conflicts with --target=linux: --targets= builds a fat binary and every name in its list already chooses the OS (linux-x64, macos-arm64, win-x64, ...), so --target=linux would be ignored. Name the slices you want in --targets=, or drop --targets= for a single-target binary||
+c1_ts_emit_pe|--emit=pe --targets=linux-x64|refuse:error: --targets= conflicts with --emit=pe: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=pe would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_emit_macho|--emit=macho --targets=linux-x64|refuse:error: --targets= conflicts with --emit=macho: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=macho would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_emit_elfexe|--emit=elfexe --targets=linux-x64|refuse:error: --targets= conflicts with --emit=elfexe: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=elfexe would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_emit_android|--emit=android --targets=linux-x64|refuse:error: --targets= conflicts with --emit=android: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=android would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_emit_obj|--emit=obj --targets=linux-x64|refuse:error: --targets= conflicts with --emit=obj: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=obj would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_emit_asm|--emit=asm --targets=linux-x64|refuse:error: --targets= conflicts with --emit=asm: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=asm would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_emit_ir|--emit=ir --targets=linux-x64|refuse:error: --targets= conflicts with --emit=ir: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=ir would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_ts_c|-c --targets=linux-x64|refuse:error: --targets= conflicts with -c: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so -c would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop -c||
+c1_ts_none|--target=none --targets=linux-x64|refuse:error: --target=none cannot build a fat binary: pass --arch=<arch> for a single bare-metal binary (a fat binary bundles 8 hosted OS slices and there is no OS here to run any of them)||
+c1_ts_riscv|--arch=riscv32 --targets=linux-x64|refuse:error: fat binaries (--targets) have no riscv32 slice; use --arch=riscv32 without --targets||
+c1_ts_esp32|--target=esp32 --targets=linux-x64|refuse:error: --target=esp32 requires --arch=xtensa --freestanding||
+c1_ts_lkm|--emit=lkm --targets=linux-x64|refuse:error: --emit=lkm conflicts with --targets=: a loadable kernel module (.ko) is a single-target Linux/Android kernel module, not a fat binary; drop --targets= and build it with --arch=x86_64 --target=linux (or android)||examples/hello_lkm.kr
+c1_name_tw|--target=windows|name:p.exe||
+c1_name_tm|--target=macos|name:p||
+c1_name_tl|--target=linux|name:p||
+c1_name_ta|--target=android|name:p||
+c1_name_arch_tw|--arch=x86_64 --target=windows|name:p.exe||
+c1_name_fat||name:p.krbo||
+c1_name_targets|--targets=linux-x64|name:p.krbo||
+c1_arxmod_noarch|--emit=arxmod --mod-name=a --mod-abi=1 --target=none|refuse:error: --emit=arxmod requires an explicit --arch=x86_64 or --arch=arm64: the ARX header records the CPU and the loader refuses a container built for another one, so a silently defaulted arch yields a program rejected at load time for a choice you did not make||tests/fixtures/c1/bm.kr
+c1_arxmod_riscv|--arch=riscv32 --emit=arxmod --mod-name=a --mod-abi=1 --target=none|refuse:error: --emit=arxmod has no riscv32 form: ApexRift runs on x86_64 and there is no riscv32 loader for this container. Use --arch=riscv32 --freestanding for a raw boot image instead||tests/fixtures/c1/bm.kr
+c1_arxmod_xtensa|--arch=xtensa --emit=arxmod --mod-name=a --mod-abi=1 --target=none|refuse:error: --emit=arxmod has no xtensa form: ApexRift runs on x86_64 and the chip has no loader for this container. Use --arch=xtensa --freestanding or --target=esp32 instead||tests/fixtures/c1/bm.kr
+c1_ts_emit_archnamed|--emit=win-arm64 --targets=linux-x64|refuse:error: --targets= conflicts with --emit=win-arm64: --targets= builds a fat .krbo binary whose slices are each their own OS's executable, so --emit=win-arm64 would be ignored. Drop --targets= and build each file with --arch=, --target= and --emit=, or drop --emit=||
+c1_archid_control_differs_elf|--arch=x86_64|control:1||
+c1_archid_control_differs_pe|--arch=x86_64 --emit=pe|control:1||
+c1_archid_control_differs_macho|--arch=arm64 --emit=macho|control:1||
+c1_archid_control_differs_android|--emit=android|control:1||
+c1_archid_control_differs_elf_o|--arch=x86_64 -c|control:1||
+c1_archid_control_differs_macho_o|--arch=x86_64 --target=macos -c|control:1||
+c1_archid_control_differs_coff|--arch=x86_64 --target=windows -c|control:1||
+c1_archid_control_differs_asm|--arch=x86_64 --emit=asm|control:1||
+c1_archid_control_differs_legacy|--legacy --arch=x86_64|control:1||
+c1_archid_control_differs_carrier|--arch=x86_64 --freestanding --target=windows|control:1||
+c1_archid_control_differs_tnone|--arch=x86_64 --target=none|control:9||
+c1_f244_a64_linux_arm64|--targets=linux-arm64|krbo:linux-arm64||tests/fixtures/c1/asm_a64.kr
+c1_f244_a64_win_arm64|--targets=win-arm64|krbo:win-arm64||tests/fixtures/c1/asm_a64.kr
+c1_f244_a64_mac_arm64|--targets=mac-arm64|krbo:mac-arm64||tests/fixtures/c1/asm_a64.kr
+c1_f244_a64_android_arm64|--targets=android-arm64|krbo:android-arm64||tests/fixtures/c1/asm_a64.kr
+c1_f244_a64_allarm|--targets=linux-arm64,win-arm64,mac-arm64,android-arm64|krbo:linux-arm64,win-arm64,mac-arm64,android-arm64||tests/fixtures/c1/asm_a64.kr
+c1_f244_x86_linux_x64|--targets=linux-x64|krbo:linux-x64||tests/fixtures/c1/asm_x86.kr
+c1_f244_x86_win_x64|--targets=win-x64|krbo:win-x64||tests/fixtures/c1/asm_x86.kr
+c1_f244_x86_mac_x64|--targets=mac-x64|krbo:mac-x64||tests/fixtures/c1/asm_x86.kr
+c1_f244_x86_android_x64|--targets=android-x64|krbo:android-x64||tests/fixtures/c1/asm_x86.kr
+c1_f244_x86_allx86|--targets=linux-x64,win-x64,mac-x64,android-x64|krbo:linux-x64,win-x64,mac-x64,android-x64||tests/fixtures/c1/asm_x86.kr
+c1_f244_x86_armonly|--targets=win-arm64|refnote:win-arm64||tests/fixtures/c1/asm_x86.kr
+c1_f244_a64_x86only|--targets=mac-x64|refnote:mac-x64||tests/fixtures/c1/asm_a64.kr
+c1_f244_a64_mixed|--targets=linux-arm64,linux-x64|refnote:linux-x64||tests/fixtures/c1/asm_a64.kr
+c1_f244_x86_mixed|--targets=linux-x64,android-arm64|refnote:android-arm64||tests/fixtures/c1/asm_x86.kr
+c1_f244_a64_default||refnote:linux-x64||tests/fixtures/c1/asm_a64.kr
+c1_f244_x86_default||refnote:linux-arm64||tests/fixtures/c1/asm_x86.kr
+c1_f244_guard_default||krbo:linux-x64,linux-arm64,win-x64,win-arm64,mac-x64,mac-arm64,android-arm64,android-x64||tests/fixtures/c1/asm_guard.kr
+c1_f244_guard_arm|--targets=linux-arm64,mac-arm64|krbo:linux-arm64,mac-arm64||tests/fixtures/c1/asm_guard.kr
+c1_f244_nomain_linux_x64|--targets=linux-x64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_linux_arm64|--targets=linux-arm64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_win_x64|--targets=win-x64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_win_arm64|--targets=win-arm64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_mac_x64|--targets=mac-x64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_mac_arm64|--targets=mac-arm64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_android_arm64|--targets=android-arm64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_android_x64|--targets=android-x64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_nomain_skip0|--targets=linux-arm64,win-x64|refuse:error: no 'main' function found||tests/fixtures/c1/nomain.kr
+c1_f244_note_unlocated|--legacy --targets=mac-arm64|refnoteu:mac-arm64||tests/fixtures/c1/rng.kr
+c1_f244_note_os|--targets=win-x64|refnote:win-x64||tests/fixtures/win_syscall_raw.kr
+c1_253_default|--asm-strict|refnoteu:linux-x64||tests/fixtures/c1/strict.kr
+c1_253_x86|--asm-strict --targets=linux-x64|refnoteu:linux-x64||tests/fixtures/c1/strict.kr
+c1_253_arm|--asm-strict --targets=mac-arm64|refnoteu:mac-arm64||tests/fixtures/c1/strict.kr
+c1_253_mixed|--asm-strict --targets=mac-arm64,linux-x64|refnoteu:linux-x64||tests/fixtures/c1/strict.kr
+c1_253_a64_armlist_ok|--asm-strict --targets=win-arm64|krbo:win-arm64||tests/fixtures/c1/strict_a64.kr
+c1_253_a64_x86list|--asm-strict --targets=android-x64|refnoteu:android-x64||tests/fixtures/c1/strict_a64.kr
+c1_253_a64_default|--asm-strict|refnoteu:linux-x64||tests/fixtures/c1/strict_a64.kr
+c1_253_single_kept|--arch=x86_64 --asm-strict|refuse:error: unrecognized asm instruction 'foobarbaz'||tests/fixtures/c1/strict.kr
+c1_254_bo9_default||krbo:linux-x64,linux-arm64,win-x64,win-arm64,mac-x64,mac-arm64,android-arm64,android-x64||tests/fixtures/fat_builtin_overrides_9.kr
+c1_254_bo9_linux_x64|--targets=linux-x64|krbo:linux-x64||tests/fixtures/fat_builtin_overrides_9.kr
+c1_254_bo9_mac_arm64|--targets=mac-arm64|krbo:mac-arm64||tests/fixtures/fat_builtin_overrides_9.kr
+c1_254_bo9_single_kept|--arch=x86_64|elf-exec-x86_64||tests/fixtures/fat_builtin_overrides_9.kr
+c1_254_sig70_default||krbo:linux-x64,linux-arm64,win-x64,win-arm64,mac-x64,mac-arm64,android-arm64,android-x64||tests/fixtures/fat_signed_returns_70.kr
+c1_254_sig70_linux_x64|--targets=linux-x64|krbo:linux-x64||tests/fixtures/fat_signed_returns_70.kr
+c1_254_sig70_mac_arm64|--targets=mac-arm64|krbo:mac-arm64||tests/fixtures/fat_signed_returns_70.kr
+c1_254_sig70_single_kept|--arch=x86_64|elf-exec-x86_64||tests/fixtures/fat_signed_returns_70.kr
+c1_257_single|--arch=x86_64 -o a.krbo|oname:a.krbo||
+c1_257_fat|-o a.krbo|oname:a.krbo||
+c1_257_targets|--targets=linux-x64 -o a.krbo|oname:a.krbo||
+c1_257_attached|--arch=x86_64 -oa.krbo|oname:a.krbo||
+c1_257_target_windows|--target=windows -o a.krbo|oname:a.krbo||
+c1_257_dot_kept|--arch=x86_64 -o ./a.krbo|oname:a.krbo||
+c1_257_aout_kept|-o a.out|oname:a.out||
+c1_258_o_missing|--arch=x86_64 -o|orefuse:error: -o requires an output path||
+c1_258_o_missing_c|-c -o|orefuse:error: -o requires an output path||
+c1_258_o_missing_pe|--emit=pe -o|orefuse:error: -o requires an output path||
+c1_258_check_o_missing|check -o|orefuse:error: -o requires an output path||
+c1_258_minfit_missing|lc --min-fitness|orefuse:error: --min-fitness requires a number||
+c1_258_promote_missing|--promote|orefuse:error: --promote requires a proposal name||
+c1_258_deprecate_missing|--deprecate|orefuse:error: --deprecate requires a proposal name||
+c1_258_reject_missing|--reject|orefuse:error: --reject requires a proposal name||
+c1_258_minfit_eq_empty|lc --min-fitness=|orefuse:error: --min-fitness= requires a value||
+c1_258_promote_eq_empty|--promote=|orefuse:error: --promote= requires a value||
+c1_258_deprecate_eq_empty|--deprecate=|orefuse:error: --deprecate= requires a value||
+c1_258_reject_eq_empty|--reject=|orefuse:error: --reject= requires a value||
+c1_258_testlisting_eq_empty|--arch=x86_64 --test-listing=|orefuse:error: --test-listing= requires a value||
+c1_258_testsplog_eq_empty|--arch=x86_64 --test-sp-site-log=|orefuse:error: --test-sp-site-log= requires a value||
+c1_258_testa64low_eq_empty|--arch=arm64 --test-a64-low-limit=|orefuse:error: --test-a64-low-limit= requires a value||
+c1_258_dumpparser_eq_empty|--arch=x86_64 --dump-argv-parser=|orefuse:error: --dump-argv-parser= requires a path||
+c1_258_dumpquoter_eq_empty|--arch=x86_64 --dump-argv-quoter=|orefuse:error: --dump-argv-quoter= requires a path||
+c1_258_minfit_nonnum|lc --min-fitness=abc|orefuse:error: --min-fitness= wants a non-negative decimal number, got 'abc'||
+c1_258_minfit_next_nonnum|lc --min-fitness abc|orefuse:error: --min-fitness wants a non-negative decimal number, got 'abc'||
+c1_259_modabi_bad|--arch=x86_64 --emit=arxmod --mod-name=m --mod-abi=zz|orefuse:error: --mod-abi= wants a decimal or 0x-prefixed hex number||
+c1_259_modversion_bad|--arch=x86_64 --emit=arxmod --mod-name=m --mod-abi=1 --mod-version=zz|orefuse:error: --mod-version= wants a decimal or 0x-prefixed hex number||
+c1_259_modabi_empty|--arch=x86_64 --emit=arxmod --mod-name=m --mod-abi=|orefuse:error: --mod-abi= wants a decimal or 0x-prefixed hex number||
+c1_258_o_flagval|-o --arch=arm64|orefuse:error: -o expects an output path, got the flag '--arch=arm64'; to name a file starting with '-', write ./--arch=arm64||
+c1_258_o_o|-o -o|orefuse:error: -o expects an output path, got the flag '-o'; to name a file starting with '-', write ./-o||
+c1_258_o_attached_flag|-o-x|orefuse:error: -o expects an output path, got the flag '-x'; to name a file starting with '-', write ./-x||
+c1_258_o_dash|-o -|orefuse:error: -o expects an output path, got '-'; to name a file starting with '-', write ./-||
+c1_258_o_dotslash_kept|--arch=x86_64 -o ./-x|oname:-x||
+c1_258_promote_flagval|--promote --ci|orefuse:error: --promote expects a proposal name, got the flag '--ci'||
+c1_258_minfit_flagval|lc --min-fitness --ci|orefuse:error: --min-fitness expects a number, got the flag '--ci'||
+c1_257_c_o|-c -o a.krbo|oname:a.krbo||
+c1_257_pe_o|--emit=pe -o a.krbo|oname:a.krbo||
+c1_257_check_o|check -o a.krbo|oname:||
+c1_258_minfit_trailing|lc --min-fitness=12abc|orefuse:error: --min-fitness= wants a non-negative decimal number, got '12abc'||
+c1_258_minfit_next_trailing|lc --min-fitness 12abc|orefuse:error: --min-fitness wants a non-negative decimal number, got '12abc'||
+c1_258_a64low_nonnum|--arch=arm64 --test-a64-low-limit=abc|orefuse:error: --test-a64-low-limit= wants a non-negative decimal number, got 'abc'||
+c1_258_a64low_trailing|--arch=arm64 --test-a64-low-limit=12abc|orefuse:error: --test-a64-low-limit= wants a non-negative decimal number, got '12abc'||

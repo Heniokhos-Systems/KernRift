@@ -1,0 +1,3 @@
+fn helper() -> uint64 {
+    return 1
+}

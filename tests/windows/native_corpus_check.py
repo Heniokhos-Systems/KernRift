@@ -2,7 +2,13 @@
 """native_corpus_check.py -- tests/windows/native_corpus.lst against the row
 names of tests/run_tests.sh (#143, A15-17 review finding 1). KernRift tree.
 
-  native_corpus_check.py <run_tests.sh> <native_corpus.lst> <native_corpus_nonrows.lst>
+  native_corpus_check.py <run_tests.sh> <native_corpus.lst> <native_corpus_nonrows.lst> [<matrix> ...]
+
+Each <matrix> is a data file whose lines are suite rows run by a loop in
+run_tests.sh (tests/c1_matrix.lst: `name|flags|expect|arch_id|source`, `#`
+comments): its row names (the first `|` field) are invisible to the static scan
+of run_tests.sh, so they are added to its names here -- a Windows-pattern matrix
+row missing from the corpus fails exactly like a missing run_tests.sh row.
 
 The native corpus is every suite row whose name matches
 wine|windows|win_|_win|c7_ (the qemu rows, Linux arm64, excluded) and is made of
@@ -37,13 +43,26 @@ def load(path):
 
 
 def main(argv):
-    if len(argv) != 4:
+    if len(argv) < 4:
         print(__doc__)
         return 2
     src = open(argv[1], encoding='utf-8', errors='replace').read()
     corpus, nonrows = load(argv[2]), load(argv[3])
     cset, nset = set(corpus), set(nonrows)
     tokens = set(t for t in re.findall(r'[A-Za-z0-9_]+', src) if PAT.search(t) and 'qemu' not in t)
+    nmatrix = 0
+    for mpath in argv[4:]:
+        for l in open(mpath, encoding='utf-8'):
+            if not l.strip() or l.startswith('#'):
+                continue
+            name = l.split('|', 1)[0].strip()
+            nmatrix += 1
+            if not re.fullmatch(r'[A-Za-z0-9_]+', name):
+                print('native_corpus_check: %s: matrix row name %r is not [A-Za-z0-9_] (native_judge.py cannot read it)'
+                      % (mpath, name))
+                return 1
+            if PAT.search(name) and 'qemu' not in name:
+                tokens.add(name)
     # $-templates: word characters around $X / ${X} parts
     tmpl = set()
     for m in re.finditer(r'(?<![A-Za-z0-9_$])((?:[A-Za-z0-9_]|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\$[A-Za-z_][A-Za-z0-9_]*)+)', src):
@@ -82,8 +101,9 @@ def main(argv):
                        '(add its rows, or list it in native_corpus_nonrows.lst)' % t)
     for b in bad:
         print('native_corpus_check: ' + b)
-    print('native_corpus_check: %d corpus rows (%d whole names, %d from $-templates), %d non-rows, %d problems'
-          % (len(cset), len(cset & tokens), ntmpl, len(nset), len(bad)))
+    print('native_corpus_check: %d corpus rows (%d whole names, %d from $-templates), %d non-rows, '
+          '%d matrix rows read, %d problems'
+          % (len(cset), len(cset & tokens), ntmpl, len(nset), nmatrix, len(bad)))
     return 1 if bad else 0
 
 
