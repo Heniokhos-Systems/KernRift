@@ -125,6 +125,21 @@ rows that skipped there were reported as unexplained skips of a full run instead
 toolchain. Each `qemu_bin <name>` call now counts as a probe for `qemu-<name>` (row
 `readme_count_gate_sees_qemu_bin`).
 
+**The suite keeps all its scratch in one place, and checks there is room first (#250, #261–#264).**
+`tests/run_tests.sh` wrote ~1600 literal `/tmp/<name>_<pid>` paths whatever `TMPDIR` said; on a
+host whose `/tmp` is a tmpfs with a per-user quota (which `df` does not show) a full run stopped
+with "Disk quota exceeded" part-way and lost the rows after it. Every scratch file now lives in
+the run's private directory under one root — `KR_TEST_TMP`, else `TMPDIR`, else `/tmp` — removed
+at exit and on an interrupt. The root must be absolute, outside the checkout, plain characters
+and allow running programs; anything else stops the suite with a message (#262). Before a row
+runs, the free space of the root — including a disk or user quota — is checked against
+`tests/helpers/tmp_headroom_floor.txt` (measured); `KR_TEST_MIN_FREE_GIB` /
+`KR_TEST_MIN_FREE_INODES` lower it on a small host. The `make check` / CI scripts and
+`make bootstrap` (#264: no more fixed `/tmp/krc3_bs` names) use the same root, unchanged when
+neither variable is set. The qemu example checkers clean up their logs, dumps and sockets when a
+time limit stops them (#261), and `examples/tutorial-btree` puts its database at `argv[1]`, else
+`$TMPDIR` (#263).
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF
