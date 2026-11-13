@@ -9091,15 +9091,24 @@ fn c1_os_name(uint64 kind) -> uint64 {
 }
 
 // R1's refusal (note 2.4): <E> the --emit= as typed, <T> the --target= value
-// as typed; the container phrases follow the emit's and the target's OS.
+// as typed; the container phrases follow the emit's and the target's OS. With
+// --freestanding typed (#269) the two remedies say what each flag builds
+// WITH --freestanding: --target=macos|windows alone is the ELF carrier, not a
+// Mach-O/PE, and an ELF-family --emit= is a freestanding ELF, not a static
+// executable -- the message used to promise the hosted container.
 fn c1_r1_die(uint64 eos, uint64 tkind, uint64 tstr) {
+    uint64 fs = cli_freestanding_flag
     uint64 ec = "a static ELF executable"
+    if fs != 0 { ec = "a freestanding ELF" }
     if eos == 2 { ec = "a Mach-O executable" }
     if eos == 3 { ec = "a PE executable" }
     if eos == 4 { ec = "an Android PIE ELF" }
     uint64 tc = "a Linux ELF executable"
+    if fs != 0 { tc = "a freestanding ELF" }
     if tkind == 2 { tc = "a Mach-O executable" }
     if tkind == 3 { tc = "a PE executable" }
+    if tkind == 2 && fs != 0 { tc = "an ELF carrying macOS-ABI code (the carrier)" }
+    if tkind == 3 && fs != 0 { tc = "an ELF carrying Windows-ABI code (the carrier)" }
     if tkind == 4 { tc = "an Android PIE ELF" }
     c1_w("error: ")
     c1_w(cli_emit_flag)
@@ -9117,15 +9126,23 @@ fn c1_r1_die(uint64 eos, uint64 tkind, uint64 tstr) {
     c1_w(c1_os_name(tkind))
     c1_w(". Drop ")
     c1_w(cli_emit_flag)
-    c1_w(" (--target=")
+    if fs != 0 { c1_w(" (--freestanding --target=") } else { c1_w(" (--target=") }
     c1_w(tstr)
     c1_w(" alone builds ")
     c1_w(tc)
     c1_w("), or drop --target=")
     c1_w(tstr)
-    c1_w(" (")
-    c1_w(cli_emit_flag)
-    c1_w(" alone builds for ")
+    if fs != 0 {
+        c1_w(" (--freestanding ")
+        c1_w(cli_emit_flag)
+        c1_w(" alone builds ")
+        c1_w(ec)
+        c1_w(" for ")
+    } else {
+        c1_w(" (")
+        c1_w(cli_emit_flag)
+        c1_w(" alone builds for ")
+    }
     c1_w(c1_os_name(eos))
     c1_w(")\n")
     fatal_exit()
