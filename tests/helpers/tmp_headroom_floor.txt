@@ -1,0 +1,6 @@
+# Free-space floors of tests/run_tests.sh's scratch root (#250), read at suite
+# start; KR_TEST_MIN_FREE_GIB / KR_TEST_MIN_FREE_INODES override them.
+# PROVISIONAL: the plan's 6 GiB until the measurement run replaces this file
+# with the measured peak x 1.5 and its derivation.
+min_free_gib 6
+min_free_inodes 200000
