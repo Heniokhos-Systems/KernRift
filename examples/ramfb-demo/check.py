@@ -18,10 +18,51 @@ Usage:  check.py <image> [--keep-ppm PATH]
 """
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+
+
+# Scratch files and the qemu child are registered here and removed / killed
+# whatever ends the run: a SystemExit, an error, or the SIGTERM the test
+# suite's `timeout` sends (the handler below turns it into SystemExit, so this
+# runs; #261 -- a TERMed check used to leave its serial log, PPM dumps and
+# socket behind). Serial logs and PPM dumps go to tempfile.gettempdir()
+# ($TMPDIR; under the suite, its private scratch directory). The QMP socket
+# stays in /tmp: AF_UNIX paths are capped at 107 bytes and a socket under a
+# deep $TMPDIR makes qemu exit 1 with no attribution.
+_SCRATCH = []
+_PROCS = []
+
+
+def _cleanup():
+    for p in _PROCS:
+        if p.poll() is None:
+            p.kill()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                pass
+    for f in _SCRATCH:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def _scratch(name):
+    path = os.path.join(tempfile.gettempdir(), name)
+    _SCRATCH.append(path)
+    return path
+
+
+def _sock(name):
+    path = "/tmp/" + name
+    _SCRATCH.append(path)
+    return path
 
 # (name, x, y, (r, g, b)) -- chosen to avoid every boundary the demo draws.
 CHECKS = [
@@ -65,7 +106,7 @@ def read_ppm(path):
 
 
 def boot_and_dump(image, ppm, serial):
-    sock = "/tmp/ramfb_qmp_%d.sock" % os.getpid()
+    sock = _sock("ramfb_qmp_%d.sock" % os.getpid())
     for f in (ppm, serial, sock):
         if os.path.exists(f):
             os.remove(f)
@@ -75,6 +116,7 @@ def boot_and_dump(image, ppm, serial):
          "-vga", "none", "-device", "ramfb",
          "-qmp", "unix:%s,server,nowait" % sock],
         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    _PROCS.append(p)
     try:
         for _ in range(200):
             if os.path.exists(sock):
@@ -121,8 +163,8 @@ def main():
     keep = None
     if "--keep-ppm" in sys.argv:
         keep = sys.argv[sys.argv.index("--keep-ppm") + 1]
-    ppm = keep or "/tmp/ramfb_check_%d.ppm" % os.getpid()
-    serial = "/tmp/ramfb_check_%d.txt" % os.getpid()
+    ppm = keep or _scratch("ramfb_check_%d.ppm" % os.getpid())
+    serial = _scratch("ramfb_check_%d.txt" % os.getpid())
 
     boot_and_dump(image, ppm, serial)
 
@@ -160,4 +202,8 @@ def main():
     print("PASS: %d/%d pixel checks" % (len(CHECKS), len(CHECKS)))
 
 
-main()
+signal.signal(signal.SIGTERM, lambda signo, frame: sys.exit(128 + signo))
+try:
+    main()
+finally:
+    _cleanup()

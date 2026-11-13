@@ -21,10 +21,51 @@ Usage:  check.py <image> [--keep-ppm PATH]
 """
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+
+
+# Scratch files and the qemu child are registered here and removed / killed
+# whatever ends the run: a SystemExit, an error, or the SIGTERM the test
+# suite's `timeout` sends (the handler below turns it into SystemExit, so this
+# runs; #261 -- a TERMed check used to leave its serial log, PPM dumps and
+# socket behind). Serial logs and PPM dumps go to tempfile.gettempdir()
+# ($TMPDIR; under the suite, its private scratch directory). The QMP socket
+# stays in /tmp: AF_UNIX paths are capped at 107 bytes and a socket under a
+# deep $TMPDIR makes qemu exit 1 with no attribution.
+_SCRATCH = []
+_PROCS = []
+
+
+def _cleanup():
+    for p in _PROCS:
+        if p.poll() is None:
+            p.kill()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                pass
+    for f in _SCRATCH:
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def _scratch(name):
+    path = os.path.join(tempfile.gettempdir(), name)
+    _SCRATCH.append(path)
+    return path
+
+
+def _sock(name):
+    path = "/tmp/" + name
+    _SCRATCH.append(path)
+    return path
 
 # Scene geometry, from main.kr. The cursor starts at (320,240); "Click me"
 # spans x 70..230, y 110..154, so (150,132) is comfortably inside it.
@@ -45,7 +86,7 @@ BTN2_RECT = (264, 114, 416, 150)
 
 class Qemu:
     def __init__(self, image, serial):
-        self.sock = "/tmp/mgui_%d.sock" % os.getpid()
+        self.sock = _sock("mgui_%d.sock" % os.getpid())
         for f in (serial, self.sock):
             if os.path.exists(f):
                 os.remove(f)
@@ -55,6 +96,7 @@ class Qemu:
              "-device", "ramfb", "-serial", "file:" + serial,
              "-qmp", "unix:%s,server,nowait" % self.sock],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        _PROCS.append(self.p)
         for _ in range(200):
             if os.path.exists(self.sock):
                 break
@@ -113,9 +155,9 @@ def main():
     keep = None
     if "--keep-ppm" in sys.argv:
         keep = sys.argv[sys.argv.index("--keep-ppm") + 1]
-    ppm = keep or "/tmp/mgui_%d.ppm" % os.getpid()
-    ppm_before = (keep + ".before") if keep else "/tmp/mgui_%d_b.ppm" % os.getpid()
-    serial = "/tmp/mgui_%d.txt" % os.getpid()
+    ppm = keep or _scratch("mgui_%d.ppm" % os.getpid())
+    ppm_before = (keep + ".before") if keep else _scratch("mgui_%d_b.ppm" % os.getpid())
+    serial = _scratch("mgui_%d.txt" % os.getpid())
 
     q = Qemu(image, serial)
     fail = []
@@ -205,4 +247,8 @@ def main():
           "keyboard alive while mouse streamed")
 
 
-main()
+signal.signal(signal.SIGTERM, lambda signo, frame: sys.exit(128 + signo))
+try:
+    main()
+finally:
+    _cleanup()
