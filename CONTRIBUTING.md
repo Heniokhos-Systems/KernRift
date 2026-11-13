@@ -28,7 +28,7 @@ first failure:
    compiles itself to a stable fixed point).
 2. **Test suite** — run it as `make test`, never as bare `bash
    tests/run_tests.sh` (which defaults `KRC` to `build/krc3` with no `--arch`
-   and reports mass failures on a healthy tree). 4307 tests on this tree.
+   and reports mass failures on a healthy tree). 4310 tests on this tree.
    Its scratch files live in one private directory under `KR_TEST_TMP`
    (else `TMPDIR`, else `/tmp`), which must be absolute, outside the
    checkout and exec-capable; the suite first checks the free space there

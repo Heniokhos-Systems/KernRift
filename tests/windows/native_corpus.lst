@@ -265,6 +265,7 @@ c1_fs_windows_arm64_elfexe
 c1_fs_windows_arm64_noemit
 c1_fs_windows_macho
 c1_fs_windows_noarch
+c1_fs_noarch_windows_macho
 c1_fs_windows_x86_64_elfexe
 c1_fs_windows_x86_64_noemit
 c1_g_alias_win
