@@ -6197,6 +6197,7 @@ fn gen_stmt_a64(uint64 node) {
     // Inline assembly — see x86_64 gen_stmt for the constraint contract.
     if kind == 43 {
         win_asm_refuse(node)
+        asm_check_constraints(node, 1)     // #214/#218: located, every clause
         uint32 cons_head = ast_data3(node)
         uint64 wch_a = cons_head
 
@@ -6210,14 +6211,24 @@ fn gen_stmt_a64(uint64 node) {
                 uint64 wrtok = rtok
                 uint64 wvtok = vtok
                 // Both checks as on x86_64 legacy and every IR backend
-                // (#204): an unknown register name and an operand that is not
-                // a local (a static, an undeclared name) used to be skipped
-                // here in silence, so the binding vanished.
-                uint64 rcode = a64_reg_code_strict(wrtok)
+                // (#204): an unknown register name (refused above by
+                // asm_check_constraints) and an operand that is not a local (a
+                // static, an undeclared name) used to be skipped here in
+                // silence, so the binding vanished.
+                uint64 rcode = a64_reg_code(wrtok)
                 uint64 voff  = var_lookup(wvtok)
                 asm_require_local(wvtok, voff)
                 if rcode != 0xFFFF && voff != 0xFFFFFFFF {
-                    emit_a64_ldr(rcode, 31, a64_var_base + voff)
+                    uint64 ioff = a64_var_base + voff
+                    if ioff > 32760 {
+                        // Far slot (#219): address through the target itself.
+                        // emit_a64_ldr's far form uses x16 as its scratch,
+                        // which an earlier in(.. -> x16) may already hold.
+                        emit_a64_mov_imm(rcode, ioff)
+                        emit_a64(0xF8606800 | (rcode << 16) | (31 << 5) | rcode)   // ldr xR, [sp, xR]
+                    } else {
+                        emit_a64_ldr(rcode, 31, ioff)
+                    }
                 }
             }
             uint32 nxti = ast_next(wci)
@@ -6243,6 +6254,7 @@ fn gen_stmt_a64(uint64 node) {
         }
 
         // Outputs: `str xN, [sp, #slot]`
+        ir_asm_note_block(node)    // its registers, for a far slot's scratch (#219)
         uint64 wco = wch_a
         while wco != 0 {
             uint32 ck2 = ast_data1(wco)
@@ -6251,14 +6263,24 @@ fn gen_stmt_a64(uint64 node) {
                 uint32 vtok2 = ast_data3(wco)
                 uint64 wrtok2 = rtok2
                 uint64 wvtok2 = vtok2
-                uint64 rcode2 = a64_reg_code_strict(wrtok2)
+                uint64 rcode2 = a64_reg_code(wrtok2)
                 uint64 voff2  = var_lookup(wvtok2)
                 // A const or a whole static array/struct gets its own message
                 // before asm_require_local's (#206/#207).
                 if voff2 == 0xFFFFFFFF && static_lookup(wvtok2) != 0xFFFFFFFF { static_write_check(wvtok2) }
                 asm_require_local(wvtok2, voff2)
                 if rcode2 != 0xFFFF && voff2 != 0xFFFFFFFF {
-                    emit_a64_str(rcode2, 31, a64_var_base + voff2)
+                    uint64 ooff = a64_var_base + voff2
+                    if ooff > 32760 {
+                        // Far slot (#219): emit_a64_str's far form uses x16
+                        // (x17), which a later out(x16 -> v) still has to
+                        // read. Use a scratch the block does not name.
+                        uint64 os = ir_asm_far_scratch(9, 17, rcode2, "no scratch register left to store this out() value to its stack slot: the asm block names every one of x9-x17; leave one of them out of its in()/out()/clobbers()")
+                        emit_a64_mov_imm(os, ooff)
+                        emit_a64(0xF8206800 | (os << 16) | (31 << 5) | rcode2)   // str xR, [sp, xS]
+                    } else {
+                        emit_a64_str(rcode2, 31, ooff)
+                    }
                 }
             }
             uint32 nxto = ast_next(wco)

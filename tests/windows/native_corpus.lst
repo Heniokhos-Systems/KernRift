@@ -216,3 +216,7 @@ read_exact_rejects_errno_runner_windows_wine
 # defect-sweep: its Windows-pattern rows, added at its merge
 legacy_file_open_write_holds_the_file_wine
 runner_windows_slots_are_claimed
+# M2 (#214): the inline-asm Windows rows
+asm_live_across_windows_wine
+asm_named_windows_wine
+asm_live_across_windows_arm64_build

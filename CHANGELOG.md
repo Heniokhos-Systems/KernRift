@@ -25,6 +25,27 @@ static's old value. Also `volatile { … -> s }`, every architecture, `--O0` inc
 `--emit=obj` and `--emit=lkm` were correct. The destination now resolves like `s = …`. In `main`
 the bug was usually hidden by the inliner (#189).
 
+**Fixed: an inline-asm block could silently change a variable it did not name (#214).** The
+register allocator did not know which registers an `asm` block writes, so a variable still needed
+after the block — including a parameter and an `in()` variable — could be held in one of the
+block's `out()`, `in()` or `clobbers()` registers and came back with the block's value. Every IR
+backend (x86_64, arm64, riscv32, xtensa), every target, `--O0` included; on x86_64 `--legacy`,
+`--emit=obj` and `--emit=lkm`, the first parameter when the block names `rbx` or writes it with
+`out()`. `out()`/`in()` values in spill slots could be delivered from the wrong register (on
+arm64 also through the address register of a large frame, `--legacy` and `-c` included, #219),
+and on arm64 an `f64` kept in d8–d15 did not survive a block that uses those registers (#220). A
+block must list every integer register it writes (LANGUAGE.md §14, which also drops the false
+claim that pinned parameters were "handled correctly"). Programs whose blocks list their
+registers compile to the same code, except where a value had to move out of a register the block
+writes: 65 of 12879 surveyed downstream builds change (ApexRift ×4, Morgana_VM; KernRift's own
+examples, benchmarks and tests, CarRift and Comp_in_KernRift do not) — 58 of 11171 in 20
+configurations each (whose two `--target=windows` ones emitted ELF files, #230/#233) and 7 of 1708
+PE builds (`--target=windows --emit=pe`, x86_64 and arm64; all 7 x86_64, in the same files) — and
+none of them was miscompiled — a spilled `out()` value is now stored straight from its register,
+and a value or pinned parameter moves off `rbx`/`r12` (Morgana_VM's `cpuid` fixtures record the
+bug met in the field). Not every ApexRift kernel image is byte-identical (ApexRift-d0's `kernel.kr`
+image/arx/uefi differ, harmlessly). The compiler itself is byte-identical. Rebuild anything with inline asm.
+
 ### Correctness fixes that stop a program from building
 
 Emergency correctness breakage (ABI_POLICY.md), no deprecation period:
@@ -49,7 +70,27 @@ program in the surveyed trees (KernRift, ApexRift ×4, CarRift, Morgana_VM, Comp
 no compiler output changes; one test fixture (`asmin.kr`, x86 asm) no longer builds for arm64
 `--legacy`/`-c`, which nothing does. Bootstrap fixed point 1503600 bytes.
 
-### Test suite
+Inline asm (#214, #215, #218, #219), the same policy:
+
+- **`clobbers()` names are checked (#214)**: a name that is not an integer register of the
+  target (`memory`, `cc`, `eax`, `xmm0`, `w19`, `lr`) is an error at the name; it used to be
+  ignored, so the compiler did not know the block wrote anything. Migration: list the 64-bit
+  integer register, or drop `memory`/`cc` — an asm block is already ordered with the memory
+  accesses around it and flags are never live across one. Unknown `in()`/`out()` names, already
+  errors, now name their location and give the same hints.
+- **The stack pointer cannot be an asm `in()`/`out()`/`clobbers()` register (#218)** — `rsp`,
+  arm64 `sp`, riscv32 `sp`/`x2`, xtensa `a1`. Migration: move the value through another register.
+- **xtensa asm constraints use xtensa register names `a0`, `a2`–`a15` (#215)**; they took the
+  x86_64 names, so `in(x -> rcx)` wrote `a1`, the stack pointer. Migration: rename.
+- **An arm64 asm `out()` into a variable in a far stack slot, whose block names every one of
+  x9–x17 (xtensa: a8–a11), is an error (#219)**: no register is left to address the slot.
+  Migration: leave one of them out of the block.
+
+These are emergency correctness breakage under ABI_POLICY.md: an ignored or misread constraint
+register is a silent miscompile. No surveyed program used `clobbers()`, named the stack pointer
+or used xtensa constraints.
+
+### Tests / infrastructure
 
 **The suite runs cleanly on an arm64 host and on hosts with an address that has no broadcast
 (#211, #212, #213).** One helper (`arch_runner` in `tests/run_tests.sh`) now decides how a row

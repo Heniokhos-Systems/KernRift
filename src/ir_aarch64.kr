@@ -618,6 +618,11 @@ fn ir_a64_fpr_alloc() {
     while vi >= 1 {
         if ir_vreg_fkind_get(vi) != 1 { vi = vi - 1; continue }
         if ir_uf_find(vi) != vi { vi = vi - 1; continue }
+        // Live across an inline-asm block: no d8-d15 home (#220). The
+        // constraint language cannot name a SIMD register, so no ban can
+        // tell the block it must keep one; the value stays in its GPR colour
+        // or slot instead (x86_64's ir_x86_xmm_mark_unsafe, same rule).
+        if (ir_color_ban_get(vi) >> 31) != 0 { vi = vi - 1; continue }
         // Collect d-colours already taken by interfering neighbours.
         uint64 used = 0
         uint64 nw = 0
@@ -1578,7 +1583,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     // low 32 bits of src1, rotates by src2 mod 32, and zeroes the upper
     // half — bit-identical to x86's `ROR r32, cl` lowering, so the result
     // is w32-clean and downstream `& 0xFFFFFFFF` masks stay elided
-    // (const-fold relies on that, see ir.kr:13716). The hardware count is
+    // (const-fold relies on that, see ir.kr:14073). The hardware count is
     // taken mod datasize, matching the documented `src2 mod imm` contract
     // without an explicit mask (unlike riscv, which must AND with 31).
     if op == 137 {
@@ -1875,9 +1880,20 @@ fn ir_emit_arm64_insn(uint64 ii) {
                 uint64 phys_src = imm - 100
                 if dst_r != 0xFFFFFFFF {
                     emit_a64_mov(dst_r, phys_src)
+                } else if ir_a64_fpr_home(dest_v) != 0xFFFFFFFF || ir_a64_spill_offset(dest_v) <= 32760 {
+                    // Straight from the asm register (#214): staging it
+                    // through x9 destroyed x9 before a later out(x9 -> v).
+                    ir_a64_emit_store_spill(phys_src, dest_v)
                 } else {
-                    emit_a64_mov(9, phys_src)
-                    ir_a64_emit_store_spill(9, dest_v)
+                    // Far slot (#219): ir_a64_str_sp would build the address
+                    // in x11 -- `out(x11 -> o)` stored x11 to [x11], and a
+                    // later out(x11) read the address. Use a scratch the block
+                    // does not name instead.
+                    uint64 fo_off = ir_a64_spill_offset(dest_v)
+                    uint64 fo_s = ir_asm_far_scratch(9, 17, phys_src, "no scratch register left to store this out() value to its stack slot: the asm block names every one of x9-x17; leave one of them out of its in()/out()/clobbers()")
+                    emit_a64_mov_imm(fo_s, fo_off)
+                    ir_a64_add_sp_reg(fo_s, fo_s)
+                    emit_a64_str(phys_src, fo_s, 0)
                 }
             } else {
                 // Overflow param (8+): load from caller stack frame
@@ -1949,10 +1965,21 @@ fn ir_emit_arm64_insn(uint64 ii) {
                 emit_a64_mov(target, src_reg)
             }
         } else if imm >= 100 {
-            // Direct register target (ASM I/O constraints)
+            // Direct register target (ASM I/O constraints). A spilled source
+            // is loaded straight into the target (#214: through x9 it
+            // destroyed an earlier in(.. -> x9)); a far slot addresses
+            // through the target itself, never x11 (#219: an earlier in()
+            // may already have loaded x11). The moves stay in IR order --
+            // the allocator's bans (ir_seed_asm_bans) rely on it.
             uint64 phys_target = imm - 100
-            uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
-            emit_a64_mov(phys_target, src_reg)
+            if ir_get_phys_reg(s1_v) == 0xFFFFFFFF && ir_a64_fpr_home(s1_v) == 0xFFFFFFFF && s1_v != 0 && ir_a64_spill_offset(s1_v) > 32760 {
+                emit_a64_mov_imm(phys_target, ir_a64_spill_offset(s1_v))
+                ir_a64_add_sp_reg(phys_target, phys_target)
+                emit_a64_ldr(phys_target, phys_target, 0)
+            } else {
+                uint64 src_reg = ir_a64_resolve_src(s1_v, phys_target)
+                emit_a64_mov(phys_target, src_reg)
+            }
         } else {
             // Overflow arg (AAPCS64: the 9th+ parameter). The caller's
             // frame already reserves IR_A64_OVERFLOW_RESERVE bytes at
@@ -2670,14 +2697,14 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if op == 94 {
         uint64 addr_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 val_reg = ir_a64_resolve_src(s2_v, 10)
-        // Width is in the DEST slot (ir.kr:5656 for device fields, plus the
+        // Width is in the DEST slot (ir.kr:5640 for device fields, plus the
         // vstore8/16/32/64 builtins at ir.kr:2729/2740/2424/2435).
         // NOT dst_r: that is computed near the top of this function from
         // dest_v, which for op 94 is the width, not a vreg id.
         uint64 vw = dest_v
         // Size is bits 31:30 — STLRB / STLRH / STLR Wt / STLR Xt.
         // An unrecognised width takes the narrowest form, matching x86
-        // (ir.kr:11625): losing data locally beats corrupting neighbours.
+        // (ir.kr:11982): losing data locally beats corrupting neighbours.
         // Unreachable today — parser.kr:4300-4305 is the only producer and it
         // yields 1/2/4/8 only — but defensive, and cheap.
         uint64 vs_base = 0x089FFC00
@@ -2717,6 +2744,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
     if op == 96 {
         uw_sp_moves()           // #143 option C: opaque, may move SP
         uint64 asm_node = s1_v
+        ir_asm_note_block(asm_node)   // for its out() copies (#219)
         uint32 single_tok = ast_data1(asm_node)
         uint64 ws = single_tok
         if ws != 0 {

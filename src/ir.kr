@@ -5466,6 +5466,11 @@ fn ir_lower_stmt(uint64 node) {
     if kind == 43 {
         // #143: on Windows, asm that writes the frame pointer (or x18) is refused.
         win_asm_refuse(node)
+        // #214/#215/#218: every in()/out()/clobbers() register is a register
+        // of this target and not the stack pointer -- or a located error here,
+        // in lowering, before anything below (or the allocator's ban scan,
+        // ir_seed_asm_bans) resolves it with asm_reg_try.
+        asm_check_constraints(node, target_arch)
         // For ASM blocks, we emit the instructions directly during x86 emission.
         // The IR_ASM_BLOCK carries the AST node index for the x86 emitter.
         // Handle I/O constraints:
@@ -5488,24 +5493,13 @@ fn ir_lower_stmt(uint64 node) {
                 // Same silent-skip family as the register-name sentinel.
                 asm_require_local(vtok, var_v)
                 // Store the vreg as src in the instruction imm (via IR_ARG).
-                // Register-name resolution is arch-specific: riscv32 (arch 2)
-                // uses rv_reg_code (a0-a7/s0-s11/x0-x31, fails loud on an
-                // unknown name), arm64 (arch 1) uses a64_reg_code_strict
-                // (fails loud on anything but x0-x30), and x86 (arch 0) uses
-                // x86_reg_code. arm64 used to inherit the x86 lookup here;
-                // IR_REFERENCE §13 item 11 records that as closed, and the
-                // second site below makes the same three-way choice.
+                // The register comes from the one per-arch resolver
+                // (asm_reg_try: x86_64, arm64 x0-x30, riscv32, xtensa a0-a15);
+                // asm_check_constraints above already refused any name it
+                // does not know. arm64 used to inherit the x86 lookup here
+                // (IR_REFERENCE §13 item 11), xtensa until #215.
                 uint32 rtok = ast_data2(wci)
-                uint64 rcode = 0
-                if target_arch == 2 {
-                    rcode = rv_reg_code(rtok)
-                } else {
-                    if target_arch == 1 {
-                        rcode = a64_reg_code_strict(rtok)
-                    } else {
-                        rcode = x86_reg_code(rtok)
-                    }
-                }
+                uint64 rcode = asm_reg_try(rtok, target_arch)
                 if rcode != 0xFFFF {
                     // Move var value to the target physical register
                     ir_emit(IR_ARG, 0, var_v, 0, rcode + 100, ir_current_bb)
@@ -5537,18 +5531,8 @@ fn ir_lower_stmt(uint64 node) {
                 uint64 ao_v = ir_var_get(vtok2)
                 if ao_v == 0xFFFFFFFF && static_lookup(vtok2) != 0xFFFFFFFF { static_write_check(vtok2) }
                 asm_require_local(vtok2, ao_v)
-                // Same arch-gated dispatch as the IN site above: riscv32
-                // rv_reg_code, arm64 a64_reg_code_strict, x86 x86_reg_code.
-                uint64 rcode2 = 0
-                if target_arch == 2 {
-                    rcode2 = rv_reg_code(rtok2)
-                } else {
-                    if target_arch == 1 {
-                        rcode2 = a64_reg_code_strict(rtok2)
-                    } else {
-                        rcode2 = x86_reg_code(rtok2)
-                    }
-                }
+                // Same resolver as the IN site above.
+                uint64 rcode2 = asm_reg_try(rtok2, target_arch)
                 if rcode2 != 0xFFFF {
                     uint64 out_v = ir_new_vreg()
                     // Use IR_COPY with a special marker: src1=0, imm=rcode+100
@@ -6992,6 +6976,373 @@ fn ir_color_ceil_get(uint64 vreg) -> uint64 {
     if wmc > IR_NUM_REGS { return IR_NUM_REGS }
     return wmc
 }
+// ---- Inline-asm register bans (#214, #220) --------------------------------
+// The allocator used to know nothing about the registers an asm block writes:
+// in() moves load registers, the block itself writes whatever it writes, and
+// out() copies read registers -- and none of those registers reached the
+// interference graph. So a value still needed after the block (a parameter,
+// an in() variable, a loop counter) could be coloured into one of them and
+// came back holding the block's value: every IR backend, every target, --O0
+// included.
+//
+// ir_color_ban holds, per vreg, a mask of COLOURS the vreg must not take
+// (bit c = colour c), seeded by ir_seed_asm_bans from each asm "window":
+//
+//   the contiguous in() group before the block  (IR_ARG, op 51, imm >= 100)
+//   the block                                   (IR_ASM_BLOCK, op 96)
+//   the contiguous out() group after it         (IR_COPY, op 61, src1 0,
+//                                                 imm >= 100)
+//
+// W, the block's written set, is every register its in(), out() and
+// clobbers() name (an in() register may be overwritten by the block; the
+// input variable must survive that). At every window instruction except the
+// last out() copy, each vreg live AFTER that instruction is banned from W:
+//   - in() group: a source a later move still reads cannot sit in an earlier
+//     move's target (a source dead after its own move may: the moves are
+//     emitted in IR order, so it is read before any later target is written);
+//   - the block: everything live across it;
+//   - out() group: an earlier copy's destination (live after its copy) cannot
+//     sit in a later copy's register, and a non-last copy's own destination
+//     is banned even when dead -- its move still writes the register.
+// A vreg whose permitted colours are all banned spills, which is always
+// correct. Briggs/George coalescing is unchanged (heuristic only); the bans
+// are folded onto union-find representatives with the ceilings.
+//
+// Bit 31 marks "live across some asm block" regardless of W: the arm64
+// d8-d15 homes (ir_a64_fpr_alloc) are refused for such a value, because the
+// constraint language cannot name a SIMD register, so no ban can protect one
+// (#220). Colour files are at most 23 wide, so bit 31 never collides.
+static uint64 ir_color_ban = 0
+static uint64 ir_color_ban_cap = 0
+static uint64 ir_color_ban_used = 0
+static uint64 ir_asm_win = 0          // uint32 per insn: window mark
+static uint64 ir_asm_win_cap = 0
+
+fn ir_color_ban_get(uint64 v) -> uint64 {
+    if ir_color_ban == 0 { return 0 }
+    if v >= ir_color_ban_used { return 0 }
+    uint64 p = ir_color_ban + v * 4
+    uint32 m = 0
+    unsafe { *(p as uint32) -> m }
+    uint64 wm = m
+    return wm
+}
+
+fn ir_color_ban_or(uint64 v, uint64 mask) {
+    if mask == 0 { return }
+    if ir_color_ban_cap == 0 {
+        ir_color_ban_cap = 65536
+        ir_color_ban = cg_alloc(ir_color_ban_cap * 4)
+    }
+    if v >= ir_color_ban_cap {
+        // Unreachable while ir_graph_color itself refuses more than 65536
+        // vregs, but never silent: a dropped ban is a miscompile.
+        uint64 bm = "error: inline-asm register ban table overflow (more than 65536 vregs)\n"
+        write(2, bm, str_len(bm))
+        exit(1)
+    }
+    uint64 p = ir_color_ban + v * 4
+    uint32 m = 0
+    unsafe { *(p as uint32) -> m }
+    uint64 wm = m
+    wm = wm | mask
+    uint32 m2 = wm
+    unsafe { *(p as uint32) = m2 }
+    if v + 1 > ir_color_ban_used { ir_color_ban_used = v + 1 }
+}
+
+fn ir_color_ban_reset() {
+    if ir_color_ban == 0 { return }
+    uint64 i = 0
+    while i < ir_color_ban_used {
+        uint64 p = ir_color_ban + i * 4
+        uint32 z = 0
+        unsafe { *(p as uint32) = z }
+        i = i + 1
+    }
+    ir_color_ban_used = 0
+}
+
+// Physical-register mask (bit = hardware register number) of every register
+// an asm block names in in()/out()/clobbers(). Names were validated by
+// asm_check_constraints in lowering, so asm_reg_try resolves each one.
+fn ir_asm_write_phys(uint64 node) -> uint64 {
+    uint64 mask = 0
+    uint32 ch = ast_data3(node)
+    uint64 wc = ch
+    while wc != 0 {
+        uint32 rt = ast_data2(wc)
+        uint64 code = asm_reg_try(rt, target_arch)
+        if code < 64 { mask = mask | (1 << code) }
+        uint32 nx = ast_next(wc)
+        wc = nx
+    }
+    return mask
+}
+
+// The same set as COLOURS of the current file: every colour c whose physical
+// register ir_phys_regs[c] the block names (any file, @naked's included).
+fn ir_asm_write_colours(uint64 node) -> uint64 {
+    uint64 phys = ir_asm_write_phys(node)
+    if phys == 0 { return 0 }
+    uint64 mask = 0
+    uint64 c = 0
+    while c < IR_NUM_REGS {
+        uint64 pp = ir_phys_regs + c * 8
+        uint64 ph = 0
+        unsafe { *(pp as uint64) -> ph }
+        if ph < 64 && ((phys >> ph) & 1) != 0 {
+            if c >= 31 {
+                uint64 cm = "error: inline-asm register ban: colour file wider than 31\n"
+                write(2, cm, str_len(cm))
+                exit(1)
+            }
+            mask = mask | (1 << c)
+        }
+        c = c + 1
+    }
+    return mask
+}
+
+// The asm block whose out() copies are being emitted, and the registers it
+// names (ir_asm_write_phys): set by the arm64 and xtensa emitters at op 96
+// (out() copies follow their block), read when an out() value goes to a far
+// stack slot and needs an address scratch that is none of them (#219).
+static uint64 ir_asm_cur_node = 0
+static uint64 ir_asm_wphys = 0
+
+fn ir_asm_note_block(uint64 node) {
+    ir_asm_cur_node = node
+    ir_asm_wphys = ir_asm_write_phys(node)
+}
+
+// The lowest register in [lo, hi] that the current block does not name and
+// that is not `avoid`; or a located error at the out() that needed it.
+fn ir_asm_far_scratch(uint64 lo, uint64 hi, uint64 avoid, uint64 range_msg) -> uint64 {
+    uint64 r = lo
+    while r <= hi {
+        if r != avoid && ((ir_asm_wphys >> r) & 1) == 0 { return r }
+        r = r + 1
+    }
+    // Locate it at the out() register that is being stored.
+    uint64 tok = cg_current_fn_tok
+    uint32 ch = ast_data3(ir_asm_cur_node)
+    uint64 wc = ch
+    while wc != 0 {
+        uint32 ck = ast_data1(wc)
+        uint32 rt = ast_data2(wc)
+        if ck == 1 && asm_reg_try(rt, target_arch) == avoid { tok = rt  wc = 0 }
+        else {
+            uint32 nx = ast_next(wc)
+            wc = nx
+        }
+    }
+    diag_fatal_at(tok, range_msg)
+    return 0
+}
+
+fn ir_asm_win_set(uint64 ii, uint64 m) {
+    uint64 p = ir_asm_win + ii * 4
+    uint32 m32 = m
+    unsafe { *(p as uint32) = m32 }
+}
+
+fn ir_asm_win_get(uint64 ii) -> uint64 {
+    uint64 p = ir_asm_win + ii * 4
+    uint32 m = 0
+    unsafe { *(p as uint32) -> m }
+    uint64 wm = m
+    return wm
+}
+
+// The flat instruction index at position k of block b's list.
+fn ir_bb_list_at(uint64 loff, uint64 k) -> uint64 {
+    uint64 e = ir_bb_list_buf + (loff + k) * 4
+    uint32 ix32 = 0
+    unsafe { *(e as uint32) -> ix32 }
+    uint64 wi = ix32
+    return wi
+}
+
+// OR `mask` into the ban of every vreg in the bitset `live`.
+fn ir_ban_live_set(uint64 live, uint64 mask) {
+    uint64 w = 0
+    while w < ir_live_words {
+        uint64 p = live + w * 8
+        uint64 bits = 0
+        unsafe { *(p as uint64) -> bits }
+        while bits != 0 {
+            uint64 iso = bits & (0 - bits)
+            uint64 bp = ir_popcount64(iso - 1)
+            uint64 v = w * 64 + bp
+            if v > 0 && v < ir_vreg_next { ir_color_ban_or(v, mask) }
+            bits = bits & ~(1 << bp)
+        }
+        w = w + 1
+    }
+}
+
+fn ir_live_bit_set(uint64 live, uint64 v) {
+    uint64 p = live + (v / 64) * 8
+    uint64 x = 0
+    unsafe { *(p as uint64) -> x }
+    x = x | (1 << (v & 63))
+    unsafe { *(p as uint64) = x }
+}
+
+fn ir_live_bit_clear(uint64 live, uint64 v) {
+    uint64 p = live + (v / 64) * 8
+    uint64 x = 0
+    unsafe { *(p as uint64) -> x }
+    x = x & ~(1 << (v & 63))
+    unsafe { *(p as uint64) = x }
+}
+
+// Seed ir_color_ban for the current function (see the block comment above).
+// Runs first thing in ir_graph_color: liveness and the flat per-BB lists are
+// fresh. The live-set update rules below MIRROR ir_graph_color's interference
+// builder exactly (same src1/src2 exclusions, same imm-as-vreg ops, op 96's
+// src1 counted as a use like the builder does); diverging from them would
+// under-approximate liveness, and then a ban.
+fn ir_seed_asm_bans() {
+    ir_color_ban_reset()
+    if ir_fn_has_asm_block() == 0 { return }
+    uint64 vcount = ir_vreg_next
+    if ir_asm_win_cap < ir_insn_count {
+        ir_asm_win_cap = ir_insn_count + 1024
+        ir_asm_win = cg_alloc(ir_asm_win_cap * 4)
+    }
+    uint64 z = 0
+    while z < ir_insn_count {
+        ir_asm_win_set(z, 0)
+        z = z + 1
+    }
+    uint64 set_bytes = ir_live_words * 8
+    if ir_seed_live_buf == 0 {
+        ir_seed_live_cap = 1024 * 8
+        ir_seed_live_buf = cg_alloc(ir_seed_live_cap)
+    }
+    if set_bytes > ir_seed_live_cap {
+        write(2, "error: seed live buffer overflow\n", 33)
+        exit(1)
+    }
+    uint64 tmp = ir_seed_live_buf
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 off_p = ir_bb_list_off + b * 4
+        uint32 off32 = 0
+        unsafe { *(off_p as uint32) -> off32 }
+        uint64 end_p = ir_bb_list_off + (b + 1) * 4
+        uint32 end32 = 0
+        unsafe { *(end_p as uint32) -> end32 }
+        uint64 loff = off32
+        uint64 n = end32 - off32
+        // Forward: mark the windows of this block.
+        uint64 has = 0
+        uint64 k = 0
+        while k < n {
+            uint64 ii = ir_bb_list_at(loff, k)
+            if ir_insn_opcode(ii) == 96 {
+                has = 1
+                uint64 m = ir_asm_write_colours(ir_insn_src1(ii))
+                ir_asm_win_set(ii, m | 0x80000000)
+                if m != 0 {
+                    // in() group: contiguous IR_ARG imm >= 100 before the block
+                    uint64 kb = k
+                    uint64 more = 1
+                    while kb > 0 && more != 0 {
+                        kb = kb - 1
+                        uint64 ib = ir_bb_list_at(loff, kb)
+                        uint64 ob = ir_insn_opcode(ib)
+                        if ob == 51 && ir_insn_imm(ib) >= 100 {
+                            ir_asm_win_set(ib, m)
+                        } else if ob != 0 {
+                            more = 0
+                        }
+                    }
+                    // out() group: contiguous IR_COPY src1 0 imm >= 100 after it
+                    uint64 kf = k + 1
+                    uint64 last = 0xFFFFFFFF
+                    more = 1
+                    while kf < n && more != 0 {
+                        uint64 iff = ir_bb_list_at(loff, kf)
+                        uint64 of = ir_insn_opcode(iff)
+                        if of == 61 && ir_insn_src1(iff) == 0 && ir_insn_imm(iff) >= 100 {
+                            ir_asm_win_set(iff, m)
+                            last = iff
+                        } else if of != 0 {
+                            more = 0
+                        }
+                        kf = kf + 1
+                    }
+                    // Nothing in the window follows the last copy.
+                    if last != 0xFFFFFFFF { ir_asm_win_set(last, 0) }
+                }
+            }
+            k = k + 1
+        }
+        if has != 0 {
+            // Backward from live_out: ban at each marked instruction.
+            uint64 wi = 0
+            while wi < ir_live_words {
+                uint64 sp = ir_live_out + b * set_bytes + wi * 8
+                uint64 dp = tmp + wi * 8
+                uint64 v = 0
+                unsafe { *(sp as uint64) -> v }
+                unsafe { *(dp as uint64) = v }
+                wi = wi + 1
+            }
+            uint64 nn = n
+            while nn > 0 {
+                nn = nn - 1
+                uint64 ii = ir_bb_list_at(loff, nn)
+                uint64 op = ir_insn_opcode(ii)
+                if op == 0 { continue }   // LICM-elided slot
+                uint64 wm = ir_asm_win_get(ii)
+                if wm != 0 {
+                    ir_ban_live_set(tmp, wm)       // `tmp` = live AFTER ii
+                    if op == 61 {
+                        uint64 dd = ir_insn_dest(ii)
+                        if dd > 0 && dd < vcount { ir_color_ban_or(dd, wm) }
+                    }
+                }
+                // Live-set update -- mirror of ir_graph_color's builder.
+                if ir_insn_has_def(ii) != 0 {
+                    uint64 dv = ir_insn_dest(ii)
+                    if dv > 0 && dv < vcount { ir_live_bit_clear(tmp, dv) }
+                }
+                uint64 u1 = ir_insn_src1(ii)
+                if u1 > 0 && u1 < vcount && op != 1 && op != 79 { ir_live_bit_set(tmp, u1) }
+                uint64 u2 = ir_insn_src2(ii)
+                if u2 > 0 && u2 < vcount && op != 1 && op != 12 && op != 13 && op != 30 && op != 42 && op != 61 && op != 135 && op != 136 && op != 138 && (op < 140 || op > 145) {
+                    ir_live_bit_set(tmp, u2)
+                }
+                if op == 72 || op == 76 || op == 83 || op == 93 || op == 98 || op == 148 {
+                    uint64 uimm = ir_insn_imm(ii)
+                    if uimm > 0 && uimm < vcount { ir_live_bit_set(tmp, uimm) }
+                }
+            }
+        }
+        b = b + 1
+    }
+}
+
+// OR every vreg's ban onto its union-find representative (the colourer
+// colours representatives only). Placed right after ir_color_ceil_to_reps,
+// for the same reason.
+fn ir_color_ban_to_reps(uint64 vcount) {
+    if ir_color_ban_used == 0 { return }
+    uint64 v = 1
+    while v < vcount && v < ir_color_ban_used {
+        uint64 m = ir_color_ban_get(v)
+        if m != 0 {
+            uint64 r = ir_uf_find(v)
+            if r != v { ir_color_ban_or(r, m) }
+        }
+        v = v + 1
+    }
+}
+
 static uint64 ir_ig_buf = 0
 static uint64 ir_ig_cap = 0
 // Ceiling on the interference bitmatrix: 65536 vregs x 1024 words x 8 B.
@@ -7107,6 +7458,7 @@ fn ir_used_color_mask() -> uint64 {
 fn ir_graph_color() {
     uint64 vcount = ir_vreg_next
     if vcount == 0 { return }
+    ir_seed_asm_bans()     // #214: colours each asm window writes
 
     // Register-assignment table — oversized to 65536 vregs once (256 KB).
     if ir_reg_assign_cap == 0 {
@@ -7544,6 +7896,7 @@ fn ir_graph_color() {
     // Coalescing is final now, so fold every follower's colour ceiling into
     // its representative before anything is coloured.
     ir_color_ceil_to_reps(vcount)
+    ir_color_ban_to_reps(vcount)
 
     // Greedy coloring: for each vreg, assign the lowest color not used
     // by any interfering neighbor. Followers (uf_find(vi) != vi) are
@@ -7656,6 +8009,8 @@ fn ir_graph_color() {
         // Find lowest available color, honouring this vreg's ceiling (see
         // ir_color_ceil). A vreg whose whole permitted range is taken stays
         // 0xFFFFFFFF and spills, exactly as if the file were that narrow.
+        // #214: and never a colour an asm window writes while vi is live.
+        used_colors = used_colors | (ir_color_ban_get(vi) & 0x7FFFFFFF)
         uint64 ceil_vi = ir_color_ceil_get(vi)
         uint64 color = 0
         while color < ceil_vi {
@@ -10945,8 +11300,10 @@ fn ir_emit_x86_insn(uint64 ii) {
                 if dst_r != 0xFFFFFFFF {
                     ir_emit_mov_r64_r64(dst_r, phys_src)
                 } else {
-                    ir_emit_mov_r64_r64(0, phys_src)
-                    ir_emit_store_spill(0, dest_v)
+                    // Straight from the asm register (#214): staging it
+                    // through rax destroyed rax before a later out(rax -> v)
+                    // copy of the same block read it.
+                    ir_emit_store_spill(phys_src, dest_v)
                 }
             } else if imm >= 6 {
                 // Overflow parameter: load from caller's stack.
