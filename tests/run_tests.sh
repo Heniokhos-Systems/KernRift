@@ -33946,9 +33946,13 @@ log_why_ok() {
     grep -q 'extern fn .* is never defined' <<< "$e" && ext=1
     grep -q '@module_license' "$2" && lic=1
     grep -q 'fn _start' "$2" && st=1
+    # An LKM has no main either: since C1 (#244) a fat build checks main in its
+    # front end, before any slice backend, so a main-less module stops there
+    # ("no 'main' function found") and never reaches the extern refusal it used
+    # to stop at -- @module_license is what tells it from a library.
     case "$1" in
-        library)    [ $nomain = 1 ] && [ $st = 0 ] ;;
-        lkm)        [ $ext = 1 ] && [ $lic = 1 ] ;;
+        library)    [ $nomain = 1 ] && [ $st = 0 ] && [ $lic = 0 ] ;;
+        lkm)        { [ $ext = 1 ] || [ $nomain = 1 ]; } && [ $lic = 1 ] ;;
         obj-extern) [ $ext = 1 ] && [ $lic = 0 ] ;;
         riscv)      case "$2" in */examples/riscv-*) [ $asm = 1 ] ;; *) return 1 ;; esac ;;
         xtensa)     case "$2" in */examples/xtensa/*) [ $asm = 1 ] ;; *) return 1 ;; esac ;;
