@@ -2,7 +2,8 @@
 # count_insns.sh <compiler> <port.kr> <x86_64|arm64> [compiler flags...]
 # (#143 A15, spec 9): builds <port.kr> + exit_<arch>.kr as a Windows-ABI
 # freestanding ELF (--freestanding --target=windows --arch=<arch> [flags]) and
-# runs it under qemu-<arch>-static with one guest instruction per translation
+# runs it under qemu-user (qemu_bin, tests/helpers/qemu_bin.sh: qemu-aarch64 for
+# arm64) with one guest instruction per translation
 # block and chaining off, logging every executed TB through a FIFO into
 # `wc -l`: the line count is the number of guest instructions executed.
 # PEU_N=<n> replaces the token PEU_N in the source (calib.kr).
@@ -11,8 +12,10 @@
 set -u
 KRC="${1:?usage: count_insns.sh <compiler> <port.kr> <x86_64|arm64> [flags]}"; SRC="${2:?port}"; ARCH="${3:?arch}"; shift 3
 HERE="$(cd "$(dirname "$0")" && pwd)"
-QEMU="$(command -v qemu-$ARCH-static || command -v qemu-$ARCH || true)"
-[ -n "$QEMU" ] || { echo "count_insns.sh: no qemu-$ARCH-static" >&2; exit 2; }
+. "$HERE/../helpers/qemu_bin.sh"
+QN=$ARCH; [ "$ARCH" = arm64 ] && QN=aarch64
+QEMU="$(qemu_bin $QN)"
+[ -n "$QEMU" ] || { echo "count_insns.sh: no qemu-$QN (qemu_bin tries the -static name, then the plain one)" >&2; exit 2; }
 mkdir -p "${PEU_PERF_TMP:-$HOME/.cache/pe_unwind}" || { echo "count_insns.sh: cannot create the scratch root" >&2; exit 2; }
 W=$(mktemp -d "${PEU_PERF_TMP:-$HOME/.cache/pe_unwind}/cnt.XXXXXX") || { echo "count_insns.sh: mktemp failed" >&2; exit 2; }
 trap 'rm -rf "$W"' EXIT

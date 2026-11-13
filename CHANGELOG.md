@@ -109,8 +109,10 @@ or library change.
 the one place a test script turns an arch into a qemu-user binary: `qemu-<arch>-static` if
 present, else plain `qemu-<arch>` (all Ubuntu 26.04's `qemu-user` ships). Some 50 sites in
 `tests/run_tests.sh` and the IR-vs-legacy diff scripts probed the `-static` name alone, so on such
-a host their rows skipped or quietly ran one leg. Row `qemu_resolver_single_site` keeps it that
-way.
+a host their rows skipped or quietly ran one leg. `tests/perf/count_insns.sh` (the #143
+instruction-count gate) had its own probe, which also asked for `qemu-arm64` rather than
+`qemu-aarch64`; it uses the resolver too. Row `qemu_resolver_single_site` keeps it that way: no
+literal `-static` name and no other qemu-user probe in a test script.
 
 **`win_legacy_out_audit` outside a git checkout (#221).** The row counts the git-tracked corpus to
 prove it audited all of it; from a `git archive` or tarball copy it now fails at once, naming

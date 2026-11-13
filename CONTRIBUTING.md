@@ -31,7 +31,7 @@ first failure:
    and reports mass failures on a healthy tree). 3843 tests on this tree.
 3. **IR-vs-legacy differential** — `tests/diff_ir_legacy.sh` and
    `diff_ir_legacy_stdout.sh` compile+run each probe on all four backends
-   (IR/legacy × x86_64/arm64, arm64 under `qemu-aarch64-static`) and
+   (IR/legacy × x86_64/arm64, arm64 natively on an arm64 host, else under qemu-user: `qemu-aarch64-static` or `qemu-aarch64`) and
    compare exit codes and stdout. Any divergence fails.
 4. **Self-host invariants** — the token/AST arena stays under 80% of the
    524288-token cap, and the self-compile emits zero spurious

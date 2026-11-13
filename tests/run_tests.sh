@@ -5691,7 +5691,10 @@ b"
 # their rows skipped -- or, behind a silent `continue`, passed on one leg. The
 # row fails on any literal qemu-<name>-static left in a tests/**/*.sh script
 # (the Debian package name qemu-user-static is not a binary and is allowed),
-# on a diff script that does not source the resolver, and on a resolver that
+# on any `command -v qemu-...` user-mode probe outside the resolver and
+# outside comments (a second resolver; qemu-system-* probes are not
+# qemu-user), on a diff script or
+# tests/perf/count_insns.sh not sourcing the resolver, and on a resolver that
 # does not prefer "-static", fall back to the plain name, and print nothing
 # (status 1) when neither exists -- checked against fake binaries on a
 # private PATH.
@@ -5699,7 +5702,9 @@ TOTAL=$((TOTAL + 1))
 QRS_BAD=""
 QRS_HITS=$(find "$DIR" -type f -name '*.sh' | LC_ALL=C sort | xargs grep -nHE 'qemu-[a-z0-9_]+-static' 2> /dev/null | grep -v 'qemu-user-static' | sed "s|^$DIR/|tests/|" | cut -c1-120 | tr '\n' '|')
 [ -z "$QRS_HITS" ] || QRS_BAD="$QRS_BAD literal sites: $QRS_HITS;"
-for QRS_F in diff_ir_legacy.sh diff_ir_legacy_stdout.sh diff/run.sh; do
+QRS_PROBES=$(find "$DIR" -type f -name '*.sh' | LC_ALL=C sort | xargs grep -nHE 'command -v "?qemu-' 2> /dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' | grep -v 'qemu-system-' | grep -v "^$DIR/helpers/qemu_bin\.sh:" | sed "s|^$DIR/|tests/|" | cut -c1-120 | tr '\n' '|')
+[ -z "$QRS_PROBES" ] || QRS_BAD="$QRS_BAD own qemu-user probes: $QRS_PROBES;"
+for QRS_F in diff_ir_legacy.sh diff_ir_legacy_stdout.sh diff/run.sh perf/count_insns.sh; do
     grep -q 'helpers/qemu_bin\.sh"' "$DIR/$QRS_F" || QRS_BAD="$QRS_BAD tests/$QRS_F does not source the resolver;"
 done
 QRS_P=$(mktemp -d "${TMPDIR:-/tmp}/qrs.XXXXXX")
@@ -5712,7 +5717,7 @@ QRS_G=$(PATH="$QRS_P/plain" qemu_bin $QRS_Z); [ "$QRS_G" = "$QRS_P/plain/qemu-zz
 QRS_G=$(PATH="$QRS_P/none" qemu_bin $QRS_Z); QRS_RC=$?
 [ -z "$QRS_G" ] && [ "$QRS_RC" = 1 ] || QRS_BAD="$QRS_BAD neither: got '$QRS_G' rc $QRS_RC (want nothing, rc 1);"
 rm -rf "$QRS_P"
-if [ -z "$QRS_BAD" ]; then PASS=$((PASS + 1)); echo "  qemu_resolver_single_site: PASS (no literal -static site in tests/**/*.sh, the diff scripts source qemu_bin, which prefers -static, falls back to the plain name and reports neither)"
+if [ -z "$QRS_BAD" ]; then PASS=$((PASS + 1)); echo "  qemu_resolver_single_site: PASS (no literal -static site or other qemu-user probe in tests/**/*.sh, the diff scripts and count_insns.sh source qemu_bin, which prefers -static, falls back to the plain name and reports neither)"
 else FAIL=$((FAIL + 1)); echo "FAIL: qemu_resolver_single_site ($QRS_BAD)"; fi
 
 # --- ARM64 cross-compilation tests via QEMU ---
