@@ -5691,7 +5691,7 @@ b"
 # their rows skipped -- or, behind a silent `continue`, passed on one leg. The
 # row fails on any literal qemu-<name>-static left in a tests/**/*.sh script
 # (the Debian package name qemu-user-static is not a binary and is allowed),
-# on any `command -v qemu-...` user-mode probe outside the resolver and
+# on any `command -v` probe of a qemu-user binary outside the resolver and
 # outside comments (a second resolver; qemu-system-* probes are not
 # qemu-user), on a diff script or
 # tests/perf/count_insns.sh not sourcing the resolver, and on a resolver that
@@ -39104,14 +39104,18 @@ rc_tools() {
 TOTAL=$((TOTAL + 1))
 RCQ_F=$(mktemp "${TMPDIR:-/tmp}/rcq.XXXXXX")
 # qemu_%s, so these fixture calls are not themselves calls rc_tools finds here
-printf 'command -v clang > /dev/null\nQA="$(qemu_%s aarch64)"\nqemu_%s riscv32 && return 0\nqemu_%s $RCQ_X\n# rows qemu_%s skipped\n' bin bin bin bin > "$RCQ_F"
+printf 'command -v clang > /dev/null\nQA="$(qemu_%s aarch64)"\nqemu_%s riscv32 && return 0\nqemu_%s $RCQ_X\n# see qemu_%s riscv64\n' bin bin bin bin > "$RCQ_F"
 RCQ_GOT=$(rc_tools "$RCQ_F" | tr '\n' ' ')
 rm -f "$RCQ_F"
 RCQ_SELF=$(rc_tools "$DIR/run_tests.sh" | grep '^qemu-[a-z0-9_]*$' | grep -v '^qemu-system-' | tr '\n' ' ')
-if [ "$RCQ_GOT" = "clang qemu-aarch64 qemu-riscv32 " ] && [ "$RCQ_SELF" = "qemu-aarch64 qemu-riscv32 qemu-x86_64 " ]; then
+# a name ending in anything but a letter or digit is prose (`command -v
+# qemu-...`), not a tool; the gate would wait for it forever (a "-" prefix is
+# the one shape the gate itself skips)
+RCQ_ODD=$(rc_tools "$DIR/run_tests.sh" | grep -v -- '-$' | grep -v '[A-Za-z0-9]$' | tr '\n' ' ')
+if [ "$RCQ_GOT" = "clang qemu-aarch64 qemu-riscv32 " ] && [ "$RCQ_SELF" = "qemu-aarch64 qemu-riscv32 qemu-x86_64 " ] && [ -z "$RCQ_ODD" ]; then
     PASS=$((PASS + 1)); echo "  readme_count_gate_sees_qemu_bin: PASS (fixture -> $RCQ_GOT; run_tests.sh qemu-user -> $RCQ_SELF)"
 else
-    FAIL=$((FAIL + 1)); echo "FAIL: readme_count_gate_sees_qemu_bin (fixture -> '$RCQ_GOT', want 'clang qemu-aarch64 qemu-riscv32 '; run_tests.sh qemu-user -> '$RCQ_SELF', want 'qemu-aarch64 qemu-riscv32 qemu-x86_64 ')"
+    FAIL=$((FAIL + 1)); echo "FAIL: readme_count_gate_sees_qemu_bin (fixture -> '$RCQ_GOT', want 'clang qemu-aarch64 qemu-riscv32 '; run_tests.sh qemu-user -> '$RCQ_SELF', want 'qemu-aarch64 qemu-riscv32 qemu-x86_64 '; not tool names: '$RCQ_ODD')"
 fi
 
 # --- Documentation pin 5, PART B (see Part A above) --------------------------
