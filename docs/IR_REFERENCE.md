@@ -326,7 +326,7 @@ function main:
 - `v0 = ret v7` — `v0` is the reserved "no destination" vreg.
 - `arg v1 [0]` — argument position in `imm`.
 - Blocks print in index order, which is *also* the emission order
-  (`src/ir.kr:15968`), but not the order the lowering created edges in: an
+  (`src/ir.kr:15970`), but not the order the lowering created edges in: an
   `if`'s join block can have a lower index than its `else` arm.
 
 ---
@@ -506,7 +506,7 @@ is false; it is still present in MLRift's copy of this document.)*
 | 87 | `IR_CALL_IND` | `dest = (*src1)()` | **SE** |
 
 - **`IR_BR_COND` does not "fall through".** The false target is the block's
-  `succ0` field, read separately (`src/ir.kr:16024`). The emitter then picks
+  `succ0` field, read separately (`src/ir.kr:16026`). The emitter then picks
   one of four layout cases against the *next* block index — both-next (emit
   nothing), true-next (invert the condition, one `jcc`), false-next (`jcc`,
   no trailing `jmp`), neither (`jcc` + `jmp`). If you write a pass that
@@ -514,7 +514,7 @@ is false; it is still present in MLRift's copy of this document.)*
   the terminator's `imm`.
 - Terminators are **not** emitted from the per-instruction dispatch on any
   backend. x86 has explicit no-op cases at `src/ir.kr:13432`/`13436` and
-  skips them in the block loop (`src/ir.kr:15986`); arm64/riscv32/xtensa have
+  skips them in the block loop (`src/ir.kr:15988`); arm64/riscv32/xtensa have
   no case at all and emit terminators in their function-level loop.
 
 ### 5.6 Multi-value returns (80–83)

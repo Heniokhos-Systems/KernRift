@@ -15808,6 +15808,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
         // SP-fixed function (option C, ruling Q12) it is set only when
         // colour 5 (rbp) was allocated, an ordinary nonvolatile.
         if target_os == 2 && ir_win_fp != 0 { used_mask = (used_mask & 0x1F) | 32 }
+        ir_win_sidi_scan(x86_has_asm)             // #235: Win64 rsi/rdi named by asm
         // Color → physical reg encoding:
         //   color 0 → rbx (0x53)
         //   color 1 → r12 (0x41 0x54)
@@ -15841,6 +15842,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
             push_count = push_count + 1
             uw_x64_push(15, out_len)
         }
+        push_count = push_count + ir_win_sidi_push()   // #235: after r15, before rbp
         if (used_mask & 32) != 0 {
             emit_byte(0x55)                       // push rbp
             push_count = push_count + 1
@@ -16151,6 +16153,7 @@ fn ir_emit_x86_function(uint64 fn_node) {
         if (ir_used_callee_mask & 32) != 0 {
             emit_byte(0x5D)                       // pop rbp
         }
+        ir_win_sidi_pop()                         // #235
         if (ir_used_callee_mask & 16) != 0 {
             emit_byte(0x41); emit_byte(0x5F)      // pop r15
         }
@@ -17073,4 +17076,40 @@ fn c7_x86_emit_exec_argv(uint64 path_r, uint64 argv_r) {
     uw_leaf(uw_b, out_len, 0, "c7_quote")                // #143: called leaf
     c7_bind(l_over)
     c7_end()
+}
+
+// ===========================================================================
+// M3 (#235): Windows x64 rsi/rdi named by an asm block. At the end of the file
+// so cited line numbers above stay put.
+// ===========================================================================
+static uint64 ir_win_sidi = 0      // bit 0 rsi, bit 1 rdi
+
+// Scan the function's asm blocks (op 96, src1 = the AST node): Win64 makes
+// rsi/rdi nonvolatile; the narrow file asm functions use never colours them.
+fn ir_win_sidi_scan(uint64 has_asm) {
+    ir_win_sidi = 0
+    if target_os != 2 || has_asm == 0 { return }
+    uint64 b = 0
+    while b < ir_bb_count {
+        uint64 i = ir_bb_first_insn(b)
+        while i != 0xFFFFFFFF {
+            if ir_insn_opcode(i) == 96 { ir_win_sidi = ir_win_sidi | ((scan_asm_reg_mask(ir_insn_src1(i), 0) >> 6) & 3) }
+            i = ir_insn_next(i)
+        }
+        b = b + 1
+    }
+}
+
+// push rsi / push rdi after push r15; returns how many it pushed.
+fn ir_win_sidi_push() -> uint64 {
+    uint64 n = 0
+    if (ir_win_sidi & 1) != 0 { emit_byte(0x56)  uw_x64_push(6, out_len)  n = n + 1 }
+    if (ir_win_sidi & 2) != 0 { emit_byte(0x57)  uw_x64_push(7, out_len)  n = n + 1 }
+    return n
+}
+
+// pop rdi / pop rsi after pop rbp (the reverse).
+fn ir_win_sidi_pop() {
+    if (ir_win_sidi & 2) != 0 { emit_byte(0x5F) }
+    if (ir_win_sidi & 1) != 0 { emit_byte(0x5E) }
 }
