@@ -14787,6 +14787,7 @@ fn gen_stmt(uint64 node) {
     if kind == 43 {
         win_asm_refuse(node)
         asm_check_constraints(node, 0)     // #214/#218: located, every clause
+        leg_cs_backstop(node, 0)           // #235
         uint32 cons_head = ast_data3(node)
         uint64 wch_x86 = cons_head
 
@@ -15042,6 +15043,7 @@ fn gen_function(uint64 fn_node) {
     r12_save_slot = cg_slot_off(var_count)
     var_count = var_count + 1
     r12_in_use = 0
+    leg_x86_cs_setup(fn_node, is_naked, win_fp)    // #235: rbp, r13-r15 (Win64 rsi/rdi) named by asm
     var_frame_size = var_count * 8
     uint64 rem0 = var_frame_size & 15
     if rem0 != 0 { var_frame_size = var_frame_size + 16 - rem0 }
@@ -15299,6 +15301,7 @@ fn gen_function(uint64 fn_node) {
             emit_byte(0x24); emit_u32_le(r12_save_slot)
         }
         uw_pro_r12 = out_len
+        leg_x86_cs_saves()                            // #235
         if tok_matches(wnt, "main", 4) != 0 && target_os == 2 && freestanding == 0 {
             // GetCommandLineA, after the prologue: RSP is 16-aligned here, so
             // 0x20 of shadow space keeps it aligned at the call.
@@ -15962,6 +15965,7 @@ fn gen_function(uint64 fn_node) {
             emit_byte(0x4C); emit_byte(0x8B); emit_byte(0xA4)
             emit_byte(0x24); emit_u32_le(r12_save_slot)
         }
+        leg_x86_cs_restores()                         // #235
     }
 
     // F' (#143 A8): one slot more for the push rbp of a Windows frame-pointer
@@ -15992,6 +15996,7 @@ fn gen_function(uint64 fn_node) {
         uw_x64_alloc(frame_w, uw_pro_sub)
         if win_fp != 0 { uw_x64_setfp(5, uw_pro_fp) }
         uw_x64_save(12, r12_save_slot, uw_pro_r12)
+        leg_x86_cs_unwind()                           // #235
         uw_fn_finalize()
     }
 
@@ -20965,3 +20970,201 @@ fn codegen_truncate(uint64 new_len) {
         out_vzero = new_len - out_len
     }
 }
+
+// ===========================================================================
+// #235, #226, #241: callee-saved registers named by inline asm are saved by
+// the legacy prologues; #242, #246, #249, #251, #252: the arm64 registers asm
+// must not write. Kept at the end of the file so the line numbers the docs and
+// the citation manifest cite above stay put.
+// ===========================================================================
+
+// The registers an asm block anywhere under `node` names in in()/out()/
+// clobbers(), as a bitmask of asm_reg_try codes for `arch` (traversal of
+// scan_asm_writes_reg). Unknown names are skipped: the lowering reports them.
+fn scan_asm_reg_mask(uint64 node, uint64 arch) -> uint64 {
+    if node == 0 { return 0 }
+    uint64 m = 0
+    uint32 kind = ast_kind(node)
+    uint64 wk = kind
+    if wk == 43 {
+        uint32 ac = ast_data3(node)
+        uint64 wac = ac
+        while wac != 0 {
+            uint32 art = ast_data2(wac)
+            uint64 code = asm_reg_try(art, arch)
+            if code < 64 { m = m | (1 << code) }
+            uint32 anx = ast_next(wac)
+            wac = anx
+        }
+    }
+    uint32 ch = ast_child(node)
+    uint64 wch = ch
+    while wch != 0 {
+        m = m | scan_asm_reg_mask(wch, arch)
+        uint32 nxt = ast_next(wch)
+        wch = nxt
+    }
+    if wk == 13 || wk == 14 || wk == 15 || wk == 19 || wk == 20 {
+        uint32 d1 = ast_data1(node)
+        uint64 wd1 = d1
+        m = m | scan_asm_reg_mask(wd1, arch)
+        uint32 d2 = ast_data2(node)
+        uint64 wd2 = d2
+        m = m | scan_asm_reg_mask(wd2, arch)
+    }
+    return m
+}
+
+// The first constraint register token under `node` whose code is in `mask`
+// (same traversal), 0 if none: where an M3 internal error points.
+fn scan_asm_reg_tok(uint64 node, uint64 arch, uint64 mask) -> uint64 {
+    if node == 0 { return 0 }
+    uint32 kind = ast_kind(node)
+    uint64 wk = kind
+    if wk == 43 {
+        uint32 ac = ast_data3(node)
+        uint64 wac = ac
+        while wac != 0 {
+            uint32 art = ast_data2(wac)
+            uint64 code = asm_reg_try(art, arch)
+            if code < 64 && ((mask >> code) & 1) != 0 { return art }
+            uint32 anx = ast_next(wac)
+            wac = anx
+        }
+    }
+    uint32 ch = ast_child(node)
+    uint64 wch = ch
+    while wch != 0 {
+        uint64 t = scan_asm_reg_tok(wch, arch, mask)
+        if t != 0 { return t }
+        uint32 nxt = ast_next(wch)
+        wch = nxt
+    }
+    if wk == 13 || wk == 14 || wk == 15 || wk == 19 || wk == 20 {
+        uint32 d1 = ast_data1(node)
+        uint64 t1 = scan_asm_reg_tok(d1, arch, mask)
+        if t1 != 0 { return t1 }
+        uint32 d2 = ast_data2(node)
+        return scan_asm_reg_tok(d2, arch, mask)
+    }
+    return 0
+}
+
+fn leg_popcount(uint64 m) -> uint64 {
+    uint64 n = 0
+    uint64 v = m
+    while v != 0 { n = n + (v & 1); v = v >> 1 }
+    return n
+}
+
+// leg_cs_mask: the registers that get a save slot; slots are consecutive from
+// leg_cs_base in ascending register order. leg_cs_ends[reg]: the end offset of
+// the register's save instruction (Windows unwind codes).
+static uint64 leg_cs_mask = 0
+static uint64 leg_cs_base = 0
+static uint64 leg_cs_naked = 0
+static uint64 leg_cs_winfp = 0
+static uint64 leg_cs_ends = 0
+fn leg_cs_off(uint64 reg) -> uint64 {
+    uint64 below = leg_cs_mask & ((1 << reg) - 1)
+    return leg_cs_base + leg_popcount(below) * 8
+}
+fn leg_cs_end_set(uint64 reg) {
+    if leg_cs_ends == 0 { leg_cs_ends = alloc(32 * 8) }
+    uint64 e = leg_cs_ends + reg * 8
+    uint64 v = out_len
+    unsafe { *(e as uint64) = v }
+}
+fn leg_cs_end_get(uint64 reg) -> uint64 {
+    uint64 e = leg_cs_ends + reg * 8
+    uint64 v = 0
+    unsafe { *(e as uint64) -> v }
+    return v
+}
+
+// x86_64 legacy: decide the slots (#235). rbx (push) and r12 (r12_save_slot)
+// are always saved, rbp is pushed by a Windows frame-pointer function.
+fn leg_x86_cs_setup(uint64 fn_node, uint64 is_naked, uint64 win_fp) {
+    leg_cs_mask = 0
+    leg_cs_naked = is_naked
+    leg_cs_winfp = win_fp
+    if is_naked == 0 {
+        uint32 b = ast_data3(fn_node)
+        uint64 named = scan_asm_reg_mask(b, 0)
+        uint64 m = named & 0xE020                      // rbp, r13, r14, r15
+        if target_os == 2 { m = m | (named & 0xC0) }   // Win64: rsi, rdi
+        if win_fp != 0 { m = m & 0xFFDF }
+        leg_cs_mask = m
+    }
+    leg_cs_base = cg_slot_off(var_count)
+    var_count = var_count + leg_popcount(leg_cs_mask)
+}
+
+// mov [rsp+slot], reg for each saved register (prologue, after r12).
+fn leg_x86_cs_saves() {
+    uint64 r = 0
+    while r < 16 {
+        if ((leg_cs_mask >> r) & 1) != 0 {
+            uint64 rex = 0x48
+            if r >= 8 { rex = 0x4C }
+            emit_store_regN_to_stack(rex, r & 7, leg_cs_off(r))
+            leg_cs_end_set(r)
+        }
+        r = r + 1
+    }
+}
+
+// mov reg, [rsp+slot] for each saved register (epilogue, after r12).
+fn leg_x86_cs_restores() {
+    if leg_cs_naked != 0 { return }
+    uint64 r = 0
+    while r < 16 {
+        if ((leg_cs_mask >> r) & 1) != 0 {
+            uint64 off = leg_cs_off(r)
+            uint64 rex = 0x48
+            if r >= 8 { rex = 0x4C }
+            emit_byte(rex)
+            emit_byte(0x8B)
+            uint8 reg3 = (r & 7) << 3
+            if off < 128 {
+                uint8 mb = 0x44 | reg3
+                emit_byte(mb); emit_byte(0x24)
+                uint8 o8 = off
+                emit_byte(o8)
+            } else {
+                uint8 mb2 = 0x84 | reg3
+                emit_byte(mb2); emit_byte(0x24)
+                emit_u32_le(off)
+            }
+        }
+        r = r + 1
+    }
+}
+
+// Windows: UWOP_SAVE_NONVOL per saved register, in prologue order.
+fn leg_x86_cs_unwind() {
+    uint64 r = 0
+    while r < 16 {
+        if ((leg_cs_mask >> r) & 1) != 0 { uw_x64_save(r, leg_cs_off(r), leg_cs_end_get(r)) }
+        r = r + 1
+    }
+}
+
+// The backstop (#235): a register this block names that the prologue must
+// have saved but did not stops the build, at the register.
+fn leg_cs_backstop(uint64 node, uint64 arch) {
+    if leg_cs_naked != 0 { return }
+    uint64 m = scan_asm_reg_mask(node, arch)
+    uint64 bad = 0
+    if arch == 0 {
+        uint64 need = m & 0xE000
+        if target_os == 2 { need = need | (m & 0xC0) }
+        if target_os != 2 || leg_cs_winfp == 0 { need = need | (m & 0x20) }
+        bad = need & (0xFFFFFFFF ^ leg_cs_mask)
+    }
+    if bad != 0 {
+        uint64 t = scan_asm_reg_tok(node, arch, bad)
+        diag_fatal_at(t, "internal compiler error (#235): this asm register is callee-saved but the function's prologue did not save it (the pre-scan missed the block); please report it")
+    }
+}
+
