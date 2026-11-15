@@ -37902,6 +37902,15 @@ x18_flags windows ir
 x18_src 'stxr w29, x0, [x9]' > $X18_D/f.kr; x18_one "$X18_143" f.kr $X18_F
 x18_src 'swp x0, x29, [x9]' > $X18_D/f.kr; x18_one "$X18_143_2" f.kr $X18_F
 x18_row asm_x29_status_second_refused_windows_arm64 "stxr w29 / swp x0, x29 on Windows: refused (#143's classified scanner)"
+# asm_ldp_second_refused_windows_arm64: #143's load-pair refusal of a written
+# second register, now classified (ldp writes both) and worded "... as its
+# second register" (it also covers swp, ld<op> and casp). Red: the old text
+# "this asm load-pair writes x29/x18".
+for X18_R in x18 x29; do
+    x18_src "ldp x0, $X18_R, [x9]" > $X18_D/f.kr
+    for X18_M in ir legacy obj; do x18_flags windows $X18_M; x18_one "$X18_143_2" f.kr $X18_F; done
+done
+x18_row asm_ldp_second_refused_windows_arm64 "ldp x0, x18|x29, [x9] on Windows IR/legacy/obj: #143's second-register refusal, new text"
 # asm_x29_case_refused_windows_arm64 (#249): upper case. Red: the assembler's
 # error.
 x18_src 'MOV X29, X9' > $X18_D/f.kr
@@ -38009,9 +38018,11 @@ x18_src 'frob x18, x9' > $X18_D/f.kr
 x18_flags macos ir; x18_one "$X18_W1$X18_WHY_macos" f.kr $X18_F
 x18_row asm_unknown_mnemonic_fails_closed_arm64 "frob x18, x9 on macOS: the write refusal"
 # asm_x18_text_refused_newline_<form>_<os>_arm64: an instruction after the
-# escape \n or \r, or after a newline in the string. Red: builds (dropped).
+# escape \n (esc) or \r (cr), after a newline in the string (lit), or after a
+# carriage-return byte in the string (crlit). Red: builds (dropped).
+X18_CR=$(printf '\r')
 for X18_P in "esc|mov x1, x9\\nmov x18, x9" "cr|mov x1, x9\\rmov x18, x9" "lit|mov x1, x9
-mov x18, x9"; do
+mov x18, x9" "crlit|mov x1, x9${X18_CR}mov x18, x9"; do
     X18_N=${X18_P%%|*}
     x18_src "${X18_P#*|}" > $X18_D/f.kr
     for X18_OS in macos windows; do
