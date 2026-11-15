@@ -105,7 +105,8 @@ Inline asm (#214, #215, #218, #219), the same policy:
   on macOS, the shadow-call-stack register on Android and the TEB on Windows; on Windows the same now holds for
   `x29`/`fp`, the frame pointer every unwind record relies on. Before, Windows refused only lower-case
   first-register and `ldp` writes, exempted `bic` as if it were a branch (#251), and wrongly refused an atomic whose
-  first register is only read (#252, now accepted). Raw-byte asm cannot be checked and now gets a warning on macOS
+  first register is only read (#252: no longer refused by this check; the inline assembler does not
+  support `ldadd`/`swp` yet, #245). Raw-byte asm cannot be checked and now gets a warning on macOS
   and Android, as on Windows. Linux and bare metal are unchanged. Migration: use another register. No surveyed
   program is affected.
 
