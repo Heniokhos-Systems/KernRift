@@ -1,0 +1,30 @@
+// #235 (M3): Windows x64 caller probe. main keeps a sentinel in r13 and rsi
+// across f, whose asm names r13-r15, rsi and rdi; h names r14 and calls
+// println. Exit 7 = preserved, 120 = r13 destroyed, 121 = rsi destroyed.
+fn g(uint64 a) -> uint64 {
+    uint64 t = a + 1
+    return t
+}
+fn f(uint64 a) -> uint64 {
+    uint64 r = g(a)
+    asm { "mov r13, rcx"; "mov r14, rcx"; "mov r15, rcx"; "mov rsi, rcx"; "mov rdi, rcx" } in(a -> rcx) clobbers(r13, r14, r15, rsi, rdi)
+    return r
+}
+fn h(uint64 a) -> uint64 {
+    asm { "mov r14, rcx" } in(a -> rcx) clobbers(r14)
+    println("h")
+    return a
+}
+fn main() {
+    uint64 s = 0x5A5A
+    uint64 got = 0
+    uint64 got2 = 0
+    asm { "mov r13, rcx"; "mov rsi, rcx" } in(s -> rcx) clobbers(r13, rsi)
+    uint64 z = f(77)
+    asm { "mov rcx, r13"; "mov rdx, rsi" } out(rcx -> got, rdx -> got2)
+    if got != 0x5A5A { exit(120) }
+    if got2 != 0x5A5A { exit(121) }
+    uint64 _y = h(3)
+    if z != 78 { exit(122) }
+    exit(7)
+}

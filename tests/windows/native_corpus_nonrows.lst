@@ -112,3 +112,11 @@ legacy_file_open_write_holds_the_file_wine$LSH_WHY
 win_load_library
 win_get_proc_address
 call_ptr_win64
+
+# M3: row-name prefixes and the "_windows_arm64_" fragment of its $-template rows, and
+# the shell variable holding the Windows x18 message tail
+asm_x18_windows_writeback_refused_arm64_
+asm_x29_writeback_refused_windows_arm64_
+win_coff_asm_cs_codes_
+_windows_arm64_
+X18_WHY_windows
