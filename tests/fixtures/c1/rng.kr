@@ -1,0 +1,9 @@
+fn main() {
+    uint64 x = 3
+    uint64 r = 0
+    match x {
+        1..5 => { r = 1 }
+        _ => { r = 2 }
+    }
+    exit(r)
+}

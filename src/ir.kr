@@ -749,7 +749,7 @@ fn ir_bb_base(uint64 idx) -> uint64 {
 fn ir_new_bb() -> uint64 {
     if ir_bb_count >= ir_bb_cap {
         write(2, "error: IR basic block overflow\n", 31)
-        exit(1)
+        fatal_exit()
     }
 
     uint64 idx = ir_bb_count
@@ -1866,7 +1866,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             if exp_val > 18 {
                 uint64 wmsg_1401 = "error: float exponent too large (max 1e18)\n"
                 write(2, wmsg_1401, str_len(wmsg_1401))
-                exit(1)
+                fatal_exit()
             }
             uint64 pow10_u = 1
             uint64 ei = 0
@@ -1987,7 +1987,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         diag_sugg_print()
         write(2, "\n", 1)
         diag_span_of(wt)
-        exit(1)
+        fatal_exit()
     }
 
     // BinOp (33)
@@ -3373,7 +3373,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint64 wna = name_arg
             if wna == 0 {
                 write(2, "error: fn_addr() needs one argument: the function name as a string literal, e.g. fn_addr(\"main\")\n", 97)
-                exit(1)
+                fatal_exit()
             }
             if ast_kind(wna) != 31 {
                 // LOCATED, like the undeclared-identifier arm above, and not a
@@ -3386,7 +3386,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
                 write(2, "fn_addr() takes the function name as a STRING LITERAL, not a bare identifier -- write fn_addr(\"name\")", 101)
                 write(2, "\n", 1)
                 diag_span_of(fa_tok)
-                exit(1)
+                fatal_exit()
             }
             uint32 str_tok = ast_data1(wna)
             uint64 dest = ir_new_vreg()
@@ -3443,7 +3443,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             if wca != 0 {
                 uint64 cpe = "error: too many call_ptr arguments (max 64)\n"
                 write(2, cpe, str_len(cpe))
-                exit(1)
+                fatal_exit()
             }
             // Emit ARGs for call arguments.
             //
@@ -3755,7 +3755,7 @@ fn ir_lower_expr(uint64 node) -> uint64 {
         }
         if warg != 0 {
             write(2, "error: too many call arguments (max 64)\n", 40)
-            exit(1)
+            fatal_exit()
         }
         // Now emit ARG instructions
         //
@@ -4759,7 +4759,7 @@ fn ir_lower_stmt(uint64 node) {
         diag_sugg_print()
         write(2, "\n", 1)
         diag_span_of(wnt)
-        exit(1)
+        fatal_exit()
     }
 
     // Return (12)
@@ -4968,7 +4968,7 @@ fn ir_lower_stmt(uint64 node) {
         // Push loop context for break/continue
         if ir_loop_depth >= 32 {
             write(2, "error: ir_loop_stack overflow (max 32)\n", 39)
-            exit(1)
+            fatal_exit()
         }
         uint64 lp = ir_loop_exit_stack + ir_loop_depth * 8
         unsafe { *(lp as uint64) = bb_exit }
@@ -6060,7 +6060,7 @@ fn ir_liveness_init() {
     }
     if total > ir_live_cap {
         write(2, "error: liveness bitset overflow\n", 32)
-        exit(1)
+        fatal_exit()
     }
     memset(ir_live_in, 0, total)
     memset(ir_live_out, 0, total)
@@ -6745,7 +6745,7 @@ fn ir_seed_wide_ceilings_generic(uint64 arch_a64, uint64 cap) {
     }
     if set_bytes > ir_seed_live_cap {
         write(2, "error: seed live buffer overflow\n", 33)
-        exit(1)
+        fatal_exit()
     }
     uint64 tmp = ir_seed_live_buf
 
@@ -7039,7 +7039,7 @@ fn ir_color_ban_or(uint64 v, uint64 mask) {
         // vregs, but never silent: a dropped ban is a miscompile.
         uint64 bm = "error: inline-asm register ban table overflow (more than 65536 vregs)\n"
         write(2, bm, str_len(bm))
-        exit(1)
+        fatal_exit()
     }
     uint64 p = ir_color_ban + v * 4
     uint32 m = 0
@@ -7095,7 +7095,7 @@ fn ir_asm_write_colours(uint64 node) -> uint64 {
             if c >= 31 {
                 uint64 cm = "error: inline-asm register ban: colour file wider than 31\n"
                 write(2, cm, str_len(cm))
-                exit(1)
+                fatal_exit()
             }
             mask = mask | (1 << c)
         }
@@ -7224,7 +7224,7 @@ fn ir_seed_asm_bans() {
     }
     if set_bytes > ir_seed_live_cap {
         write(2, "error: seed live buffer overflow\n", 33)
-        exit(1)
+        fatal_exit()
     }
     uint64 tmp = ir_seed_live_buf
     uint64 b = 0
@@ -7467,7 +7467,7 @@ fn ir_graph_color() {
     }
     if vcount > ir_reg_assign_cap {
         write(2, "error: vreg count exceeds ir_reg_assign capacity\n", 49)
-        exit(1)
+        fatal_exit()
     }
 
     // Interference bitmatrix — vreg x vreg bits. Oversized once to
@@ -7478,7 +7478,7 @@ fn ir_graph_color() {
     uint64 ig_needed = vcount * row_bytes
     if ig_needed > IR_IG_MAX {
         write(2, "error: interference graph overflow\n", 35)
-        exit(1)
+        fatal_exit()
     }
     // Grow on demand rather than reserving the 512 MB worst case up front.
     // The old code allocated the ceiling on the first colored function and
@@ -7498,7 +7498,7 @@ fn ir_graph_color() {
         ir_ig_buf = alloc(ir_ig_cap)
         if ir_ig_buf == 0 {
             write(2, "error: out of memory for interference graph\n", 44)
-            exit(1)
+            fatal_exit()
         }
     }
     uint64 ig = ir_ig_buf
@@ -7512,7 +7512,7 @@ fn ir_graph_color() {
     }
     if set_bytes > ir_color_tmp_cap {
         write(2, "error: color tmp buffer overflow\n", 33)
-        exit(1)
+        fatal_exit()
     }
     uint64 tmp = ir_color_tmp_buf
 
@@ -8466,7 +8466,7 @@ fn ir_x86_xmm_mark_unsafe() {
     }
     if set_bytes > ir_seed_live_cap {
         write(2, "error: xmm live buffer overflow\n", 32)
-        exit(1)
+        fatal_exit()
     }
     uint64 tmp = ir_seed_live_buf
     uint64 b = 0
@@ -9176,7 +9176,7 @@ fn ir_emit_asm_in_group(uint64 start_ii) {
         if ir_insn_bb(ci) != start_bb { break }
         if mv_count >= 16 {
             write(2, "error: too many asm in() constraints (max 16)\n", 46)
-            exit(1)
+            fatal_exit()
         }
         uint64 dpv = cimm - 100
         uint64 spv = ir_insn_src1(ci)
@@ -9303,7 +9303,7 @@ fn ir_emit_call_arg_group(uint64 start_ii) {
             uint64 nimm = ir_insn_imm(ci)
             if nimm >= 6 && nimm < 100 && ir_insn_bb(ci) == start_bb {
                 write(2, "error: x86_64: a call from a @naked function may pass at most 6 arguments (the 7th and later go through the stack, which a naked body has no frame for). Move the call into a normal function.\n", 191)
-                exit(1)
+                fatal_exit()
             }
         }
     }
@@ -9357,7 +9357,7 @@ fn x86_nyi_op(uint64 op) {
     write(2, nbuf, nlen)
     uint64 post = " not yet implemented\n"
     write(2, post, str_len(post))
-    exit(1)
+    fatal_exit()
 }
 
 // Microsoft x64 (Win64) outgoing call frame: reserve 32 bytes of shadow space
@@ -9719,7 +9719,7 @@ fn ir_x86_win_sp_neutral_selftest() {
     bad = bad + ir_x86_win_sp_neutral_case("op 96 (asm block) SP-moving", ir_x86_win_op_sp_neutral(96, 0, 0), 0)
     bad = bad + ir_x86_win_sp_neutral_case("op 52 (syscall) SP-moving", ir_x86_win_op_sp_neutral(52, 0, 0), 0)
     bad = bad + ir_x86_win_sp_neutral_case("op 144 (not audited) SP-moving", ir_x86_win_op_sp_neutral(144, 0, 0), 0)
-    if bad != 0 { exit(1) }
+    if bad != 0 { fatal_exit() }
     exit(0)
 }
 
@@ -14529,7 +14529,7 @@ fn ir_build_bb_lists() {
     }
     if pos > ir_bb_list_cap {
         write(2, "error: bb instruction list overflow\n", 36)
-        exit(1)
+        fatal_exit()
     }
     uint64 op_end = ir_bb_list_off + ir_bb_count * 4
     uint32 pos_end = pos
@@ -15608,7 +15608,7 @@ fn ir_win_naked_refuse(uint64 fn_node, uint64 arch_a64) {
                 write(2, obuf, olen)
                 write(2, tail, str_len(tail))
                 diag_span_of(tok)
-                exit(1)
+                fatal_exit()
             }
             i = ir_insn_next(i)
         }
@@ -16286,7 +16286,7 @@ fn c7_begin() {
 fn c7_label() -> uint64 {
     if c7_lbl_n >= 256 {
         cap_overflow("C7 argv sequence labels", 256, 0)
-        exit(1)
+        fatal_exit()
     }
     c7_lbl_pos[c7_lbl_n] = 0xFFFFFFFFFFFFFFFF
     c7_lbl_n = c7_lbl_n + 1
@@ -16302,7 +16302,7 @@ fn c7_bind(uint64 l) {
 fn c7_fix(uint64 off, uint64 l, uint64 kind) {
     if c7_fix_n >= 512 {
         cap_overflow("C7 argv sequence branches", 512, 0)
-        exit(1)
+        fatal_exit()
     }
     c7_fix_off[c7_fix_n] = off
     c7_fix_lbl[c7_fix_n] = l
@@ -16319,7 +16319,7 @@ fn c7_end() {
         uint64 tgt = c7_lbl_pos[c7_fix_lbl[i]]
         if tgt == 0xFFFFFFFFFFFFFFFF {
             write(2, "internal error: C7 argv sequence branches to an unbound label\n", 62)
-            exit(1)
+            fatal_exit()
         }
         uint64 k = c7_fix_kind[i]
         if k == 1 {

@@ -168,7 +168,10 @@ code: **1** = a `--debug` guard fired, **139** = SIGSEGV, **136** = SIGFPE.
 
 ### Step 2: debug with gdb and `-g`
 
-`-g` emits DWARF v5 debug info into the binary:
+`-g` emits DWARF v5 debug info into the binary. It applies to x86_64 and
+arm64 ELF executables only (hosted Linux, `--freestanding`, `--target=none`);
+krc refuses `-g` for PE, Mach-O, Android, objects, listings, fat binaries and
+riscv32/xtensa, which would get no debug information:
 
 ```sh
 krc --arch=x86_64 -g program.kr -o program

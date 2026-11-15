@@ -1,0 +1,6 @@
+fn f(uint64 a) -> uint64 {
+    uint64 v = a
+    asm { "nop" } clobbers(x9)
+    return v
+}
+fn main() { exit(f(7)) }

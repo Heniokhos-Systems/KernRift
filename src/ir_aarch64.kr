@@ -273,7 +273,7 @@ fn ir_a64_win_alloc_low(uint64 size, uint64 name_tok) -> uint64 {
         uint64 m = "' has a stack frame of 256 MiB or more below its saved registers; a Windows arm64 unwind record cannot describe it (#143). Move the large buffers to the heap.\n"
         write(2, m, str_len(m))
         diag_span_of(name_tok)
-        exit(1)
+        fatal_exit()
     }
     uint64 x = size / 16
     if size <= 4095 {
@@ -911,7 +911,7 @@ fn a64_nyi_op(uint64 op) {
     write(2, nbuf, nlen)
     uint64 post = " not yet implemented\n"
     write(2, post, str_len(post))
-    exit(1)
+    fatal_exit()
 }
 
 // ---------------------------------------------------------------------------
@@ -1255,7 +1255,7 @@ fn ir_a64_win_sp_selftest() {
     bad = bad + ir_x86_win_sp_neutral_case("sp word sub sp, sp, #12, lsl #12 allocates 49152", a64_sp_word_alloc(0xD14033FF), 49152)
     bad = bad + ir_x86_win_sp_neutral_case("sp word add sp, sp, #16 allocates 0", a64_sp_word_alloc(0x910043FF), 0)
     bad = bad + ir_x86_win_sp_neutral_case("sp word add sp, sp, #1, lsl #12 allocates 0", a64_sp_word_alloc(0x914007FF), 0)
-    if bad != 0 { exit(1) }
+    if bad != 0 { fatal_exit() }
     exit(0)
 }
 
@@ -1591,7 +1591,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // Loud-fail on a width no backend defines, mirroring riscv:
             // a future producer must not silently miscompile here.
             write(2, "error: arm64: IR_ROR width must be 32 or 64\n", 44)
-            exit(1)
+            fatal_exit()
         }
         uint64 a_reg = ir_a64_resolve_src(s1_v, 9)
         uint64 b_reg = ir_a64_resolve_src(s2_v, 10)
@@ -1762,7 +1762,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // Loud-fail on a width/shift pair the encodings above don't
             // cover — a future producer must not silently miscompile.
             write(2, "error: arm64: IR_LOAD_BIS width must be 4 or 8\n", 47)
-            exit(1)
+            fatal_exit()
         }
         uint64 lb_base = ir_a64_resolve_src(s1_v, 9)
         uint64 lb_idx = ir_a64_resolve_src(s2_v, 10)
@@ -1799,7 +1799,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
         uint64 sb_w = dest_v
         if sb_w != 4 && sb_w != 8 {
             write(2, "error: arm64: IR_STORE_BIS width must be 4 or 8\n", 48)
-            exit(1)
+            fatal_exit()
         }
         uint64 sb_base = ir_a64_resolve_src(s1_v, 9)
         uint64 sb_idx = ir_a64_resolve_src(imm, 10)
@@ -2004,7 +2004,7 @@ fn ir_emit_arm64_insn(uint64 ii) {
             // `oi < 16` with no else.
             if oi >= 56 {
                 write(2, "error: a64 overflow args overflow (max 56 slots = 64 args)\n", 59)
-                exit(1)
+                fatal_exit()
             }
             uint64 src_reg = ir_a64_resolve_src(s1_v, 9)
             ir_a64_str_sp(src_reg, oi * 8)
@@ -3959,7 +3959,7 @@ fn ir_emit_arm64_function(uint64 fn_node) {
             uint64 m = "internal: arm64 Windows shape S1 chosen with a save offset above 504 (#143 option C)\n"
             write(2, m, str_len(m))
             diag_span_of(ast_data1(fn_node))
-            exit(1)
+            fatal_exit()
         }
         uw_sp_frame = 1
         emit_a64_sub_sp_imm(total_frame)

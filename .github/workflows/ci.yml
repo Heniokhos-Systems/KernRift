@@ -762,6 +762,12 @@ jobs:
           /tmp/fatbin/kr-runners/kr-macos-arm64 "$KRBO" --target=macos --arch=arm64 /tmp/fatbin/../fbtest.kr -o /tmp/fbtest_out 2>&1 || true
           # Some runners fall back via tmp dir relative to cwd
           ls -la /tmp/fbtest_out 2>/dev/null || true
+          # Since C1 (#233) --target=macos builds a Mach-O (it used to write an
+          # ELF holding macOS code), so the output runs here: exit 42.
+          chmod +x /tmp/fbtest_out 2>/dev/null
+          /tmp/fbtest_out
+          FB_EXIT=$?
+          echo "fbtest_out (--target=macos --arch=arm64) exit: $FB_EXIT (want 42)"
 
           # macOS x86_64 via Rosetta
           echo "=== macOS x86_64 (Rosetta): kr -> krc.krbo -> x86_64 krc slice ==="
@@ -769,6 +775,10 @@ jobs:
           V_X64_EXIT=$?
           echo "exit: $V_X64_EXIT"
 
+          if [ "$FB_EXIT" != "42" ]; then
+            echo "FAIL: the --target=macos --arch=arm64 build did not run to exit 42 (got $FB_EXIT)"
+            exit 1
+          fi
           if [ "$V_ARM_EXIT" = "0" ] || [ "$V_X64_EXIT" = "0" ]; then
             echo "PASS: at least one macOS slice accepts kr -> krc.krbo --version"
           else

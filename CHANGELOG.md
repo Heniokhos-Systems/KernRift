@@ -90,6 +90,60 @@ These are emergency correctness breakage under ABI_POLICY.md: an ignored or misr
 register is a silent miscompile. No surveyed program used `clobbers()`, named the stack pointer
 or used xtensa constraints.
 
+### Correctness fixes that can reject previously accepted command lines
+
+**`--target=`, `--emit=`, `--arch=`, `--targets=` and `-g` can no longer silently disagree
+(#233, #234/#129, #236, #237, #238).** Rationale (ABI_POLICY "correctness"): each combination
+below either wrote a file no system could run or silently ignored a flag you typed.
+
+- `--target=macos` / `--target=windows` without `--emit=` wrote an **ELF** containing macOS/Windows
+  code (x86_64 crashed with SIGSEGV on Linux); without `--arch=`, they and `--target=linux|android`
+  wrote the default 8-slice fat binary, ignoring the flag. They now build the single-target
+  binary LANGUAGE.md §20 always described — Mach-O, PE, Linux ELF, Android PIE (arm64) — byte-
+  identical to the matching `--emit=`. `--freestanding --target=macos|windows` keeps the ELF
+  container (ABI tests).
+- `--target=android` no longer overrides an `--emit=` written before it (`--emit=obj
+  --target=android` wrote an Android executable; `--emit=lkm --target=android` failed).
+- `--emit=win-arm64`, `mac-arm64`, `elf-arm64`, `linux-arm64` now build arm64 (they built x86_64);
+  an `--emit=` spelling that names another architecture than `--arch=` is an error.
+- **Stop building:** `--emit=` naming another OS than `--target=` (`--target=macos --emit=pe`,
+  `--target=linux --emit=macho`, …); `--targets=` with an unknown, upper-case or empty name (was a
+  warning; an all-unknown list built all 8 slices), with `--arch=`, `--target=`, `--emit=`, `-c` or
+  `-g`, or given twice with different values; **`-g` wherever no debug information is written** —
+  PE, Mach-O, Android, `.o`/`.obj`, `.ko`, `--emit=asm|ir`, fat builds, riscv32/xtensa (no debug
+  information was written). `-g` works as before for x86_64/arm64 ELF executables;
+  CodeView/PDB and DWARF/dSYM are planned for the next release.
+
+- `--targets=` builds now compile only the slices they ship (#244): a program whose inline asm
+  is arm64-only (or x86_64-only) can be fat-built with an arm64-only (x86_64-only) list; it used
+  to fail in a slice it was not asked for. A fat build that fails names the failing slice in a
+  `note:` line.
+- `--asm-strict` is now honoured by fat builds (#253): it was silently ignored there.
+- Programs with 9 or more `@builtin_override` functions, or 65 or more functions returning a signed
+  integer, can now be fat-built (#254, #256): every fat build counted them once per slice and
+  stopped at the limit.
+- An explicit `-o a.krbo` is now honoured (#257); it was replaced by a name derived from the input
+  file because it equals the internal default.
+- **Stop working (they crashed or silently did nothing):** `-o`, `--min-fitness`, `--promote`,
+  `--deprecate`, `--reject` with no value (`-o`/`--min-fitness` segfaulted) or with a value that is a
+  flag (`krc p.kr -o --arch=arm64` wrote a file named `--arch=arm64`; name such a file `./--arch=arm64`);
+  empty `--min-fitness=`, `--promote=`, `--deprecate=`, `--reject=`, `--test-listing=`,
+  `--test-sp-site-log=`, `--test-a64-low-limit=`, `--dump-argv-parser=`, `--dump-argv-quoter=`;
+  non-numeric or partly numeric `--min-fitness` and `--test-a64-low-limit=` (`12abc` was read as 12)
+  (#258). `--mod-abi=`/`--mod-version=` errors now name their own flag
+  (#259).
+- `--emit=arxmod` errors now name `--emit=arxmod`, not `--emit=arx` (#240).
+
+Migration: (1) a `--target=X` build is now a native binary, not a `.krbo` — run it directly,
+not with `kr`; for a fat binary use `--targets=`. (2) `--target=macos` alone is an **x86_64**
+Mach-O (Rosetta on Apple Silicon); the old fat output had a mac-arm64 slice — use
+`--arch=arm64 --target=macos`. (3) Without `-o`, `krc f.kr --target=windows` writes `f.exe` and
+`--target=macos|linux|android` write `f` (was `f.krbo`); `--arch=A --target=windows` writes
+`f.exe` (was `f`). (4) Drop `-g` from non-ELF builds, or build an x86_64/arm64 ELF to debug.
+(5) Drop `--arch=` next to `--targets=` (it was ignored). Survey: no build in KernRift,
+ApexRift ×4, CarRift, Morgana_VM, Comp_in_KernRift or the web playground changes or stops
+building.
+
 ### Tests / infrastructure
 
 **The suite runs cleanly on an arm64 host and on hosts with an address that has no broadcast

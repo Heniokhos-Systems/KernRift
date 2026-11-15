@@ -1922,7 +1922,7 @@ fn run_lc_undo(uint64 input_path) {
         write(2, "error: no backup to undo: ", 26)
         write(2, bpath, str_len(bpath))
         write(2, "\n  a backup is written only by `krc lc --fix` (not --dry-run)\n", 62)
-        exit(1)
+        fatal_exit()
     }
     uint64 bsize = file_size(bfd)
     uint64 bbuf = cg_alloc(bsize + 1)
@@ -1934,7 +1934,7 @@ fn run_lc_undo(uint64 input_path) {
         write(2, "error: cannot open file for writing: ", 37)
         write(2, input_path, str_len(input_path))
         write(2, "\n", 1)
-        exit(1)
+        fatal_exit()
     }
     file_write(ofd, bbuf, bsize)
     file_close(ofd)
@@ -1950,7 +1950,7 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
     uint64 fd = file_open(input_path, 0)
     if fd > 0xFFFFFFFFFFFFF000 {
         write(2, "error: cannot open input file\n", 30)
-        exit(1)
+        fatal_exit()
     }
     uint64 fsize = file_size(fd)
     uint64 src_buf = cg_alloc(fsize + 1)
@@ -1998,7 +1998,7 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
         write(2, "error: could not write backup; refusing to rewrite ", 51)
         write(2, input_path, str_len(input_path))
         write(2, "\n", 1)
-        exit(1)
+        fatal_exit()
     }
 
     // Write rewritten source back to the same file
@@ -2006,7 +2006,7 @@ fn run_migration(uint64 input_path, uint64 dry_run) {
     if ofd > 0xFFFFFFFFFFFFF000 {
         uint64 wmsg_1907 = "error: cannot open output file for writing\n"
         write(2, wmsg_1907, str_len(wmsg_1907))
-        exit(1)
+        fatal_exit()
     }
     file_write(ofd, out_buf_m, new_size)
     file_close(ofd)

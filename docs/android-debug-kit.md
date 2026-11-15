@@ -211,7 +211,7 @@ lldb
 (lldb) platform select remote-linux
 (lldb) platform connect connect://localhost:5555
 (lldb) file /home/pantelis/Desktop/Projects/Work/KernRift/krc_a64_ir
-(lldb) process launch -- --arch=arm64 --targets=<failing-target> \
+(lldb) process launch -- --targets=<failing-target> \
              /data/local/tmp/krc_src.kr -o /data/local/tmp/out
 # When it crashes:
 (lldb) bt

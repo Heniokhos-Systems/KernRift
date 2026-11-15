@@ -365,7 +365,7 @@ fn lexer_run() -> uint64 {
         uint64 nl = fmt_uint(nb, lex_err_count)
         write(2, nb, nl)
         write(2, " lex error(s)\n", 14)
-        exit(1)
+        fatal_exit()
     }
     return tok_count
 }
@@ -527,7 +527,7 @@ fn emit_token(uint64 kind, uint64 start, uint64 len, uint64 tok_line) {
         // truncate the program and "successfully" compile a different one —
         // catastrophic for a compiler that must self-compile bit-identically.
         write(2, "error: too many tokens (lexer buffer full)\n", 43)
-        exit(1)
+        fatal_exit()
     }
     uint64 base = tok_count * 16
     uint64 buf = tok_buf

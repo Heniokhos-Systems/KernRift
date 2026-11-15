@@ -1,0 +1,11 @@
+fn f(uint64 a) -> uint64 {
+    uint64 v = a
+    if get_arch_id() == 2 {
+        asm { "nop" } clobbers(x9)
+    }
+    if get_arch_id() == 1 {
+        asm { "nop" } clobbers(rbx)
+    }
+    return v
+}
+fn main() { exit(f(7)) }

@@ -1,0 +1,39 @@
+@builtin_override
+fn ovr_0(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_1(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_2(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_3(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_4(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_5(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_6(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_7(uint64 a) -> uint64 {
+    return a
+}
+@builtin_override
+fn ovr_8(uint64 a) -> uint64 {
+    return a
+}
+fn main() {
+    exit(0)
+}

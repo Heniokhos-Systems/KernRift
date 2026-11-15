@@ -123,7 +123,7 @@ fn uw_sp_moves() {
         uint64 m2 = "; #143 option C backstop: the classifier missed it)\n"
         write(2, m2, str_len(m2))
         if tk != 0xFFFFFFFFFFFFFFFF { diag_span_of(tk) }
-        exit(1)
+        fatal_exit()
     }
 }
 
@@ -494,7 +494,7 @@ fn uw_internal_error(uint64 what, uint64 i) {
     uint64 l = fmt_uint(b, i)
     write(2, b, l)
     write(2, ")\n", 2)
-    exit(1)
+    fatal_exit()
 }
 
 // The writer refuses an image whose records are not exactly what the
@@ -638,7 +638,7 @@ fn uw_a64_info(uint64 i, uint64 buf) -> uint64 {
         uint64 m = "a function longer than 1 MiB cannot be described by a Windows arm64 unwind record (FunctionLength is 18 bits of words, #143); split it\n"
         write(2, m, str_len(m))
         if tk != 0xFFFFFFFFFFFFFFFF { diag_span_of(tk) }
-        exit(1)
+        fatal_exit()
     }
     uint64 n = uw_get(i, 48)
     uint64 first = uw_get(i, 56)
@@ -813,7 +813,7 @@ fn uw_coff_nrelocs(uint64 arch) -> uint64 {
     if nr > uw_coff_reloc_limit {
         uint64 m = "error: this Windows object has too many functions for its .pdata relocations (more than 65535; at most 21845 x86_64 or 32767 arm64 functions per --emit=obj output, #143); split the program into several objects\n"
         write(2, m, str_len(m))
-        exit(1)
+        fatal_exit()
     }
     return nr
 }

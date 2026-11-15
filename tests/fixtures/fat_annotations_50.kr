@@ -1,0 +1,441 @@
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_0, lb_0)
+@section(".text.s0")
+fn h_0(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_1, lb_1)
+@section(".text.s1")
+fn h_1(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_2, lb_2)
+@section(".text.s2")
+fn h_2(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_3, lb_3)
+@section(".text.s0")
+fn h_3(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_4, lb_4)
+@section(".text.s1")
+fn h_4(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_5, lb_5)
+@section(".text.s2")
+fn h_5(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_6, lb_6)
+@section(".text.s0")
+fn h_6(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_7, lb_7)
+@section(".text.s1")
+fn h_7(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_8, lb_8)
+@section(".text.s2")
+fn h_8(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_9, lb_9)
+@section(".text.s0")
+fn h_9(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_10, lb_10)
+@section(".text.s1")
+fn h_10(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_11, lb_11)
+@section(".text.s2")
+fn h_11(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_12, lb_12)
+@section(".text.s0")
+fn h_12(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_13, lb_13)
+@section(".text.s1")
+fn h_13(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_14, lb_14)
+@section(".text.s2")
+fn h_14(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_15, lb_15)
+@section(".text.s0")
+fn h_15(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_16, lb_16)
+@section(".text.s1")
+fn h_16(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_17, lb_17)
+@section(".text.s2")
+fn h_17(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_18, lb_18)
+@section(".text.s0")
+fn h_18(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_19, lb_19)
+@section(".text.s1")
+fn h_19(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_20, lb_20)
+@section(".text.s2")
+fn h_20(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_21, lb_21)
+@section(".text.s0")
+fn h_21(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_22, lb_22)
+@section(".text.s1")
+fn h_22(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_23, lb_23)
+@section(".text.s2")
+fn h_23(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_24, lb_24)
+@section(".text.s0")
+fn h_24(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_25, lb_25)
+@section(".text.s1")
+fn h_25(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_26, lb_26)
+@section(".text.s2")
+fn h_26(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_27, lb_27)
+@section(".text.s0")
+fn h_27(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_28, lb_28)
+@section(".text.s1")
+fn h_28(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_29, lb_29)
+@section(".text.s2")
+fn h_29(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_30, lb_30)
+@section(".text.s0")
+fn h_30(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_31, lb_31)
+@section(".text.s1")
+fn h_31(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_32, lb_32)
+@section(".text.s2")
+fn h_32(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_33, lb_33)
+@section(".text.s0")
+fn h_33(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_34, lb_34)
+@section(".text.s1")
+fn h_34(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_35, lb_35)
+@section(".text.s2")
+fn h_35(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_36, lb_36)
+@section(".text.s0")
+fn h_36(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_37, lb_37)
+@section(".text.s1")
+fn h_37(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_38, lb_38)
+@section(".text.s2")
+fn h_38(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_39, lb_39)
+@section(".text.s0")
+fn h_39(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_40, lb_40)
+@section(".text.s1")
+fn h_40(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_41, lb_41)
+@section(".text.s2")
+fn h_41(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_42, lb_42)
+@section(".text.s0")
+fn h_42(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_43, lb_43)
+@section(".text.s1")
+fn h_43(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_44, lb_44)
+@section(".text.s2")
+fn h_44(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_45, lb_45)
+@section(".text.s0")
+fn h_45(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_46, lb_46)
+@section(".text.s1")
+fn h_46(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_47, lb_47)
+@section(".text.s2")
+fn h_47(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_48, lb_48)
+@section(".text.s0")
+fn h_48(uint64 a) -> int64 {
+    return 0 - a
+}
+@ctx(task)
+@eff(io)
+@caps(mmio)
+@acquires(la_49, lb_49)
+@section(".text.s1")
+fn h_49(uint64 a) -> int64 {
+    return 0 - a
+}
+struct S0 {
+    uint64 a
+    uint64 b
+}
+static S0 ss_0
+struct S1 {
+    uint64 a
+    uint64 b
+}
+static S1 ss_1
+struct S2 {
+    uint64 a
+    uint64 b
+}
+static S2 ss_2
+struct S3 {
+    uint64 a
+    uint64 b
+}
+static S3 ss_3
+struct S4 {
+    uint64 a
+    uint64 b
+}
+static S4 ss_4
+struct S5 {
+    uint64 a
+    uint64 b
+}
+static S5 ss_5
+@builtin_override
+fn fmt_uint(uint64 buf, uint64 val) -> uint64 {
+    return 0
+}
+static uint64 sx = 1
+fn main() {
+    int64 t = h_1(2) + h_49(3)
+    ss_3.b = 4
+    sx = sx + ss_3.b
+    exit(t + 5 + sx)
+}

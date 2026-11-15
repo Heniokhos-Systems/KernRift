@@ -1,0 +1,5 @@
+static uint32 sink = 0
+fn main() {
+    sink = get_arch_id()
+    exit(0)
+}

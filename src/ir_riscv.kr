@@ -125,7 +125,7 @@ fn ir_regalloc_init_riscv() {
 
 fn rv_err(uint64 msg) {
     write(2, msg, str_len(msg))
-    exit(1)
+    fatal_exit()
 }
 
 // Any IR op the riscv32 backend does not lower yet: name the opcode so
@@ -138,7 +138,7 @@ fn rv_nyi_op(uint64 op) {
     write(2, nbuf, nlen)
     uint64 post = " not yet implemented\n"
     write(2, post, str_len(post))
-    exit(1)
+    fatal_exit()
 }
 
 fn rv_float_trap() {
@@ -1081,7 +1081,7 @@ fn asm_emit_rv(uint64 str_tok) {
     write(2, sptr, slen)
     write(2, "'\n", 2)
     write(2, "  hint: use a raw hex word instead, e.g. asm(\"0x00150513\")\n", 59)
-    exit(1)
+    fatal_exit()
 }
 
 // Maps an abstract (x86_64-shaped) syscall number to its rv32/rv64 Linux
@@ -2813,7 +2813,7 @@ fn resolve_fixups_riscv() {
             diag_sugg_print()
             write(2, "\n", 1)
             diag_span_of(wtt)
-            exit(1)
+            fatal_exit()
         }
         i = i + 1
     }
@@ -3006,7 +3006,7 @@ fn resolve_fnaddr_fixups_riscv() {
             write(2, "error: fn_addr: undefined function '", 36)
             write(2, cg_source + name_start, name_len)
             write(2, "'\n", 2)
-            exit(1)
+            fatal_exit()
         }
         i = i + 1
     }

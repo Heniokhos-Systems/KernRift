@@ -2033,11 +2033,13 @@ krc <file.kr> --arch=x86_64 -o out   # single-arch native ELF
 krc <file.kr> --arch=arm64 -o out    # single-arch ARM64 ELF
 krc <file.kr> --targets=linux-x64,macos-arm64 -o out.krbo   # custom fat subset (v2.8.x)
 
-# Single target (one platform, host or cross) instead of a fat binary:
-krc <file.kr> --target=linux -o out
-krc <file.kr> --target=macos -o out
-krc <file.kr> --target=windows -o out.exe
-krc <file.kr> --target=android -o out
+# Single target (one platform, host or cross) instead of a fat binary,
+# in that OS's own container:
+krc <file.kr> --target=linux -o out              # Linux ELF, x86_64
+krc <file.kr> --target=macos -o out              # Mach-O, x86_64 (Rosetta on Apple Silicon)
+krc <file.kr> --arch=arm64 --target=macos -o out # Mach-O, arm64
+krc <file.kr> --target=windows -o out.exe        # PE, x86_64
+krc <file.kr> --target=android -o out            # Android PIE ELF, arm64
 
 # Emit format (aliased since v2.8.4):
 #   elfexe / elf                                        → Linux ELF
@@ -2057,6 +2059,63 @@ krc <file.kr> --emit=android -o out
 krc <file.kr> -c -o out.o            # shorthand for --emit=obj
 krc <file.kr> --emit=lkm -o mod.ko   # Linux loadable kernel module (x86_64 only)
 ```
+
+### How `--target=`, `--emit=`, `--arch=`, `--targets=` and `-g` combine
+
+The flags are read first and resolved once, so their order on the line never
+matters, and a combination that would silently drop one of them is an error
+(exit 1, no output file) rather than a build:
+
+* **Fat or single.** The output is the 8-slice fat binary when `--targets=` is
+  given, or when none of `--arch=`, `--emit=`/`-c` or a hosted `--target=`
+  (`linux`, `macos`/`darwin`, `windows`/`win`, `android`) is. Anything else
+  builds one binary. `--freestanding` alone stays fat; `--target=none` alone
+  is refused ("cannot build a fat binary").
+* **`--target=` without `--emit=` chooses the container:** linux → ELF
+  executable, macos → Mach-O, windows → PE, android → Android PIE —
+  byte-identical to the matching `--emit=`. **The ELF carrier:** with
+  `--freestanding`, `--target=macos` and `--target=windows` keep the ELF
+  container (code with that OS's ABI in an ELF, for ABI tests run on Linux).
+* **`--target=` and `--emit=` must agree.** An `--emit=` that builds an
+  executable for another OS than `--target=` names is refused, in either
+  order and under every alias (`--target=macos --emit=pe`,
+  `--target=linux --emit=macho`, …); only the last `--emit=` counts. The ELF
+  family is accepted next to `--freestanding --target=macos|windows` (the
+  carrier). The OS-neutral emits — `obj`/`-c`, `asm`, `ir`, `lkm` and the
+  bare-metal ones — take their OS from `--target=`.
+* **Architecture.** `--arch=` if given; else the architecture an `--emit=`
+  spelling names; else arm64 for the Android PIE; else x86_64 (on every host).
+  The spellings that name an architecture **select it**, and refuse an
+  `--arch=` naming another one (riscv32 and xtensa included):
+
+  | spelling | architecture |
+  |---|---|
+  | `elf-arm64`, `linux-arm64`, `mac-arm64`, `windows-arm64`, `win-arm64` | arm64 |
+  | `elf-x86_64`, `linux-x86_64`, `linux-x86-64`, `mac-x64`, `windows-x64`, `win-x64` | x86_64 |
+
+  Write the plain spelling (`--emit=elfexe`, `macho`, `pe`) to keep any
+  `--arch=`.
+* **`--targets=` is a list of slice names**, exact and lower-case:
+  `linux-x64`, `linux-x86_64`, `linux-arm64`, `linux-aarch64`, `win-x64`,
+  `windows-x64`, `win-arm64`, `windows-arm64`, `mac-x64`, `macos-x64`,
+  `mac-arm64`, `macos-arm64`, `android-arm64`, `android-x64`,
+  `android-x86_64`, and `all`. An unknown, upper-case or empty name, an empty
+  list, and a second `--targets=` with a different value are errors;
+  duplicates are fine. Every name already chooses an OS and an architecture,
+  so `--targets=` cannot be combined with a hosted `--target=`, an `--arch=`,
+  an `--emit=` or `-c` (or `-g`). A `--targets=` build compiles only the
+  slices it lists — a program whose inline asm is arm64-only builds with an
+  arm64-only list — and when a slice fails, a `note:` line after the error
+  names it; `--asm-strict` checks each listed architecture.
+* **`-g` writes DWARF only into an x86_64 or arm64 ELF executable** — hosted
+  Linux, `--freestanding`, the ELF carrier, `--target=none`. It is refused for
+  PE, Mach-O and Android PIE (by `--emit=` or by `--target=`), objects (`-c`,
+  `--emit=obj`), `--emit=lkm`, `--emit=asm`, `--emit=ir`, fat binaries
+  (default or `--targets=`), and riscv32/xtensa, until those containers get
+  debug information.
+* **Output names without `-o`:** `--target=windows` (or `--emit=pe`) writes
+  `<stem>.exe`, `-c` `<stem>.o`, any other single build `<stem>`, a fat build
+  `<stem>.krbo`. A typed `-o` is always used as given, `-o a.krbo` included.
 
 ### Bare-metal flat images (`--emit=image`)
 
@@ -2595,9 +2654,9 @@ firmware zero-fills nothing.
 * `-g` is refused, as it is for `--emit=image`: the DWARF footer is laid out
   from an ELF geometry this container does not have.
 
-`--target=android` is refused too, and for a reason worth knowing: that flag
-does not only choose an OS, it *also* forces `--emit=android`, so combining
-the two would otherwise have silently emitted an Android ELF.
+`--target=android` is refused by the `--target=none` rule above, in either
+order: `--target=` names an OS, and an `--emit=` keeps the container it
+names.
 
 **The header region is 4096 bytes and that is a correctness constraint, not
 a formatting choice.** arm64 `adrp` page arithmetic is baked during code
@@ -2951,7 +3010,8 @@ krc --check-types <file.kr>          # ...and its explicit positive form (the de
 krc --asm-strict <file.kr>           # arch-check every asm block, even unreachable ones
 krc --O0 <file.kr>                   # disable the IR optimizer (CF/DCE/CSE/LICM)
 krc --debug <file.kr>                # runtime safety checks (bounds, null, some div-by-zero)
-krc -g <file.kr> -o out              # emit DWARF debug info (.debug_line/info/abbrev/str)
+krc --arch=x86_64 -g <file.kr> -o out   # DWARF (x86_64/arm64 ELF executables only)
+#   -g is refused for PE, Mach-O, Android, objects, listings, fat binaries and riscv32/xtensa until those containers get debug info
 
 # Non-compile modes
 krc --freestanding <file.kr> -o out  # no main trampoline, no auto-exit

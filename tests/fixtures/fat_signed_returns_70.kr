@@ -1,0 +1,211 @@
+fn s0(int64 a) -> int64 {
+    return a
+}
+fn s1(int64 a) -> int64 {
+    return a
+}
+fn s2(int64 a) -> int64 {
+    return a
+}
+fn s3(int64 a) -> int64 {
+    return a
+}
+fn s4(int64 a) -> int64 {
+    return a
+}
+fn s5(int64 a) -> int64 {
+    return a
+}
+fn s6(int64 a) -> int64 {
+    return a
+}
+fn s7(int64 a) -> int64 {
+    return a
+}
+fn s8(int64 a) -> int64 {
+    return a
+}
+fn s9(int64 a) -> int64 {
+    return a
+}
+fn s10(int64 a) -> int64 {
+    return a
+}
+fn s11(int64 a) -> int64 {
+    return a
+}
+fn s12(int64 a) -> int64 {
+    return a
+}
+fn s13(int64 a) -> int64 {
+    return a
+}
+fn s14(int64 a) -> int64 {
+    return a
+}
+fn s15(int64 a) -> int64 {
+    return a
+}
+fn s16(int64 a) -> int64 {
+    return a
+}
+fn s17(int64 a) -> int64 {
+    return a
+}
+fn s18(int64 a) -> int64 {
+    return a
+}
+fn s19(int64 a) -> int64 {
+    return a
+}
+fn s20(int64 a) -> int64 {
+    return a
+}
+fn s21(int64 a) -> int64 {
+    return a
+}
+fn s22(int64 a) -> int64 {
+    return a
+}
+fn s23(int64 a) -> int64 {
+    return a
+}
+fn s24(int64 a) -> int64 {
+    return a
+}
+fn s25(int64 a) -> int64 {
+    return a
+}
+fn s26(int64 a) -> int64 {
+    return a
+}
+fn s27(int64 a) -> int64 {
+    return a
+}
+fn s28(int64 a) -> int64 {
+    return a
+}
+fn s29(int64 a) -> int64 {
+    return a
+}
+fn s30(int64 a) -> int64 {
+    return a
+}
+fn s31(int64 a) -> int64 {
+    return a
+}
+fn s32(int64 a) -> int64 {
+    return a
+}
+fn s33(int64 a) -> int64 {
+    return a
+}
+fn s34(int64 a) -> int64 {
+    return a
+}
+fn s35(int64 a) -> int64 {
+    return a
+}
+fn s36(int64 a) -> int64 {
+    return a
+}
+fn s37(int64 a) -> int64 {
+    return a
+}
+fn s38(int64 a) -> int64 {
+    return a
+}
+fn s39(int64 a) -> int64 {
+    return a
+}
+fn s40(int64 a) -> int64 {
+    return a
+}
+fn s41(int64 a) -> int64 {
+    return a
+}
+fn s42(int64 a) -> int64 {
+    return a
+}
+fn s43(int64 a) -> int64 {
+    return a
+}
+fn s44(int64 a) -> int64 {
+    return a
+}
+fn s45(int64 a) -> int64 {
+    return a
+}
+fn s46(int64 a) -> int64 {
+    return a
+}
+fn s47(int64 a) -> int64 {
+    return a
+}
+fn s48(int64 a) -> int64 {
+    return a
+}
+fn s49(int64 a) -> int64 {
+    return a
+}
+fn s50(int64 a) -> int64 {
+    return a
+}
+fn s51(int64 a) -> int64 {
+    return a
+}
+fn s52(int64 a) -> int64 {
+    return a
+}
+fn s53(int64 a) -> int64 {
+    return a
+}
+fn s54(int64 a) -> int64 {
+    return a
+}
+fn s55(int64 a) -> int64 {
+    return a
+}
+fn s56(int64 a) -> int64 {
+    return a
+}
+fn s57(int64 a) -> int64 {
+    return a
+}
+fn s58(int64 a) -> int64 {
+    return a
+}
+fn s59(int64 a) -> int64 {
+    return a
+}
+fn s60(int64 a) -> int64 {
+    return a
+}
+fn s61(int64 a) -> int64 {
+    return a
+}
+fn s62(int64 a) -> int64 {
+    return a
+}
+fn s63(int64 a) -> int64 {
+    return a
+}
+fn s64(int64 a) -> int64 {
+    return a
+}
+fn s65(int64 a) -> int64 {
+    return a
+}
+fn s66(int64 a) -> int64 {
+    return a
+}
+fn s67(int64 a) -> int64 {
+    return a
+}
+fn s68(int64 a) -> int64 {
+    return a
+}
+fn s69(int64 a) -> int64 {
+    return a
+}
+fn main() { exit(5) }

@@ -277,7 +277,7 @@ fn a64_check_b26(uint64 disp) -> uint64 {
     uint64 biased = disp + 0x8000000
     if biased >= 0x10000000 {
         write(2, "internal error: aarch64 B/BL branch displacement out of range\n", 62)
-        exit(1)
+        fatal_exit()
     }
     return (disp / 4) & 0x3FFFFFF
 }
@@ -287,7 +287,7 @@ fn a64_check_b19(uint64 disp) -> uint64 {
     uint64 biased = disp + 0x100000
     if biased >= 0x200000 {
         write(2, "internal error: aarch64 B.cond/CBZ/CBNZ displacement out of range\n", 66)
-        exit(1)
+        fatal_exit()
     }
     return (disp / 4) & 0x7FFFF
 }
@@ -626,7 +626,7 @@ fn emit_a64_blr(uint64 rn) {
 fn a64_win_fixup_add(uint64 patch_off, uint64 slot) {
     if a64_win_iat_fixup_count >= 4096 {
         cap_overflow("too many Windows import fixups", 4096, 0)
-        exit(1)
+        fatal_exit()
     }
     uint64 entry = a64_win_iat_fixups + a64_win_iat_fixup_count * 8
     uint32 po = patch_off
@@ -1692,7 +1692,7 @@ fn gen_expr_a64(uint64 node) {
                     diag_sugg_print()
                     write(2, "\n", 1)
                     diag_span_of(tok)
-                    exit(1)
+                    fatal_exit()
                 }
             }
         }
@@ -2334,7 +2334,7 @@ fn gen_expr_a64(uint64 node) {
                     if pat_k == 52 {
                         uint64 wmsg_2032 = "error: range patterns require the IR backend (drop --legacy)\n"
                         write(2, wmsg_2032, str_len(wmsg_2032))
-                        exit(1)
+                        fatal_exit()
                     }
                     gen_expr_a64(pat)
                     emit_a64_mov(9, 0)
@@ -2344,7 +2344,7 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64(0x54000000)   // B.EQ +0 (patched)
                     if beq_count >= 8 {
                         cap_overflow("too many match arms", 8, 1)
-                        exit(1)
+                        fatal_exit()
                     }
                     uint64 slot = beq_patches + beq_count * 8
                     unsafe { *(slot as uint64) = beq_p }
@@ -2371,7 +2371,7 @@ fn gen_expr_a64(uint64 node) {
             gen_expr_a64(wbody)
             if match_end_fixup_count >= 256 {
                 cap_overflow("too many match arms", 256, 1)
-                exit(1)
+                fatal_exit()
             }
             uint64 end_patch = out_len
             emit_a64(0x14000000)  // B +0 (patched)
@@ -4799,7 +4799,7 @@ fn gen_expr_a64(uint64 node) {
         // instead of one crashing where the other diagnoses.
         if arg_count > 64 {
             write(2, "error: too many call arguments (max 64)\n", 40)
-            exit(1)
+            fatal_exit()
         }
         // Evaluate all args and store to temp slots.
         // Track which args are float (0=int, 1=f64, 2=f32).
@@ -5601,7 +5601,7 @@ fn gen_stmt_a64(uint64 node) {
         uint64 loop_start = out_len
         if loop_depth >= 16 {
             cap_overflow("too many nested loops", 16, 1)
-            exit(1)
+            fatal_exit()
         }
         uint64 lentry = loop_stack + loop_depth * 16
         unsafe { *(lentry as uint64) = loop_start }
@@ -5651,7 +5651,7 @@ fn gen_stmt_a64(uint64 node) {
         if loop_depth == 0 { return }
         if break_fixup_count >= 256 {
             cap_overflow("too many break/continue statements", 256, 1)
-            exit(1)
+            fatal_exit()
         }
         uint64 brk_off = out_len
         emit_a64_b(0)
@@ -5715,7 +5715,7 @@ fn gen_stmt_a64(uint64 node) {
                     if pat_k == 52 {
                         uint64 wmsg_5059 = "error: range patterns require the IR backend (drop --legacy)\n"
                         write(2, wmsg_5059, str_len(wmsg_5059))
-                        exit(1)
+                        fatal_exit()
                     }
                     gen_expr_a64(pat)
                     emit_a64_mov(9, 0)
@@ -5726,7 +5726,7 @@ fn gen_stmt_a64(uint64 node) {
                     emit_a64(0x54000000)   // B.EQ +0 (patched)
                     if beq_count >= 8 {
                         cap_overflow("too many match arms", 8, 1)
-                        exit(1)
+                        fatal_exit()
                     }
                     uint64 slot = beq_patches + beq_count * 8
                     unsafe { *(slot as uint64) = beq_p }
@@ -5758,7 +5758,7 @@ fn gen_stmt_a64(uint64 node) {
             // loop's patch pass). H9.
             if match_end_fixup_count >= 256 {
                 cap_overflow("too many match arms", 256, 1)
-                exit(1)
+                fatal_exit()
             }
             uint64 end_patch = out_len
             emit_a64(0x14000000)  // B +0 (patched)
@@ -6303,7 +6303,7 @@ fn gen_stmt_a64(uint64 node) {
     if kind == 51 {
         uint64 wmsg_5481 = "error: `defer` requires the IR backend (drop --legacy)\n"
         write(2, wmsg_5481, str_len(wmsg_5481))
-        exit(1)
+        fatal_exit()
     }
 }
 
@@ -6750,7 +6750,7 @@ fn gen_function_a64(uint64 fn_node) {
                         emit_a64_str(0, 31, a64_var_base + poff)
                         if stack_pidx_a >= 64 {
                             cap_overflow("too many stack parameters", 64, 1)
-                            exit(1)
+                            fatal_exit()
                         }
                         uint64 fop_entry_a = a64_overflow_patches + stack_pidx_a * 8
                         uint32 fpl32_a = fpatch_loc_a
@@ -6780,7 +6780,7 @@ fn gen_function_a64(uint64 fn_node) {
                         uint64 opi = stack_pidx_a
                         if opi >= 64 {
                             cap_overflow("too many stack parameters", 64, 1)
-                            exit(1)
+                            fatal_exit()
                         }
                         uint64 op_entry = a64_overflow_patches + opi * 8
                         uint32 pl32 = patch_loc
@@ -7029,7 +7029,7 @@ fn resolve_fixups_a64() {
             diag_sugg_print()
             write(2, "\n", 1)
             diag_span_of(wtt)
-            exit(1)
+            fatal_exit()
         }
         i = i + 1
     }
@@ -7116,7 +7116,7 @@ fn resolve_fnaddr_fixups_a64() {
                 write(2, "error: fn_addr: '", 17)
                 write(2, cg_source + name_start, name_len)
                 write(2, "' is more than 4 GB from its use (ADRP range)\n", 46)
-                exit(1)
+                fatal_exit()
             }
             uint64 immlo = page_delta & 3
             uint64 immhi = (page_delta >> 2) & 0x7FFFF
