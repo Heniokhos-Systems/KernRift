@@ -4697,6 +4697,7 @@ fn asm_reg_unknown(uint64 tok, uint64 arch) {
 // Validate every register of one asm block's in()/out()/clobbers(), at the
 // register token. Called by each asm lowering right after win_asm_refuse.
 fn asm_check_constraints(uint64 node, uint64 arch) {
+    asm_x18_refuse(node, arch)          // #242, #246, #249
     uint32 ch = ast_data3(node)
     uint64 wc = ch
     while wc != 0 {
@@ -12001,19 +12002,19 @@ fn win_asm_check_string(uint64 str_tok) {
         return
     }
     // arm64: stores, compares and branches do not write their first operand
-    uint64 c0 = win_asm_byte(sp + m0)
-    uint64 c1 = 0
-    if mlen > 1 { c1 = win_asm_byte(sp + m0 + 1) }
-    if c0 == 115 && c1 == 116 { first_written = 0 }                      // st*
-    if mlen == 3 && (asm_match(sp, m0, "cmp", 3) != 0 || asm_match(sp, m0, "cmn", 3) != 0 || asm_match(sp, m0, "tst", 3) != 0) { first_written = 0 }
-    if c0 == 98 || (c0 == 99 && c1 == 98) || (c0 == 116 && c1 == 98) { first_written = 0 }   // b*, cb*, tb*
-    if mlen == 3 && asm_match(sp, m0, "ret", 3) != 0 { first_written = 0 }
-    if mlen == 4 && asm_match(sp, m0, "prfm", 4) != 0 { first_written = 0 }
+    // #251/#252: the explicit, case-blind write classification shared with the
+    // x18/x29 checker (asm_w_first / asm_w_second, end of this file) replaces
+    // the st* / cmp / b* / ret / prfm prefix tests: `bic` is not a branch
+    // (#251), and an ld<op>/swp first register is only read (#252).
+    first_written = asm_w_first(sp, m0, mlen)
+    uint64 second_written = asm_w_second(sp, m0, mlen)
+    // Writeback bases, stx* status registers, upper case and later `;`
+    // instructions are refused by asm_x18_refuse (#246, #249), after this.
     if first_written != 0 && win_asm_is_frame_reg(sp, o0, olen) != 0 {
         win_asm_refuse_msg(str_tok, "this asm instruction writes x29/x18")
     }
-    if c0 == 108 && c1 == 100 && win_asm_byte(sp + m0 + mlen - 1) == 112 && win_asm_is_frame_reg(sp, o1, o1len) != 0 {
-        win_asm_refuse_msg(str_tok, "this asm load-pair writes x29/x18")    // ldp/ldxp/ldaxp/ldnp
+    if second_written != 0 && win_asm_is_frame_reg(sp, o1, o1len) != 0 {
+        win_asm_refuse_msg(str_tok, "this asm instruction writes x29/x18 as its second register")    // ldp, swp, ld<op>, casp (#252)
     }
 }
 
@@ -21170,4 +21171,249 @@ fn leg_cs_backstop(uint64 node, uint64 arch) {
         diag_fatal_at(t, "internal compiler error (#235): this asm register is callee-saved but the function's prologue did not save it (the pre-scan missed the block); please report it")
     }
 }
+// ---------------------------------------------------------------------------
+// #251 / #252: the write classification of an arm64 asm instruction, shared by
+// #143's scanner (win_asm_check_string) and the frame/platform-register checker
+// below. EXPLICIT lists, compared without regard to case: a mnemonic the
+// assembler accepts must appear in one of them (row asm_write_class_covers_
+// assembler checks that against asm_emit_a64), so nothing is exempted by a
+// prefix test any more (`bic` used to pass as a "b*" branch, #251).
+// Unknown mnemonics count as writing their first register.
+// ---------------------------------------------------------------------------
+fn asm_wc_none() -> uint64 { return "|b|bl|br|blr|cbz|cbnz|tbz|tbnz|ret|eret|nop|wfi|wfe|sev|isb|dsb|dmb|dc|ic|tlbi|at|sys|hint|msr|smc|hvc|brk|svc|hlt|cmp|cmn|tst|ccmp|ccmn|prfm|prfum|str|strb|strh|stur|sturb|sturh|stp|stnp|stlr|stlrb|stlrh|stllr|stllrb|stllrh|braa|brab|braaz|brabz|blraa|blrab|blraaz|blrabz|retaa|retab|eretaa|eretab|cfp|cpp|dvp|setf8|setf16|" }
+fn asm_wc_first() -> uint64 { return "|mov|movz|movk|movn|mvn|mrs|and|ands|orr|orn|eor|eon|bic|bics|bfi|bfxil|bfm|sbfm|ubfm|sbfx|ubfx|lsl|lsr|asr|ror|add|adds|sub|subs|neg|negs|adc|adcs|sbc|sbcs|mul|madd|msub|smull|umull|smulh|umulh|sdiv|udiv|csel|csinc|csinv|csneg|cset|csetm|cinc|adr|adrp|ldr|ldrb|ldrh|ldrsb|ldrsh|ldrsw|ldur|ldurb|ldurh|ldursb|ldursh|ldursw|ldar|ldarb|ldarh|ldxr|ldxrb|ldxrh|ldaxr|ldaxrb|ldaxrh|ldapr|cas|casa|casl|casal|clz|cls|rbit|rev|rev16|rev32|sysl|" }
+fn asm_wc_both() -> uint64 { return "|ldp|ldnp|ldpsw|ldxp|ldaxp|" }
+fn asm_wc_status() -> uint64 { return "|stxr|stxrb|stxrh|stlxr|stlxrb|stlxrh|stxp|stlxp|" }
+// prefix families (every size/order suffix): the first register is only read
+fn asm_wc_second_fam() -> uint64 { return "|ldadd|ldclr|ldeor|ldset|ldsmax|ldsmin|ldumax|ldumin|swp|" }
+fn asm_wc_both_fam() -> uint64 { return "|casp|" }
+// prefix families that write no register (store atomics, unprivileged and
+// release stores, every size/order suffix): known READ-only, so a form the
+// assembler does not accept yet gets its "unrecognized" error, not a false
+// "writes its first register" from the fail-closed default
+fn asm_wc_none_fam() -> uint64 { return "|stadd|stclr|steor|stset|stsmax|stsmin|stumax|stumin|sttr|stlur|" }
 
+// A blank the checker skips: space or tab (A1 may accept tabs; the checker
+// must already see through them).
+fn asm_blank(uint64 c) -> uint64 {
+    if c == 32 || c == 9 { return 1 }
+    return 0
+}
+
+fn asm_lc(uint64 c) -> uint64 {
+    if c >= 65 && c <= 90 { return c + 32 }
+    return c
+}
+
+// Is the source mnemonic [m0, m0+mlen) an entry of `list` ("|a|b|")? With
+// fam != 0 an entry that is a PREFIX of the mnemonic also matches.
+fn asm_wc_in(uint64 list, uint64 sp, uint64 m0, uint64 mlen, uint64 fam) -> uint64 {
+    uint64 n = str_len(list)
+    uint64 i = 0
+    while i < n {
+        if load8(list + i) == 124 && i + 1 < n {
+            uint64 j = i + 1
+            uint64 k = 0
+            uint64 ok = 1
+            while j < n && load8(list + j) != 124 {
+                if k >= mlen || asm_lc(win_asm_byte(sp + m0 + k)) != load8(list + j) { ok = 0 }
+                j = j + 1
+                k = k + 1
+            }
+            if ok != 0 && k > 0 && (k == mlen || (fam != 0 && k < mlen)) { return 1 }
+            i = j
+        } else {
+            i = i + 1
+        }
+    }
+    return 0
+}
+
+// b.<cond> / bc.<cond>
+fn asm_wc_cond_branch(uint64 sp, uint64 m0, uint64 mlen) -> uint64 {
+    if mlen > 2 && asm_lc(win_asm_byte(sp + m0)) == 98 && win_asm_byte(sp + m0 + 1) == 46 { return 1 }
+    if mlen > 3 && asm_lc(win_asm_byte(sp + m0)) == 98 && asm_lc(win_asm_byte(sp + m0 + 1)) == 99 && win_asm_byte(sp + m0 + 2) == 46 { return 1 }
+    return 0
+}
+
+// Does the instruction write its first / second register operand?
+fn asm_w_first(uint64 sp, uint64 m0, uint64 mlen) -> uint64 {
+    if asm_wc_cond_branch(sp, m0, mlen) != 0 { return 0 }
+    if asm_wc_in(asm_wc_none(), sp, m0, mlen, 0) != 0 { return 0 }
+    if asm_wc_in(asm_wc_none_fam(), sp, m0, mlen, 1) != 0 { return 0 }
+    if asm_wc_in(asm_wc_second_fam(), sp, m0, mlen, 1) != 0 { return 0 }
+    return 1
+}
+fn asm_w_second(uint64 sp, uint64 m0, uint64 mlen) -> uint64 {
+    if asm_wc_in(asm_wc_both(), sp, m0, mlen, 0) != 0 { return 1 }
+    if asm_wc_in(asm_wc_both_fam(), sp, m0, mlen, 1) != 0 { return 1 }
+    if asm_wc_in(asm_wc_second_fam(), sp, m0, mlen, 1) != 0 { return 1 }
+    return 0
+}
+
+// ---------------------------------------------------------------------------
+// #242 / #246 / #249: arm64 registers asm must not write. macOS: x18 (platform
+// register); Android: x18 (shadow call stack); Windows: x18 (TEB, #246) and
+// x29 (the frame pointer, #249) -- #143 already refuses their names and the
+// writes its scanner classifies; this checker catches the rest. Judged on the
+// SOURCE text (#245: the assembler may drop writeback or trailing text), every
+// `;`-separated instruction of a string, case-blind. Called from
+// asm_check_constraints: every lowering, @naked bodies included.
+// ---------------------------------------------------------------------------
+fn asm_x18_active() -> uint64 {
+    if target_arch != 1 { return 0 }
+    if target_os == 2 { return win_frame_refusals_active() }
+    if target_os != 1 && target_os != 3 { return 0 }
+    return fat_slice_ships()
+}
+
+// 1 = x18/w18; 2 = x29/w29/fp (Windows only); 0 = neither.
+fn asm_guard_reg(uint64 sp, uint64 o, uint64 n) -> uint64 {
+    if n == 3 && (asm_lc(win_asm_byte(sp + o)) == 120 || asm_lc(win_asm_byte(sp + o)) == 119) && win_asm_byte(sp + o + 1) == 49 && win_asm_byte(sp + o + 2) == 56 { return 1 }
+    if target_os != 2 { return 0 }
+    if n == 3 && (asm_lc(win_asm_byte(sp + o)) == 120 || asm_lc(win_asm_byte(sp + o)) == 119) && win_asm_byte(sp + o + 1) == 50 && win_asm_byte(sp + o + 2) == 57 { return 2 }
+    if n == 2 && asm_lc(win_asm_byte(sp + o)) == 102 && asm_lc(win_asm_byte(sp + o + 1)) == 112 { return 2 }
+    return 0
+}
+
+fn asm_guard_fatal(uint64 tok, uint64 which, uint64 what) {
+    diag_loc_head(tok, 0)
+    write(2, what, str_len(what))
+    uint64 why = " -- here x18, which on Windows holds the TEB (#246); use another register"
+    if which == 2 { why = " -- here the frame pointer x29, which every Windows unwind record relies on (#249); use another register" }
+    else if target_os == 1 { why = " -- here x18, which on macOS is the platform register the system may change at any time (#242); use another register" }
+    else if target_os == 3 { why = " -- here x18, which on Android holds the shadow call stack (#242); use another register" }
+    write(2, why, str_len(why))
+    write(2, "\n", 1)
+    diag_span_of(tok)
+    fatal_exit()
+}
+
+// One instruction [s0, s1) of an asm string.
+fn asm_guard_insn(uint64 str_tok, uint64 sp, uint64 s0, uint64 s1) {
+    uint64 i = s0
+    while i < s1 && asm_blank(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 m0 = i
+    while i < s1 && win_asm_is_word_char(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    uint64 mlen = i - m0
+    if mlen == 0 { return }
+    uint64[8] os
+    uint64[8] ol
+    uint64 n = 0
+    uint64 depth = 0
+    uint64 st = i
+    while i <= s1 {
+        uint64 c = 44
+        if i < s1 { c = win_asm_byte(sp + i) }
+        if c == 91 || c == 123 { depth = depth + 1 }
+        if c == 93 || c == 125 { if depth > 0 { depth = depth - 1 } }
+        if (c == 44 && depth == 0) || i == s1 {
+            uint64 a = st
+            uint64 b = i
+            while a < b && asm_blank(win_asm_byte(sp + a)) != 0 { a = a + 1 }
+            while b > a && asm_blank(win_asm_byte(sp + b - 1)) != 0 { b = b - 1 }
+            if n < 8 && b > a { os[n] = a  ol[n] = b - a  n = n + 1 }
+            st = i + 1
+        }
+        i = i + 1
+    }
+    if n == 0 { return }
+    // writeback base: [r, ...]! or [r] followed by another operand; loads and stores
+    uint64 k = 0
+    while k < n {
+        uint64 a = os[k]
+        uint64 l = ol[k]
+        if win_asm_byte(sp + a) == 91 {
+            uint64 q = a + 1
+            while q < a + l && asm_blank(win_asm_byte(sp + q)) != 0 { q = q + 1 }
+            uint64 q0 = q
+            while q < a + l && win_asm_is_word_char(win_asm_byte(sp + q)) != 0 { q = q + 1 }
+            uint64 g = asm_guard_reg(sp, q0, q - q0)
+            if g != 0 && (win_asm_byte(sp + a + l - 1) == 33 || k + 1 < n) {
+                asm_guard_fatal(str_tok, g, "this asm instruction writes back to its base register")
+            }
+        }
+        k = k + 1
+    }
+    uint64 w1 = asm_w_first(sp, m0, mlen)
+    if asm_wc_in(asm_wc_status(), sp, m0, mlen, 0) != 0 { w1 = 1 }
+    uint64 g1 = asm_guard_reg(sp, os[0], ol[0])
+    if w1 != 0 && g1 != 0 { asm_guard_fatal(str_tok, g1, "this asm instruction writes its first register") }
+    if n > 1 && asm_w_second(sp, m0, mlen) != 0 {
+        uint64 g2 = asm_guard_reg(sp, os[1], ol[1])
+        if g2 != 0 { asm_guard_fatal(str_tok, g2, "this asm instruction writes its second register") }
+    }
+}
+
+// One asm string: raw bytes warn (macOS/Android; Windows already warns, #143);
+// otherwise every `;`-separated instruction is checked.
+fn asm_x18_check_string(uint64 str_tok) {
+    uint64 sp = cg_source + tok_text_start(str_tok) + 1
+    uint64 sl = tok_text_len(str_tok)
+    if sl < 2 { return }
+    sl = sl - 2
+    uint64 i = 0
+    while i < sl && asm_blank(win_asm_byte(sp + i)) != 0 { i = i + 1 }
+    if i + 1 < sl && win_asm_byte(sp + i) == 48 && asm_lc(win_asm_byte(sp + i + 1)) == 120 {
+        if target_os != 2 {
+            diag_loc_head(str_tok, 1)
+            uint64 rw = "asm given as raw bytes cannot be checked for writes to x18 (#242)\n"
+            write(2, rw, str_len(rw))
+        }
+        return
+    }
+    // instruction separators: `;`, a newline or carriage return, and the
+    // escapes \n / \r -- every instruction is judged (A1 refuses them, §3.10)
+    uint64 s0 = 0
+    uint64 j = 0
+    while j <= sl {
+        uint64 cj = 59
+        if j < sl { cj = win_asm_byte(sp + j) }
+        uint64 skip = 0
+        if j == sl || cj == 59 || cj == 10 || cj == 13 { skip = 1 }
+        if j + 1 < sl && cj == 92 && (win_asm_byte(sp + j + 1) == 110 || win_asm_byte(sp + j + 1) == 114) { skip = 2 }
+        if skip != 0 {
+            asm_guard_insn(str_tok, sp, s0, j)
+            s0 = j + skip
+            j = j + skip
+        } else {
+            j = j + 1
+        }
+    }
+}
+
+fn asm_x18_refuse(uint64 node, uint64 arch) {
+    if arch != 1 { return }
+    if asm_x18_active() == 0 { return }
+    if target_os != 2 {
+        uint32 cons = ast_data3(node)
+        uint64 wc = cons
+        while wc != 0 {
+            uint32 rt = ast_data2(wc)
+            uint64 wrt = rt
+            if wrt != 0 && a64_reg_code(wrt) == 18 {
+                diag_loc_head(wrt, 0)
+                uint64 h = "an inline-asm in()/out()/clobbers() register cannot be 'x18'"
+                write(2, h, str_len(h))
+                uint64 why = "; on macOS x18 is the platform register, which the system may change at any time (#242); use another register"
+                if target_os == 3 { why = "; on Android x18 holds the shadow call stack (#242); use another register" }
+                write(2, why, str_len(why))
+                write(2, "\n", 1)
+                diag_span_of(wrt)
+                fatal_exit()
+            }
+            uint32 nc = ast_next(wc)
+            wc = nc
+        }
+    }
+    uint32 single = ast_data1(node)
+    if single != 0 { asm_x18_check_string(single) }
+    uint32 sc = ast_child(node)
+    uint64 ws = sc
+    while ws != 0 {
+        uint32 stk = ast_data1(ws)
+        if stk != 0 { asm_x18_check_string(stk) }
+        uint32 nx = ast_next(ws)
+        ws = nx
+    }
+}
