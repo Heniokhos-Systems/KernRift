@@ -21161,6 +21161,9 @@ fn leg_cs_backstop(uint64 node, uint64 arch) {
         if target_os == 2 { need = need | (m & 0xC0) }
         if target_os != 2 || leg_cs_winfp == 0 { need = need | (m & 0x20) }
         bad = need & (0xFFFFFFFF ^ leg_cs_mask)
+    } else {
+        bad = (m & 0x1FE00000) & (0xFFFFFFFF ^ leg_cs_mask)
+        if (m & 0x60180000) != 0 && a64_leg_keep == 0 { bad = bad | (m & 0x60180000) }
     }
     if bad != 0 {
         uint64 t = scan_asm_reg_tok(node, arch, bad)
