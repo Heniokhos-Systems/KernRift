@@ -1303,6 +1303,12 @@ colours were actually used, so only those get pushed. *(Its own comment,
 file as 6 colours including rbp, and the mask as reaching bit 22 on arm64's
 23-wide file. The old wording is the likely origin of the wrong claim in
 earlier revisions of this document.)*
+A function containing inline asm pushes the whole narrow x86_64 set (rbx,
+r12–r15, rbp) whatever it coloured; on Windows x64 it also pushes `rsi` and
+`rdi` when one of its blocks names them (#235: Win64 makes them nonvolatile,
+and no colour of the narrow file holds them) — after `push r15`, before
+`push rbp`, each with its `UWOP_PUSH_NONVOL` code, popped in reverse after
+`pop rbp` (`ir_win_sidi_push` / `ir_win_sidi_pop`, at the end of `src/ir.kr`).
 
 ### Colour files, verified from the init functions
 

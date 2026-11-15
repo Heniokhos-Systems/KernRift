@@ -9322,10 +9322,10 @@ rm -rf "$SDD_T"
 # r13,r14,rbp, r15 IR only}, inw_{rbx,r12,r13,r14,r15}, clob_{rbx,r12,r13,
 # r14,rbp}, legacy out/inw/clob_rbx; arm64 IR+O0 out/inw/clob x19-x22 and
 # x24-x27 (out_x23 IR only, out_x27 O0 only); riscv32 IR+O0 every s-register
-# (out/inw/clob_s4 O0 only). arm64 --legacy out/inw/clob_x30 are KNOWN RED (#226,
-# D3: a legacy arm64 leaf does not save x30, so `ret` jumps to the block's
-# value -- a Bus error / SIGSEGV on 2.11.0, main and this fix alike); they
-# FAIL until #226 is fixed and are listed in the release's known-reds list.
+# (out/inw/clob_s4 O0 only). arm64 --legacy out/inw/clob_x30 were red until
+# #226 was fixed (D3: a legacy arm64 leaf did not save x30, so `ret` jumped to
+# the block's value -- a Bus error / SIGSEGV on 2.11.0); a legacy leaf whose
+# asm names x19/x20/x29/x30 now keeps its frame record.
 ALR_T=$(mktemp -d)
 # alr_runner ARCH ROW -> ALR_R: the runner prefix for an ARCH binary (none on
 # the host arch, else qemu-user); skips ROW (already in TOTAL) and returns 1
@@ -9977,12 +9977,11 @@ fn f(uint64 a, uint64 b) -> uint64 {
 fn main() { exit(f(11, 22)) }
 ALREOF
 alr_row asm_dead_out_dest_banned_x86_64 x86_64 7 $ALR_T/n.kr IR --O0 --legacy
-# asm_legacy_obj_callee_saved_x86_64 (KNOWN RED, #235): a block that writes
-# rbp and r13 (listed in clobbers()) in an @export function built with -c
-# and called from C. The legacy x86_64 prologue saves only rbx/r12, so the C
-# caller's r13 and rbp come back changed (r13=5 rbp=5) -- on 2.11.0, main
-# and this branch alike. The IR backends save the whole callee-saved file in
-# a function with asm. Fails until #235 is fixed.
+# asm_legacy_obj_callee_saved_x86_64 (#235): a block that writes rbp and r13
+# (listed in clobbers()) in an @export function built with -c and called
+# from C. The legacy x86_64 prologue saved only rbx/r12, so the C caller's
+# r13 and rbp came back changed (r13=5 rbp=5 on 2.11.0); it now saves the
+# callee-saved registers the function's asm names, as the IR backends do.
 cat > $ALR_T/lf.kr <<'ALREOF'
 @export
 fn f(uint64 a) -> uint64 {
@@ -10018,7 +10017,7 @@ else
     fi
     if [ "$ALR_GOT" = "r=5 r13=1234 rbp=5678" ]; then
         PASS=$((PASS + 1))
-        echo "  asm_legacy_obj_callee_saved_x86_64: PASS ($ALR_GOT: the C caller's r13/rbp survive; #235 is fixed -- remove it from the known reds)"
+        echo "  asm_legacy_obj_callee_saved_x86_64: PASS ($ALR_GOT: the C caller's r13/rbp survive)"
     else
         echo "FAIL: asm_legacy_obj_callee_saved_x86_64 (#235: want r=5 r13=1234 rbp=5678, got $ALR_GOT)"
         FAIL=$((FAIL + 1))
