@@ -157,7 +157,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq qemu-user-static
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq qemu-user   # CI-branch-only: no qemu-user-static on ubuntu-26.04 (the step above linked the -static names)
           KRC=./build/krc2 KRC_FLAGS="--arch=arm64" SMOKE_RUNNER=qemu-aarch64-static bash tests/smoke/run.sh
 
       - name: Differential harness (legacy vs IR, Linux x86_64)
@@ -363,7 +363,7 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq >/dev/null 2>&1
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y qemu-user-static gcc-aarch64-linux-gnu >/dev/null 2>&1
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y qemu-user gcc-aarch64-linux-gnu >/dev/null 2>&1   # CI-branch-only: qemu-user on ubuntu-26.04
           # Symlink the Linux ARM64 linker as Android's linker64
           sudo mkdir -p /system/bin
           sudo ln -sf /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 /system/bin/linker64
