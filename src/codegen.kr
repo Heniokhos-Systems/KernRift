@@ -12903,8 +12903,12 @@ fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rba
     emit_a64(ibase | (iv << 10) | (rn << 5) | rd)
 }
 
-// LDR / STR, 64-bit unsigned-offset form: `ldr xT, [xN]` / `ldr xT, [xN, #imm]`.
+// LDR / STR, 64-bit: unsigned offset `[xN{, #imm}]`, pre-index `[xN, #imm]!`,
+// post-index `[xN], #imm` (A1, #245: the last two used to drop the writeback,
+// and post-index the offset too). ARM ARM C6.2 LDR/STR (immediate), size 11.
 fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
+    uint64 is_load = 0
+    if base == 0xF9400000 { is_load = 1 }
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, o, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
@@ -12916,27 +12920,60 @@ fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
     o = asm_a64_ws(sptr, o + a64_tok_len, slen)
     uint64 iv = 0
+    uint64 neg = 0
+    uint64 has_imm = 0
+    if o < slen && load8(sptr + o) == 44 {
+        o = asm_a64_ws(sptr, o + 1, slen)
+        iv = asm_a64_imm(sptr, o, slen)
+        if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
+        neg = a64_imm_neg
+        has_imm = 1
+        o = asm_a64_ws(sptr, o + a64_tok_len, slen)
+    }
+    o = asm_a64_want(sptr, o, slen, 93)
+    if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+    uint64 mode = 0            // 0 = unsigned offset, 1 = pre-index, 2 = post-index
     if o < slen {
-        uint64 cc = 0
-        uint64 ca = sptr + o
-        unsafe { *(ca as uint8) -> cc }
-        if cc == 44 {
+        uint64 c = load8(sptr + o)
+        if c == 33 {
+            if has_imm == 0 { asm_a64_form_fatal(sptr, slen, "a pre-index needs an offset: write [xN, #imm]! (#278)") }
+            mode = 1
+            o = o + 1
+        } else if c == 44 && has_imm == 0 {
             o = asm_a64_ws(sptr, o + 1, slen)
             iv = asm_a64_imm(sptr, o, slen)
             if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
-            // The unsigned-offset form cannot encode a negative displacement.
-            // LDUR can; it is a different instruction and is not spelled `ldr`.
-            if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
-            o = asm_a64_ws(sptr, o + a64_tok_len, slen)
+            neg = a64_imm_neg
+            mode = 2
+            o = o + a64_tok_len
         }
     }
-    if asm_a64_want(sptr, o, slen, 93) == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
-    // The field is a SCALED offset: the encoded value is bytes/8. An unaligned
-    // displacement is not representable, and dividing it silently would address
-    // a different word.
-    if (iv & 7) != 0 { asm_a64_operr(sptr, slen) }
-    if iv > 32760 { asm_a64_operr(sptr, slen) }
-    emit_a64(base | ((iv / 8) << 10) | (rn << 5) | rt)
+    asm_a64_end(sptr, slen, o)
+    if mode == 0 {
+        // The field is a SCALED offset: the encoded value is bytes/8. A
+        // negative or unaligned displacement is not representable (LDUR/STUR
+        // can; it is a different instruction and is not spelled `ldr`), and
+        // dividing it silently would address a different word.
+        if neg != 0 || (iv & 7) != 0 { asm_a64_operr(sptr, slen) }
+        if iv > 32760 { asm_a64_operr(sptr, slen) }
+        emit_a64(base | ((iv / 8) << 10) | (rn << 5) | rt)
+        return
+    }
+    // pre/post-index: imm9, signed, UNSCALED (bytes), -256..255
+    if neg == 0 && iv > 255 { asm_a64_form_fatal(sptr, slen, "a pre- or post-index offset is a signed byte count from -256 to 255 (#245)") }
+    if neg != 0 && iv > 256 { asm_a64_form_fatal(sptr, slen, "a pre- or post-index offset is a signed byte count from -256 to 255 (#245)") }
+    // writeback into the register being transferred is CONSTRAINED
+    // UNPREDICTABLE (ARM ARM LDR/STR (immediate): wback && n == t && n != 31)
+    if rn == rt && rn != 31 {
+        if is_load != 0 { asm_a64_form_fatal(sptr, slen, "the base register is also the register loaded; with writeback the architecture leaves the result UNPREDICTABLE (#278)") }
+        asm_a64_form_fatal(sptr, slen, "the base register is also the register stored; with writeback the architecture leaves the stored value UNPREDICTABLE (#278)")
+    }
+    uint64 imm9 = iv
+    if neg != 0 { imm9 = (512 - iv) & 511 }
+    uint64 w = 0xF8000400                     // STR (immediate) post-index
+    if is_load != 0 { w = 0xF8400400 }        // LDR (immediate) post-index
+    if mode == 1 { w = w | 0x800 }            // pre-index: bits 11:10 = 11
+    emit_a64(w | (imm9 << 12) | (rn << 5) | rt)
 }
 
 // STP / LDP in all three addressing modes:
@@ -12979,7 +13016,7 @@ fn asm_a64_pair(uint64 sptr, uint64 slen, uint64 off, uint64 is_load) {
             uint64 bc = 0
             uint64 ba = sptr + o
             unsafe { *(ba as uint8) -> bc }
-            if bc == 33 { mode = 1 }
+            if bc == 33 { mode = 1  o = o + 1 }
         }
     } else {
         // `[xN]` or `[xN], #imm`
@@ -12989,14 +13026,24 @@ fn asm_a64_pair(uint64 sptr, uint64 slen, uint64 off, uint64 is_load) {
             uint64 pc2 = 0
             uint64 pa = sptr + o
             unsafe { *(pa as uint8) -> pc2 }
+            if pc2 == 33 { asm_a64_form_fatal(sptr, slen, "a pre-index needs an offset: write [xN, #imm]! (#278)") }
             if pc2 == 44 {
                 o = asm_a64_ws(sptr, o + 1, slen)
                 iv = asm_a64_imm(sptr, o, slen)
                 if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
                 neg = a64_imm_neg
                 mode = 2
+                o = o + a64_tok_len
             }
         }
+    }
+    asm_a64_end(sptr, slen, o)
+    // CONSTRAINED UNPREDICTABLE (ARM ARM LDP/STP): a load pair into one
+    // register twice (every mode, Unpredictable_LDPOVERLAP -- llvm-mc accepts
+    // the writeback forms), and writeback into a transfer register
+    if is_load != 0 && rt == rt2 { asm_a64_form_fatal(sptr, slen, "a load pair names the same register twice; the architecture leaves the result UNPREDICTABLE (#278)") }
+    if mode != 0 && rn != 31 && (rn == rt || rn == rt2) {
+        asm_a64_form_fatal(sptr, slen, "the base register is also a transfer register; with writeback the architecture leaves the result UNPREDICTABLE (#278)")
     }
 
     if (iv & 7) != 0 { asm_a64_operr(sptr, slen) }
@@ -21618,6 +21665,44 @@ fn asm_a64_name_fatal(uint64 sptr, uint64 slen, uint64 o, uint64 n) {
     write(2, sptr + o, n)
     uint64 m = "' is not an arm64 register name -- x0 to x30 with no leading zero, sp or xzr (#280, #287)\n"
     write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+// ---------------------------------------------------------------------------
+// A1 (#245): the end of an arm64 instruction. Every parser that consumed a
+// complete instruction calls asm_a64_end with the offset after its last
+// operand: only blanks may follow -- the assembler used to ignore everything
+// after the operands it read (`ldr x0, [x9], #8` was `ldr x0, [x9]`).
+fn asm_a64_end(uint64 sptr, uint64 slen, uint64 o) {
+    uint64 i = o
+    while i < slen && asm_blank(load8(sptr + i)) != 0 { i = i + 1 }
+    if i >= slen { return }
+    asm_trailing_fatal(sptr, slen, i)
+}
+
+// Text after a complete instruction, located at the string (every assembler).
+fn asm_trailing_fatal(uint64 sptr, uint64 slen, uint64 i) {
+    diag_loc_head(asm_cur_tok, 0)
+    uint64 m1 = "unexpected text after the instruction in asm '"
+    write(2, m1, str_len(m1))
+    write(2, sptr, slen)
+    write(2, "': '", 4)
+    write(2, sptr + i, slen - i)
+    uint64 m2 = "' (#245)\n"
+    write(2, m2, str_len(m2))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+// A located refusal of an arm64 form: `arm64 asm '<text>': <why>`.
+fn asm_a64_form_fatal(uint64 sptr, uint64 slen, uint64 why) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "arm64 asm '", 11)
+    write(2, sptr, slen)
+    write(2, "': ", 3)
+    write(2, why, str_len(why))
+    write(2, "\n", 1)
     diag_span_of(asm_cur_tok)
     fatal_exit()
 }
