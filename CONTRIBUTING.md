@@ -51,6 +51,18 @@ first failure:
 
 `make test` runs only step 2; `make bootstrap` only step 1.
 
+**Host requirements of the full suite** (what a `make gate` run needs, beyond a C toolchain):
+QEMU 8.2 or newer for the xtensa rows (they boot through `tests/helpers/xtensa_boot.sh`; a plain
+`qemu-system-xtensa -M lx60 -kernel <elf>` does not boot on QEMU 10.2, its commit 18727804c065);
+`qemu-user` (plain names, installed `--no-install-recommends` if foreign-arch binfmt handlers are
+unwanted) or `qemu-user-static` (which registers binfmt handlers on install); `qemu-system-riscv`
+on Ubuntu 26.04, where it left `qemu-system-misc`; Wine 9 or 10 (both `+unwind` trace formats and
+both `RtlCaptureStackBackTrace` counts are known to the rows). The native Windows scripts
+(`tests/windows/native_*.sh`) work with any OpenSSH: the post-quantum warning option of 10.2 is
+probed, never assumed. Their judge, `tests/windows/native_judge.py`, only judges a log whose
+`wine runner:` header says `native`; a native out dir written before that header existed must be
+judged by the judge of its own era (`git show <commit>:tests/windows/native_judge.py`).
+
 `make test` reports a skipped row as SKIP, never as a pass, so a partial
 toolchain still gives a usable answer. **For merge and release gating run
 `make gate`** (`REQUIRE_FULL_RUN=1 make test`; no CI workflow sets it, so a

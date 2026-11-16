@@ -244,6 +244,42 @@ unchanged. The qemu example checkers clean up their logs, dumps and sockets when
 time limit stops them (#261), and `examples/tutorial-btree` puts its database at `argv[1]`, else
 `$TMPDIR` (#263).
 
+**The suite and CI work on Ubuntu 26.04 (#228, #229, #260, #268, #272, #322, #323, #327).** No
+compiler change: the images these rows build are byte-identical to v2.11.0's; the environment
+changed.
+- *xtensa boots (#228).* QEMU 10.2.0 (its commit 18727804c065) writes the xtfpga `-kernel` boot
+  trampoline before the CPU reset, so `qemu-system-xtensa -M lx60 -kernel <elf>` never reaches the
+  image's entry point and the 14 xtensa boot rows timed out. They now boot through one helper,
+  `tests/helpers/xtensa_boot.sh`, which adds `-device loader,addr=<e_entry>,cpu-num=0` (works on
+  every QEMU from 2.9; checked on 8.2 and 10.2) and refuses, with status 99 and a message, a file
+  that is not an Elf32 little-endian Xtensa image. `examples/xtensa/hello.kr` shows the new command
+  line. `xtensa_lx60_exit_42` is now counted and skipped like its neighbours when qemu is missing
+  (#322: it used to vanish from the run).
+- *Wine 10 (#229).* Wine 10 renamed the `+unwind` trace line (`RtlVirtualUnwind2 … base … rva …`);
+  `tests/helpers/wine_unwind_chain.py` reads both shapes and nothing looser. Wine 10's
+  `RtlCaptureStackBackTrace` no longer appends Wine 9's four NULL slots: the linked COFF probe row
+  now expects the native answer (7) and accepts Wine 9's (11 + 4 NULLs). The winedbg-override row
+  pins what it exists to prove — the table-less image does not end with the fault status — instead
+  of an exit code that varies between Wine builds. The probe row also named its frames by absolute
+  address, which is only right at the preferred base; natively (ASLR) every frame came out as
+  `main` (#327). The probe now prints each frame's module base and `tests/helpers/probe_chain.py`
+  maps the frame relative to it, for the row and for `tests/windows/native_probe.sh`; the native
+  `linkprobe` reclassification is gone.
+- *Wine logs are never judged as native runs.* Under Wine 10 the fault rows failed with exactly the
+  text the native judge accepts as the expected native failure. The suite now prints a
+  `wine runner:` header; the Wine-trace helper only prints that text when the runner is native, and
+  `tests/windows/native_judge.py` refuses (exit 2) a log whose header is not `native`. Native out
+  dirs written before this change have no header and need the judge of their own era.
+- *OpenSSH 10.2 (#268).* The native-run scripts take their ssh/scp options from
+  `tests/windows/ssh_opts.sh`, which adds `-o WarnWeakCrypto=no-pq-kex` when the local ssh accepts
+  it, so the post-quantum warning no longer lands in the rows' stderr.
+- *CI (#272, #260, #323).* `ubuntu-latest` (26.04) has no `qemu-user-static`; CI installs
+  `qemu-user --no-install-recommends` on both Linux jobs (no binfmt handlers), finds qemu through
+  `tests/helpers/qemu_bin.sh`, fails loudly when it is missing, and fails a job on a foreign-arch
+  binfmt handler (`tests/helpers/ci_binfmt_check.sh`). The stale `qemu-*-static` symlink step is
+  gone. `qemu-system-riscv` is installed, so the x86_64 job runs the 11 riscv32 system rows it had
+  been skipping since 26.04 split that package out.
+
 ## v2.11.0 — 2026-11-10
 
 **Windows can unwind through KernRift code (#143).** PE images and Windows COFF
