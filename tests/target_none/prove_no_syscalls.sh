@@ -315,6 +315,21 @@ TN_PIN=fef010ed553fc72841407c6b2afd2eb50d5fe739
 # the zero register; krc's own arm64 Windows listing has three `str xzr, [sp, …]`
 # that it used to print as `str sp, …`. Text only (exit 0 -> 0); the code bytes
 # are unchanged.
+# L1 (#247 #294 #298 #299 #301 #296 #149 #302), 69 rows more, measured with
+# every L1 stage compiler in turn (each row attributed to every fix that
+# changes its bytes), exit 0 -> 0 each; the 19 rows above move as well:
+#   #247 (`loop` is While(IntLit), no Compare): krc.kr, std and the bare-metal
+#     corpus use `loop`; the IR frame of each such function is 16 bytes
+#     smaller and the legacy loop test is `mov eax, 1` -- every krc_*, debug_*,
+#     fat_krc, bm_*, rv32_* and xt_* row, and the three esp32 suite rows;
+#   #294 / #298 #299 (ELF objects): statics in .data with relocations, arm64
+#     string and fn_addr references relocated -- the *_linux_obj and
+#     *_android_obj rows;
+#   #301 / #296 (Mach-O objects) and #149 / #296 (COFF objects): __DATA,__data
+#     or .data, the static relocations, @export external -- *_macos_obj,
+#     *_windows_obj;
+#   #302 (--legacy float values): probe_io.kr's f32/f64 conversions and float
+#     negation -- the probe_* --legacy and object rows.
 G1_MOVED="krc_x86_64_macos_ir
 krc_x86_64_macos_legacy
 krc_x86_64_windows_ir
@@ -333,7 +348,76 @@ debug_x86_64_macos
 debug_x86_64_windows
 debug_arm64_macos
 debug_arm64_windows
-krc_arm64_windows_asm"
+krc_arm64_windows_asm
+bm_arx_arm64_arith
+bm_arx_arm64_bmarr
+bm_arx_x86_64_arith
+bm_arx_x86_64_bmarr
+bm_image_arm64_arith
+bm_image_arm64_bmarr
+bm_image_stub_arm64_arith
+bm_image_stub_arm64_bmarr
+bm_image_stub_x86_64_arith
+bm_image_stub_x86_64_bmarr
+bm_image_x86_64_arith
+bm_image_x86_64_bmarr
+bm_resetvec_x86_64_arith
+bm_resetvec_x86_64_bmarr
+bm_uefi_arm64_arith
+bm_uefi_arm64_bmarr
+bm_uefi_x86_64_arith
+bm_uefi_x86_64_bmarr
+debug_arm64_android
+debug_arm64_linux
+debug_x86_64_android
+debug_x86_64_linux
+fat_krc
+krc_arm64_android_asm
+krc_arm64_android_ir
+krc_arm64_android_legacy
+krc_arm64_android_obj
+krc_arm64_linux_asm
+krc_arm64_linux_ir
+krc_arm64_linux_legacy
+krc_arm64_linux_obj
+krc_arm64_macho
+krc_arm64_macos_asm
+krc_arm64_macos_obj
+krc_arm64_pe
+krc_x86_64_android_asm
+krc_x86_64_android_ir
+krc_x86_64_android_legacy
+krc_x86_64_android_obj
+krc_x86_64_linux_asm
+krc_x86_64_linux_ir
+krc_x86_64_linux_legacy
+krc_x86_64_linux_obj
+krc_x86_64_macho
+krc_x86_64_macos_asm
+krc_x86_64_macos_obj
+krc_x86_64_pe
+krc_x86_64_windows_asm
+probe_arm64_android_legacy
+probe_arm64_android_obj
+probe_arm64_linux_legacy
+probe_arm64_linux_obj
+probe_arm64_macos_obj
+probe_arm64_windows_obj
+probe_x86_64_android_legacy
+probe_x86_64_android_obj
+probe_x86_64_linux_legacy
+probe_x86_64_linux_obj
+probe_x86_64_macos_obj
+probe_x86_64_windows_obj
+rv32_freestanding_arith
+rv32_freestanding_bmarr
+rv32_hosted_arith
+rv32_hosted_bmarr
+suite_xtensa_freestanding_target_esp32_examples_esp32_hello_kr
+suite_xtensa_freestanding_target_esp32_examples_esp32_minimal_kr
+suite_xtensa_freestanding_target_esp32_examples_esp32_twai_loopback_kr
+xt_freestanding_arith
+xt_freestanding_bmarr"
 TN_BASE="${TN_BASE:-$TN_PIN}"
 if [ "$TN_BASE" = "$TN_PIN" ]; then G1_MOVED_WANT="${G1_MOVED_WANT-$G1_MOVED}"; else G1_MOVED_WANT="${G1_MOVED_WANT-}"; fi
 
