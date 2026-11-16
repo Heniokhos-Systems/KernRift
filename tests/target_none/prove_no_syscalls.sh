@@ -311,6 +311,10 @@ TN_PIN=fef010ed553fc72841407c6b2afd2eb50d5fe739
 # an --emit= (IR and --legacy; krc_*_windows_legacy is refused on both sides,
 # by the syscall_raw rule) and the four macos|windows debug_* rows of (B). The (A2) rows
 # already said --emit=pe / --emit=macho and do not move.
+# A1 (#281): the arm64 listing prints register 31 as xzr where the field means
+# the zero register; krc's own arm64 Windows listing has three `str xzr, [sp, …]`
+# that it used to print as `str sp, …`. Text only (exit 0 -> 0); the code bytes
+# are unchanged.
 G1_MOVED="krc_x86_64_macos_ir
 krc_x86_64_macos_legacy
 krc_x86_64_windows_ir
@@ -328,7 +332,8 @@ probe_arm64_windows_legacy
 debug_x86_64_macos
 debug_x86_64_windows
 debug_arm64_macos
-debug_arm64_windows"
+debug_arm64_windows
+krc_arm64_windows_asm"
 TN_BASE="${TN_BASE:-$TN_PIN}"
 if [ "$TN_BASE" = "$TN_PIN" ]; then G1_MOVED_WANT="${G1_MOVED_WANT-$G1_MOVED}"; else G1_MOVED_WANT="${G1_MOVED_WANT-}"; fi
 
