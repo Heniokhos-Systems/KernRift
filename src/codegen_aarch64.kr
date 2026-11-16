@@ -997,6 +997,9 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
     uint64 rem = var_frame_size & 15
     if rem != 0 { var_frame_size = var_frame_size + 16 - rem }
     uint64 xfl = cg_alloc(xn * 8 + 8)
+    uint64 xst = cg_alloc(xn * 8 + 8)     // #295: 1 = this entry goes on the stack
+    uint64 sg = 0
+    uint64 sv = 0
     uint64 j = 0
     a = 0
     while a < arg_count {
@@ -1007,7 +1010,10 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
         uint64 fk2 = 0
         unsafe { *(fp2 as uint64) -> fk2 }
         uint64 src = arg_slots_base + a * 8
+        uint64 j0 = j
+        uint64 st = 0
         if si2 == 0xFFFFFFFF {
+            if fk2 != 0 { if sv < 8 { sv = sv + 1 } else { st = 1 } } else { if sg < 8 { sg = sg + 1 } else { st = 1 } }
             emit_a64_load_x0(src)
             emit_a64_store_x0(xbase + j * 8)
             uint64 isf = 0
@@ -1021,6 +1027,14 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
             if (fl2 & 1) != 0 {
                 uint64 hc = ((fl2 >> 1) & 3) + 1
                 uint64 ht = (fl2 >> 3) & 3
+                if sv + hc > 8 {
+                    // AAPCS64 C.3: the whole HFA on the stack, NSRN = 8; its
+                    // memory image in 8-byte slots
+                    st = 1
+                    sv = 8
+                    hc = (sz2 + 7) / 8
+                    ht = 1
+                } else { sv = sv + hc }
                 uint64 h = 0
                 while h < hc {
                     emit_a64_load_x0(src)
@@ -1037,6 +1051,7 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
                     h = h + 1
                 }
             } else if sz2 > 16 {
+                if sg < 8 { sg = sg + 1 } else { st = 1 }
                 emit_a64_load_x0(src)
                 emit_a64_store_x0(xbase + j * 8)
                 uint64 z0 = 0
@@ -1044,6 +1059,8 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
                 unsafe { *(xp2 as uint64) = z0 }
                 j = j + 1
             } else {
+                uint64 kk = (sz2 + 7) / 8
+                if sg + kk > 8 { st = 1  sg = 8 } else { sg = sg + kk }   // AAPCS64 C.13
                 emit_a64_load_x0(src)
                 emit_a64_ldr(0, 0, 0)
                 emit_a64_store_x0(xbase + j * 8)
@@ -1062,6 +1079,11 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
                 }
             }
         }
+        while j0 < j {
+            uint64 stp = xst + j0 * 8
+            unsafe { *(stp as uint64) = st }
+            j0 = j0 + 1
+        }
         a = a + 1
     }
     // Pass 2: assign registers; collect the overflow in order.
@@ -1076,7 +1098,14 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
         uint64 qf = 0
         unsafe { *(qp as uint64) -> qf }
         uint64 qslot = xbase + q * 8
-        if qf != 0 && vi < 8 {
+        uint64 qsp = xst + q * 8
+        uint64 qst = 0
+        unsafe { *(qsp as uint64) -> qst }
+        if qst != 0 {
+            uint64 op0 = ovf + novf * 8
+            unsafe { *(op0 as uint64) = qslot }
+            novf = novf + 1
+        } else if qf != 0 && vi < 8 {
             emit_a64_load_dN(vi, qslot)
             vi = vi + 1
         } else if qf == 0 && gi < 8 {
@@ -5043,6 +5072,165 @@ fn gen_expr_a64_node(uint64 node) {
             unsafe { *(arg_struct_flags_a as uint64) = self_ptr_flag_a }
         }
 
+        // #295: AAPCS64 C.13/C.3 -- a composite that does not fit in the
+        // registers still free goes whole on the stack and closes that
+        // register class (NGRN/NSRN = 8). The loader below assigns "next
+        // register"; in that case the arguments are rewritten into
+        // register-sized entries, each marked register or stack.
+        uint64 a5_forced = 0
+        if abi_struct_pass_by_val != 0 {
+            uint64 a5_need = 0
+            uint64 a5_any = 0
+            uint64 a5_gi = 0
+            uint64 a5_vi = 0
+            uint64 a5_a = 0
+            while a5_a < arg_count {
+                uint64 a5_sf = 0
+                unsafe { *(arg_struct_flags_a + a5_a * 8 as uint64) -> a5_sf }
+                uint64 a5_ff = 0
+                unsafe { *(arg_float_flags_a + a5_a * 8 as uint64) -> a5_ff }
+                if a5_sf != 0xFFFFFFFF {
+                    a5_any = 1
+                    uint64 a5_fl = struct_abi_flags(a5_sf)
+                    uint64 a5_sz = struct_total_size(a5_sf)
+                    if (a5_fl & 1) != 0 {
+                        uint64 a5_hn = ((a5_fl >> 1) & 3) + 1
+                        if a5_vi + a5_hn > 8 { a5_need = 1  a5_vi = 8 } else { a5_vi = a5_vi + a5_hn }
+                    } else if a5_sz > 16 {
+                        a5_gi = a5_gi + 1
+                    } else {
+                        uint64 a5_k = (a5_sz + 7) / 8
+                        if a5_gi + a5_k > 8 { a5_need = 1  a5_gi = 8 } else { a5_gi = a5_gi + a5_k }
+                    }
+                } else if a5_ff != 0 {
+                    a5_vi = a5_vi + 1
+                } else {
+                    a5_gi = a5_gi + 1
+                }
+                a5_a = a5_a + 1
+            }
+            if a5_any != 0 && (a5_gi > 8 || a5_vi > 8) { a5_need = 1 }
+            if a5_need != 0 {
+                uint64 a5_xn = 0
+                a5_a = 0
+                while a5_a < arg_count {
+                    uint64 a5_sf2 = 0
+                    unsafe { *(arg_struct_flags_a + a5_a * 8 as uint64) -> a5_sf2 }
+                    if a5_sf2 == 0xFFFFFFFF { a5_xn = a5_xn + 1 } else {
+                        uint64 a5_fl2 = struct_abi_flags(a5_sf2)
+                        if (a5_fl2 & 1) != 0 { a5_xn = a5_xn + ((a5_fl2 >> 1) & 3) + 1 }
+                        else if struct_total_size(a5_sf2) > 16 { a5_xn = a5_xn + 1 }
+                        else { a5_xn = a5_xn + (struct_total_size(a5_sf2) + 7) / 8 }
+                    }
+                    a5_a = a5_a + 1
+                }
+                if a5_xn > 64 {
+                    uint64 a5_e = "error: too many call arguments (max 64, a by-value struct counts once per register it occupies)\n"
+                    write(2, a5_e, str_len(a5_e))
+                    fatal_exit()
+                }
+                uint64 a5_base = cg_slot_off(var_count)
+                uint64 a5_c = 0
+                while a5_c < a5_xn { var_count = var_count + 1; a5_c = a5_c + 1 }
+                var_frame_size = var_count * 8
+                uint64 a5_rem = var_frame_size & 15
+                if a5_rem != 0 { var_frame_size = var_frame_size + 16 - a5_rem }
+                uint64 a5_kind = cg_alloc(a5_xn * 8 + 8)
+                a5_forced = cg_alloc(a5_xn * 8 + 8)
+                uint64 a5_j = 0
+                uint64 a5_g = 0
+                uint64 a5_v = 0
+                uint64 a5_nstack = 0
+                a5_a = 0
+                while a5_a < arg_count {
+                    uint64 a5_s3 = 0
+                    unsafe { *(arg_struct_flags_a + a5_a * 8 as uint64) -> a5_s3 }
+                    uint64 a5_f3 = 0
+                    unsafe { *(arg_float_flags_a + a5_a * 8 as uint64) -> a5_f3 }
+                    uint64 a5_src = arg_slots_base + a5_a * 8
+                    uint64 a5_j0 = a5_j
+                    uint64 a5_st = 0
+                    if a5_s3 == 0xFFFFFFFF || (struct_abi_flags(a5_s3) & 1) == 0 && struct_total_size(a5_s3) > 16 {
+                        // scalar, or a > 16-byte struct passed by address
+                        emit_a64_load_x0(a5_src)
+                        emit_a64_store_x0(a5_base + a5_j * 8)
+                        uint64 a5_k3 = 0
+                        if a5_s3 == 0xFFFFFFFF && a5_f3 != 0 { a5_k3 = 1 }
+                        uint64 a5_kp = a5_kind + a5_j * 8
+                        unsafe { *(a5_kp as uint64) = a5_k3 }
+                        if a5_k3 != 0 { if a5_v < 8 { a5_v = a5_v + 1 } else { a5_st = 1 } }
+                        else { if a5_g < 8 { a5_g = a5_g + 1 } else { a5_st = 1 } }
+                        a5_j = a5_j + 1
+                    } else {
+                        uint64 a5_fl3 = struct_abi_flags(a5_s3)
+                        if (a5_fl3 & 1) != 0 {
+                            uint64 a5_hn3 = ((a5_fl3 >> 1) & 3) + 1
+                            uint64 a5_ht3 = (a5_fl3 >> 3) & 3
+                            if a5_v + a5_hn3 > 8 { a5_st = 1  a5_v = 8 } else { a5_v = a5_v + a5_hn3 }
+                            uint64 a5_h = 0
+                            uint64 a5_hcount = a5_hn3
+                            if a5_st != 0 {
+                                // on the stack the HFA is its own memory image, 8-byte slots
+                                a5_hcount = (struct_total_size(a5_s3) + 7) / 8
+                            }
+                            while a5_h < a5_hcount {
+                                emit_a64_load_x0(a5_src)
+                                if a5_st != 0 || a5_ht3 == 1 {
+                                    emit_a64_ldr(0, 0, a5_h * 8)
+                                } else {
+                                    emit_a64(0xB9400000 | (a5_h << 10))      // ldr w0, [x0, #4h]
+                                }
+                                emit_a64_store_x0(a5_base + a5_j * 8)
+                                uint64 a5_one = 1
+                                if a5_st != 0 { a5_one = 0 }
+                                uint64 a5_kp2 = a5_kind + a5_j * 8
+                                unsafe { *(a5_kp2 as uint64) = a5_one }
+                                a5_j = a5_j + 1
+                                a5_h = a5_h + 1
+                            }
+                        } else {
+                            uint64 a5_k4 = (struct_total_size(a5_s3) + 7) / 8
+                            if a5_g + a5_k4 > 8 { a5_st = 1  a5_g = 8 } else { a5_g = a5_g + a5_k4 }
+                            uint64 a5_e8 = 0
+                            while a5_e8 < a5_k4 {
+                                emit_a64_load_x0(a5_src)
+                                emit_a64_ldr(0, 0, a5_e8 * 8)
+                                emit_a64_store_x0(a5_base + a5_j * 8)
+                                uint64 a5_z = 0
+                                uint64 a5_kp3 = a5_kind + a5_j * 8
+                                unsafe { *(a5_kp3 as uint64) = a5_z }
+                                a5_j = a5_j + 1
+                                a5_e8 = a5_e8 + 1
+                            }
+                        }
+                    }
+                    while a5_j0 < a5_j {
+                        uint64 a5_fp = a5_forced + a5_j0 * 8
+                        unsafe { *(a5_fp as uint64) = a5_st }
+                        if a5_st != 0 { a5_nstack = a5_nstack + 1 }
+                        a5_j0 = a5_j0 + 1
+                    }
+                    a5_a = a5_a + 1
+                }
+                if target_os == 2 && cg_a64_stack_area(a5_nstack) > cg_a64_call_area(arg_count) {
+                    uint64 a5_we = "error: by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy\n"
+                    write(2, a5_we, str_len(a5_we))
+                    fatal_exit()
+                }
+                uint64 a5_w = 0
+                while a5_w < a5_xn {
+                    uint64 a5_kv = 0
+                    uint64 a5_kp4 = a5_kind + a5_w * 8
+                    unsafe { *(a5_kp4 as uint64) -> a5_kv }
+                    unsafe { *(arg_float_flags_a + a5_w * 8 as uint64) = a5_kv }
+                    uint64 a5_none = 0xFFFFFFFF
+                    unsafe { *(arg_struct_flags_a + a5_w * 8 as uint64) = a5_none }
+                    a5_w = a5_w + 1
+                }
+                arg_count = a5_xn
+                arg_slots_base = a5_base
+            }
+        }
         // Load args into registers from temp slots
         // AAPCS64: int args → x0-x7 (independent counter)
         //          float args → d0-d7 (independent counter)
@@ -5053,7 +5241,7 @@ fn gen_expr_a64_node(uint64 node) {
             uint64 ff_addr_a = arg_float_flags_a + fi_a * 8
             uint64 ff_val_a = 0
             unsafe { *(ff_addr_a as uint64) -> ff_val_a }
-            if ff_val_a != 0 && call_float_idx < 8 {
+            if ff_val_a != 0 && call_float_idx < 8 && cg_arg_forced_stack(a5_forced, fi_a) == 0 {
                 emit_a64_load_dN(call_float_idx, arg_slots_base + fi_a * 8)
                 call_float_idx = call_float_idx + 1
             } else if ff_val_a == 0 {
@@ -5094,7 +5282,7 @@ fn gen_expr_a64_node(uint64 node) {
             uint64 fi_addr_a = arg_float_flags_a + ii_a * 8
             uint64 fi_val_a = 0
             unsafe { *(fi_addr_a as uint64) -> fi_val_a }
-            if fi_val_a == 0 {
+            if fi_val_a == 0 && cg_arg_forced_stack(a5_forced, ii_a) == 0 {
                 // Check if this is a struct arg
                 uint64 saf_addr_c = arg_struct_flags_a + ii_a * 8
                 uint64 saf_val_c = 0
@@ -5154,7 +5342,7 @@ fn gen_expr_a64_node(uint64 node) {
                 uint64 ri_addr = arg_float_flags_a + ri_a * 8
                 uint64 ri_val = 0
                 unsafe { *(ri_addr as uint64) -> ri_val }
-                if ri_val == 0 {
+                if ri_val == 0 && cg_arg_forced_stack(a5_forced, ri_a) == 0 {
                     // Check if first int arg is a struct — reload eightbyte 0
                     uint64 ri_saf = arg_struct_flags_a + ri_a * 8
                     uint64 ri_sv = 0
@@ -5215,11 +5403,13 @@ fn gen_expr_a64_node(uint64 node) {
             uint64 oasv_a = 0
             unsafe { *(oas_a as uint64) -> oasv_a }
             if oasv_a != 0xFFFFFFFF && abi_struct_pass_by_val != 0 { ovf_has_struct_a = 1 }
-            uint64 on_stack_a = 0
-            if oafv_a != 0 {
-                if ovf_f_a < 8 { ovf_f_a = ovf_f_a + 1 } else { on_stack_a = 1 }
-            } else {
-                if ovf_i_a < 8 { ovf_i_a = ovf_i_a + 1 } else { on_stack_a = 1 }
+            uint64 on_stack_a = cg_arg_forced_stack(a5_forced, oa_a)
+            if on_stack_a == 0 {
+                if oafv_a != 0 {
+                    if ovf_f_a < 8 { ovf_f_a = ovf_f_a + 1 } else { on_stack_a = 1 }
+                } else {
+                    if ovf_i_a < 8 { ovf_i_a = ovf_i_a + 1 } else { on_stack_a = 1 }
+                }
             }
             if on_stack_a != 0 {
                 uint64 ovp_a = ovf_idx_a + ovf_n_a * 8
@@ -6881,7 +7071,56 @@ fn gen_function_a64(uint64 fn_node) {
                     // Check if this is an HFA struct — spill from d/s regs
                     uint64 sflags_c = struct_abi_flags(param_si_spill_a)
                     uint64 is_hfa_c = sflags_c & 1
+                    // #295: a composite that does not fit in the registers still
+                    // free arrived whole on the stack (its memory image, 8-byte
+                    // slots) and closed that register class.
+                    uint64 a5_ovf = 0
                     if is_hfa_c != 0 {
+                        if float_pidx_a + ((sflags_c >> 1) & 3) + 1 > 8 { a5_ovf = 1 }
+                    } else if sv_ssize_a > 16 {
+                        if int_pidx_a >= 8 { a5_ovf = 2 }
+                    } else {
+                        if int_pidx_a + sv_sslots_a > 8 { a5_ovf = 1 }
+                    }
+                    if a5_ovf == 2 {
+                        uint64 a5pl_1 = out_len
+                        emit_a64(0xF9400000 | (31 << 5) | 0)
+                        if stack_pidx_a >= 64 {
+                            cap_overflow("too many stack parameters", 64, 1)
+                            fatal_exit()
+                        }
+                        uint64 a5pe_1 = a64_overflow_patches + stack_pidx_a * 8
+                        uint32 a5pl32_1 = a5pl_1
+                        unsafe { *(a5pe_1 as uint32) = a5pl32_1 }
+                        a64_overflow_patch_count = stack_pidx_a + 1
+                        stack_pidx_a = stack_pidx_a + 1
+                        emit_a64_mov(9, 0)
+                        int_pidx_a = int_pidx_a + 1
+                        uint64 a5q = 0
+                        while a5q < sv_sslots_a {
+                            emit_a64_ldr(10, 9, a5q * 8)
+                            emit_a64_str(10, 31, a64_var_base + struct_area_a + a5q * 8)
+                            a5q = a5q + 1
+                        }
+                    } else if a5_ovf == 1 {
+                        if is_hfa_c != 0 { float_pidx_a = 8 } else { int_pidx_a = 8 }
+                        uint64 a5e = 0
+                        while a5e < sv_sslots_a {
+                            uint64 a5pl_2 = out_len
+                            emit_a64(0xF9400000 | (31 << 5) | 0)
+                            if stack_pidx_a >= 64 {
+                                cap_overflow("too many stack parameters", 64, 1)
+                                fatal_exit()
+                            }
+                            uint64 a5pe_2 = a64_overflow_patches + stack_pidx_a * 8
+                            uint32 a5pl32_2 = a5pl_2
+                            unsafe { *(a5pe_2 as uint32) = a5pl32_2 }
+                            a64_overflow_patch_count = stack_pidx_a + 1
+                            stack_pidx_a = stack_pidx_a + 1
+                            emit_a64_str(0, 31, a64_var_base + struct_area_a + a5e * 8)
+                            a5e = a5e + 1
+                        }
+                    } else if is_hfa_c != 0 {
                         uint64 hfa_count_c = ((sflags_c >> 1) & 3) + 1
                         uint64 hfa_type_c = (sflags_c >> 3) & 3
                         uint64 field_size_c = 4
