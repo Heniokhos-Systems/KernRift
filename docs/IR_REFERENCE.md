@@ -684,14 +684,14 @@ See also the
 ### `IR_CALL` (50) carries a token index, resolved by text
 
 `imm` on an `IR_CALL` is the index of a token in the *source text*. At
-fixup time, `fn_lookup()` (`src/codegen.kr:3787`) walks the function table
+fixup time, `fn_lookup()` (`src/codegen.kr:3830`) walks the function table
 comparing with `tok_text_eq()` (`src/codegen.kr:1608`), which compares byte
 by byte through `cg_source`.
 
 **Consequence: a compiler-synthesised call to a name that has no token in the
 program's source is impossible.** There is no "make me a symbol" path. Any
 lowering that wants to call something must find a real token for it. This is
-why `builtin_override_tok_of()` (`src/codegen.kr:3865`) exists and returns
+why `builtin_override_tok_of()` (`src/codegen.kr:3908`) exists and returns
 the *definition's* token: the `--target=none` print rerouting needs a token
 to put in an `IR_CALL`, and the only one available is the one on the
 `@builtin_override fn write` declaration. Designs that assume otherwise have
@@ -881,7 +881,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:17191`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:17284`). `_start` is not a seed, so freestanding riscv32 and
   xtensa (and `--emit=image`) entry points had to be added explicitly
   (`src/main.kr:4616`–`4631`).
 - **A provider reached only through override resolution gets pruned.** Under
@@ -889,7 +889,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:17021`–`17041`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:17114`–`17134`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.
@@ -1399,8 +1399,8 @@ An asm statement lowers to an **asm window**: one `IR_ARG` (51) per `in()`
 with `imm` = register + 100 (`src1` the variable), the `IR_ASM_BLOCK` (96;
 `src1` = the AST node), and one `IR_COPY` (61) per `out()` with `src1` 0 and
 `imm` = register + 100 (`dest` the variable's new vreg). Every register in
-the window comes from `asm_reg_try` (`src/codegen.kr:4606`), after
-`asm_check_constraints` (`src/codegen.kr:4727`) has refused unknown names and
+the window comes from `asm_reg_try` (`src/codegen.kr:4649`), after
+`asm_check_constraints` (`src/codegen.kr:4770`) has refused unknown names and
 the stack pointer in all three lowerings.
 
 `ir_seed_asm_bans` (`src/ir.kr:7228`), the first thing `ir_graph_color` does

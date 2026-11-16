@@ -3448,6 +3448,49 @@ fn cg_sysv_struct_regs(uint64 si) -> uint64 {
     return ni | (ns << 8)
 }
 
+// #302: convert the float in xmm0 from kind `from` to kind `to`
+// (expr_is_float values: 1 = f64, 2 = f32; anything else = no-op).
+fn legacy_fcoerce(uint64 from, uint64 to) {
+    if from == 1 && to == 2 {
+        emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)   // cvtsd2ss xmm0, xmm0
+    }
+    if from == 2 && to == 1 {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)   // cvtss2sd xmm0, xmm0
+    }
+}
+
+// #302: a binary float operation / compare with LHS in xmm0 (kind lk) and
+// RHS in xmm1 (kind rk). Mixed f32/f64 widens the f32 side, as the IR does;
+// returns the kind the operation runs in.
+fn legacy_falign(uint64 lk, uint64 rk) -> uint64 {
+    if lk == 2 && rk == 1 {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)   // cvtss2sd xmm0, xmm0
+        return 1
+    }
+    if lk == 1 && rk == 2 {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC9)   // cvtss2sd xmm1, xmm1
+        return 1
+    }
+    return lk
+}
+
+// #302: the kind (1 = f64, 2 = f32, 0 = not float) of a declared type kind.
+fn legacy_fkind_of_type(uint64 tk) -> uint64 {
+    if is_float_type(tk) == 0 { return 0 }
+    if is_f32_type(tk) != 0 { return 2 }
+    return 1
+}
+
+// #302: the float kind of field `field_tok` of the struct variable `obj_tok`
+// (0 when not a float field or not a known struct variable).
+fn legacy_field_fkind(uint64 obj_tok, uint64 field_tok) -> uint64 {
+    uint64 si = struct_var_lookup(obj_tok)
+    if si == 0xFFFFFFFF { return 0 }
+    uint64 tk = struct_field_type_kind_by_tok(si, field_tok)
+    if tk >= 256 { return 0 }
+    return legacy_fkind_of_type(tk)
+}
+
 // Resolve all static RIP-relative fixups. Call after all code is emitted.
 // data_start = out_len at the time statics are placed.
 @export
@@ -5933,8 +5976,16 @@ fn gen_expr_node(uint64 node) {
             emit_byte(0x0F); emit_byte(0x94); emit_byte(0xC0)
             emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC0)
         } else if wok == 31 {
-            // - negate: neg rax
-            emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD8)
+            if expr_is_float == 1 || expr_is_float == 2 {
+                // #302: flip the sign bit of the float (bit 63 / bit 31)
+                emit_float_bits_to_rax(expr_is_float)
+                emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBA); emit_byte(0xF8)
+                if expr_is_float == 1 { emit_byte(0x3F) } else { emit_byte(0x1F) }   // btc rax, 63 / 31
+                emit_rax_bits_to_xmm0(expr_is_float)
+                rax_cache = 0
+            } else {
+                emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD8)
+            }
         } else if wok == 26 {
             // ~ bitwise NOT: not rax
             emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD0)
@@ -6820,6 +6871,12 @@ fn gen_expr_node(uint64 node) {
                     emit_static_lea(soff)
                 } else {
                     emit_static_load(soff)
+                    // #302: a float static's value is a float (in xmm0)
+                    uint64 sfk_l = static_fkind_of(wident_tok)
+                    if sfk_l != 0 {
+                        emit_rax_bits_to_xmm0(sfk_l)
+                        expr_is_float = sfk_l
+                    }
                 }
                 // A file-scope static struct is a struct VALUE at its own
                 // address, exactly like a local struct variable — say so, or
@@ -6978,6 +7035,7 @@ fn gen_expr_node(uint64 node) {
                     } else {
                         emit_load_xmm0_f64(ft0)
                     }
+                    uint64 fal_ft0 = legacy_falign(lhs_is_float, rhs_is_float)   // #302
                     uint32 op_tok_fb = ast_data1(node)
                     uint64 wop_fb = op_tok_fb
                     uint64 pfb = cg_tokens + wop_fb * 16
@@ -6985,7 +7043,7 @@ fn gen_expr_node(uint64 node) {
                     unsafe { *(pfb as uint32) -> op_kind_fb }
                     uint64 wopk_fb = op_kind_fb
                     wopk_fb = float_binop_op_kind(wopk_fb)
-                    if lhs_is_float == 2 {
+                    if fal_ft0 == 2 {
                         if wopk_fb == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addss
                         if wopk_fb == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subss
                         if wopk_fb == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulss
@@ -6996,7 +7054,7 @@ fn gen_expr_node(uint64 node) {
                         if wopk_fb == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulsd
                         if wopk_fb == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divsd
                     }
-                    expr_is_float = lhs_is_float
+                    expr_is_float = fal_ft0
                     return
                 }
             } else {
@@ -7032,6 +7090,7 @@ fn gen_expr_node(uint64 node) {
                     } else {
                         emit_load_xmm0_f64(ft1)
                     }
+                    uint64 fal_ft1 = legacy_falign(lhs_is_float, rhs_is_float2)   // #302
                     uint32 op_tok_fc = ast_data1(node)
                     uint64 wop_fc = op_tok_fc
                     uint64 pfc = cg_tokens + wop_fc * 16
@@ -7039,7 +7098,7 @@ fn gen_expr_node(uint64 node) {
                     unsafe { *(pfc as uint32) -> op_kind_fc }
                     uint64 wopk_fc = op_kind_fc
                     wopk_fc = float_binop_op_kind(wopk_fc)
-                    if lhs_is_float == 2 {
+                    if fal_ft1 == 2 {
                         if wopk_fc == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
                         if wopk_fc == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
                         if wopk_fc == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
@@ -7050,7 +7109,7 @@ fn gen_expr_node(uint64 node) {
                         if wopk_fc == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
                         if wopk_fc == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     }
-                    expr_is_float = lhs_is_float
+                    expr_is_float = fal_ft1
                     return
                 }
             } else {
@@ -7088,6 +7147,7 @@ fn gen_expr_node(uint64 node) {
                     } else {
                         emit_load_xmm0_f64(binop_temp)
                     }
+                    uint64 fal_binop_temp = legacy_falign(lhs_is_float, rhs_is_float3)   // #302
                     uint32 op_tok_fd = ast_data1(node)
                     uint64 wop_fd = op_tok_fd
                     uint64 pfd = cg_tokens + wop_fd * 16
@@ -7095,7 +7155,7 @@ fn gen_expr_node(uint64 node) {
                     unsafe { *(pfd as uint32) -> op_kind_fd }
                     uint64 wopk_fd = op_kind_fd
                     wopk_fd = float_binop_op_kind(wopk_fd)
-                    if lhs_is_float == 2 {
+                    if fal_binop_temp == 2 {
                         if wopk_fd == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
                         if wopk_fd == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
                         if wopk_fd == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
@@ -7106,7 +7166,7 @@ fn gen_expr_node(uint64 node) {
                         if wopk_fd == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
                         if wopk_fd == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     }
-                    expr_is_float = lhs_is_float
+                    expr_is_float = fal_binop_temp
                     return
                 }
             } else {
@@ -7620,8 +7680,9 @@ fn gen_expr_node(uint64 node) {
                 } else {
                     emit_load_xmm0_f64(fcmp_temp_s)
                 }
+                uint64 fal_fcmp_temp_s = legacy_falign(lhs_is_float_s, expr_is_float)   // #302
                 // ucomisd xmm0, xmm1: 66 0F 2E C1  (ucomiss: 0F 2E C1)
-                if lhs_is_float_s == 2 {
+                if fal_fcmp_temp_s == 2 {
                     emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
                 } else {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
@@ -7665,8 +7726,9 @@ fn gen_expr_node(uint64 node) {
                 } else {
                     emit_load_xmm0_f64(fcmp_temp_r)
                 }
+                uint64 fal_fcmp_temp_r = legacy_falign(lhs_is_float_r, expr_is_float)   // #302
                 // ucomisd xmm0, xmm1: 66 0F 2E C1  (ucomiss: 0F 2E C1)
-                if lhs_is_float_r == 2 {
+                if fal_fcmp_temp_r == 2 {
                     emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
                 } else {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
@@ -7713,8 +7775,9 @@ fn gen_expr_node(uint64 node) {
                 } else {
                     emit_load_xmm0_f64(cmp_temp)
                 }
+                uint64 fal_cmp_temp = legacy_falign(lhs_is_float_k, expr_is_float)   // #302
                 // ucomisd xmm0, xmm1: 66 0F 2E C1  (ucomiss: 0F 2E C1)
-                if lhs_is_float_k == 2 {
+                if fal_cmp_temp == 2 {
                     emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
                 } else {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
@@ -14079,6 +14142,7 @@ fn gen_stmt(uint64 node) {
         if wic != 0 {
             gen_expr(wic)
             if is_float_type(wtype) != 0 {
+                legacy_fcoerce(expr_is_float, legacy_fkind_of_type(wtype))   // #302
                 if is_f32_type(wtype) != 0 {
                     emit_store_xmm0_f32(offset)
                 } else {
@@ -14172,6 +14236,7 @@ fn gen_stmt(uint64 node) {
                     // temp_slot_0.
                     uint64 nfw_slot = alloc_scratch_slot()
                     gen_expr(wval)
+                    uint64 nfw_vfk = expr_is_float          // #302: the value's float kind
                     if expr_is_float == 1 {
                         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F)
                         emit_byte(0x7E); emit_byte(0xC0)
@@ -14193,6 +14258,16 @@ fn gen_stmt(uint64 node) {
                         }
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
                         emit_load_rax_from_stack(nfw_slot)
+                        // #302: convert the parked float bits to the field's kind
+                        uint64 nfw_ftk = struct_field_type_kind_by_tok(nsi_w, field_tok)
+                        uint64 nfw_ffk = 0
+                        if nfw_ftk < 256 { nfw_ffk = legacy_fkind_of_type(nfw_ftk) }
+                        if nfw_ffk != 0 && nfw_vfk != 0 && nfw_ffk != nfw_vfk {
+                            emit_rax_bits_to_xmm0(nfw_vfk)
+                            legacy_fcoerce(nfw_vfk, nfw_ffk)
+                            emit_float_bits_to_rax(nfw_ffk)
+                            rax_cache = 0
+                        }
                         if nfsz_w == 1 {
                             emit_byte(0x88); emit_byte(0x01)
                         } else if nfsz_w == 2 {
@@ -14249,6 +14324,11 @@ fn gen_stmt(uint64 node) {
             }
             // Evaluate value
             gen_expr(wval)
+            uint64 ffk_m = legacy_field_fkind(obj_tok, field_tok)   // #302: narrow/widen to the field
+            if ffk_m != 0 && expr_is_float != 0 {
+                legacy_fcoerce(expr_is_float, ffk_m)
+                expr_is_float = ffk_m
+            }
             if expr_is_float == 1 {
                 // f64: move xmm0 bits into rax so rax-based store path works
                 // movq rax, xmm0: 66 48 0F 7E C0
@@ -14345,6 +14425,7 @@ fn gen_stmt(uint64 node) {
         if offset != 0xFFFFFFFF {
             uint64 vtype_a = var_type_lookup(name_tok)
             if is_float_type(vtype_a) != 0 {
+                legacy_fcoerce(expr_is_float, legacy_fkind_of_type(vtype_a))   // #302
                 if is_f32_type(vtype_a) != 0 {
                     emit_store_xmm0_f32(offset)
                 } else {
@@ -14356,6 +14437,12 @@ fn gen_stmt(uint64 node) {
         } else {
             uint64 soff = static_lookup(name_tok)
             if soff != 0xFFFFFFFF {
+                // #302: a float static stores its declared kind's bits
+                uint64 sfk_a = static_fkind_of(name_tok)
+                if sfk_a != 0 && expr_is_float != 0 {
+                    legacy_fcoerce(expr_is_float, sfk_a)
+                    emit_float_bits_to_rax(sfk_a)
+                }
                 emit_static_store(soff)
             }
         }
@@ -15090,6 +15177,9 @@ fn gen_stmt(uint64 node) {
             gen_expr(wa)
             emit_store_rax_to_stack(compound_temp_slot)
             gen_expr(wv)
+            uint32 ps_d3x = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fkx = ps_d3x & 15
+            if (ps_fkx == 1 || ps_fkx == 2) && expr_is_float != 0 { legacy_fcoerce(expr_is_float, ps_fkx)  expr_is_float = ps_fkx }
             emit_float_bits_to_rax(expr_is_float)
             emit_store_rax_to_stack(ps_val_slot)
             emit_load_rax_from_stack(compound_temp_slot)
@@ -15099,6 +15189,9 @@ fn gen_stmt(uint64 node) {
             emit_store_rax_to_stack(ps_addr_slot)
             // Evaluate value → park it
             gen_expr(wv)
+            uint32 ps_d3x = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fkx = ps_d3x & 15
+            if (ps_fkx == 1 || ps_fkx == 2) && expr_is_float != 0 { legacy_fcoerce(expr_is_float, ps_fkx)  expr_is_float = ps_fkx }
             emit_float_bits_to_rax(expr_is_float)
             emit_store_rax_to_stack(ps_val_slot)
             // Reload the address so the tail below still finds it in rax

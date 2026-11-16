@@ -1155,6 +1155,13 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
     }
 }
 
+// #302: convert the float in d0/s0 from kind `from` to kind `to`
+// (expr_is_float_a64 values: 1 = f64, 2 = f32; anything else = no-op).
+fn a64_fcoerce(uint64 from, uint64 to) {
+    if from == 1 && to == 2 { emit_a64(0x1E624000) }   // fcvt s0, d0
+    if from == 2 && to == 1 { emit_a64(0x1E22C000) }   // fcvt d0, s0
+}
+
 // See gen_expr (codegen.kr): a Call is struct-valued only when its callee
 // is declared to return a struct (#248).
 fn gen_expr_a64(uint64 node) {
@@ -1259,8 +1266,10 @@ fn gen_expr_a64_node(uint64 node) {
             emit_a64_cmp(0, 31)
             emit_a64_cset(0, 0)
         } else if wok == 31 {
-            // - negate: neg x0, x0
-            emit_a64_neg(0, 0)
+            // - negate: neg x0, x0 -- fneg for a float (#302)
+            if expr_is_float_a64 == 1 { emit_a64(0x1E614000) }        // fneg d0, d0
+            else if expr_is_float_a64 == 2 { emit_a64(0x1E214000) }   // fneg s0, s0
+            else { emit_a64_neg(0, 0) }
         } else if wok == 26 {
             // ~ bitwise NOT: mvn x0, x0
             emit_a64_mvn(0, 0)
@@ -1875,6 +1884,12 @@ fn gen_expr_a64_node(uint64 node) {
                     emit_a64_static_lea(soff)
                 } else {
                     emit_a64_static_load(soff)
+                    // #302: a float static's value is a float (in d0/s0)
+                    uint64 sfk_la = static_fkind_of(wait_tok)
+                    if sfk_la != 0 {
+                        emit_a64_x0_bits_to_float(sfk_la)
+                        expr_is_float_a64 = sfk_la
+                    }
                 }
                 // A file-scope static struct is a struct VALUE at its own
                 // address, exactly like a local struct variable.
@@ -2057,18 +2072,19 @@ fn gen_expr_a64_node(uint64 node) {
             uint32 rhs_idx = ast_data2(node)
             uint64 wrhs = rhs_idx
             gen_expr_a64(wrhs)
-            // RHS in d0/s0 → move to d1/s1
-            if lhs_is_float_b == 2 {
-                emit_a64(0x1E204001) // fmov s1, s0
-            } else {
-                emit_a64(0x1E604001) // fmov d1, d0
-            }
+            // RHS in d0/s0 → d1/s1 (all 64 bits: an f64 RHS must survive, #302)
+            uint64 rhs_fk_b = expr_is_float_a64
+            emit_a64(0x1E604001) // fmov d1, d0
             // Reload LHS into d0/s0
             if lhs_is_float_b == 2 {
                 emit_a64_load_s0(binop_temp)
             } else {
                 emit_a64_load_d0(binop_temp)
             }
+            // #302: mixed f32/f64 widens the f32 side (as the IR does)
+            uint64 fal_b = lhs_is_float_b
+            if lhs_is_float_b == 2 && rhs_fk_b == 1 { emit_a64(0x1E22C000)  fal_b = 1 }   // fcvt d0, s0
+            if lhs_is_float_b == 1 && rhs_fk_b == 2 { emit_a64(0x1E22C021) }              // fcvt d1, s1
             // d0 = LHS, d1 = RHS (or s0/s1 for f32)
             uint32 op_tok_fb = ast_data1(node)
             uint64 wop_fb = op_tok_fb
@@ -2077,7 +2093,7 @@ fn gen_expr_a64_node(uint64 node) {
             unsafe { *(pfb as uint32) -> op_kind_fb }
             uint64 wopk_fb_a = op_kind_fb
             wopk_fb_a = float_binop_op_kind(wopk_fb_a)
-            if lhs_is_float_b == 2 {
+            if fal_b == 2 {
                 if wopk_fb_a == 30 { emit_a64(0x1E212800) } // fadd s0, s0, s1
                 if wopk_fb_a == 31 { emit_a64(0x1E213800) } // fsub s0, s0, s1
                 if wopk_fb_a == 22 { emit_a64(0x1E210800) } // fmul s0, s0, s1
@@ -2088,7 +2104,7 @@ fn gen_expr_a64_node(uint64 node) {
                 if wopk_fb_a == 22 { emit_a64(0x1E610800) } // fmul d0, d0, d1
                 if wopk_fb_a == 32 { emit_a64(0x1E611800) } // fdiv d0, d0, d1
             }
-            expr_is_float_a64 = lhs_is_float_b
+            expr_is_float_a64 = fal_b
             return
         }
 
@@ -2344,14 +2360,19 @@ fn gen_expr_a64_node(uint64 node) {
             uint32 rhs_idx = ast_data2(node)
             uint64 wrhs = rhs_idx
             gen_expr_a64(wrhs)
-            // RHS in d0/s0 → move to d1/s1
+            // RHS in d0/s0 → d1/s1; mixed f32/f64 compares in f64 (#302)
+            uint64 rhs_fk_c = expr_is_float_a64
+            emit_a64(0x1E604001) // fmov d1, d0
             if lhs_is_float_c == 2 {
-                emit_a64(0x1E204001) // fmov s1, s0
                 emit_a64_load_s0(cmp_temp)
+            } else {
+                emit_a64_load_d0(cmp_temp)
+            }
+            if lhs_is_float_c == 2 && rhs_fk_c != 1 {
                 emit_a64(0x1E212000) // fcmp s0, s1
             } else {
-                emit_a64(0x1E604001) // fmov d1, d0
-                emit_a64_load_d0(cmp_temp)
+                if lhs_is_float_c == 2 { emit_a64(0x1E22C000) }   // fcvt d0, s0
+                if rhs_fk_c == 2 { emit_a64(0x1E22C021) }         // fcvt d1, s1
                 emit_a64(0x1E612000) // fcmp d0, d1
             }
             // fcmp sets NZCV. Use same condition codes as integer unsigned:
@@ -5694,6 +5715,7 @@ fn gen_stmt_a64(uint64 node) {
         if wic != 0 {
             gen_expr_a64(wic)
             if is_float_type(wtype_a) != 0 {
+                a64_fcoerce(expr_is_float_a64, legacy_fkind_of_type(wtype_a))   // #302
                 if is_f32_type(wtype_a) != 0 {
                     emit_a64_store_s0(offset)
                 } else {
@@ -5746,6 +5768,7 @@ fn gen_stmt_a64(uint64 node) {
             // Check if this variable is float-typed
             uint64 vtype_as = var_type_lookup(name_tok)
             if is_float_type(vtype_as) != 0 {
+                a64_fcoerce(expr_is_float_a64, legacy_fkind_of_type(vtype_as))   // #302
                 if is_f32_type(vtype_as) != 0 {
                     emit_a64_store_s0(offset)
                 } else {
@@ -5757,6 +5780,12 @@ fn gen_stmt_a64(uint64 node) {
         } else {
             uint64 soff = static_lookup(name_tok)
             if soff != 0xFFFFFFFF {
+                // #302: a float static stores its declared kind's bits
+                uint64 sfk_as = static_fkind_of(name_tok)
+                if sfk_as != 0 && expr_is_float_a64 != 0 {
+                    a64_fcoerce(expr_is_float_a64, sfk_as)
+                    emit_a64_float_bits_to_x0(sfk_as)
+                }
                 emit_a64_static_store(soff)
             }
         }
@@ -6275,6 +6304,9 @@ fn gen_stmt_a64(uint64 node) {
             gen_expr_a64(wa)
             emit_a64_store_x0(compound_temp_slot)
             gen_expr_a64(wv)
+            uint32 ps_d3a = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fka = ps_d3a & 15
+            if (ps_fka == 1 || ps_fka == 2) && expr_is_float_a64 != 0 { a64_fcoerce(expr_is_float_a64, ps_fka)  expr_is_float_a64 = ps_fka }
             emit_a64_float_bits_to_x0(expr_is_float_a64)
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(compound_temp_slot)
@@ -6282,6 +6314,9 @@ fn gen_stmt_a64(uint64 node) {
             gen_expr_a64(wa)
             emit_a64_store_x0(ps_addr_slot_a)
             gen_expr_a64(wv)
+            uint32 ps_d3a = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fka = ps_d3a & 15
+            if (ps_fka == 1 || ps_fka == 2) && expr_is_float_a64 != 0 { a64_fcoerce(expr_is_float_a64, ps_fka)  expr_is_float_a64 = ps_fka }
             emit_a64_float_bits_to_x0(expr_is_float_a64)
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(ps_addr_slot_a)
@@ -6470,6 +6505,7 @@ fn gen_stmt_a64(uint64 node) {
                     // expression and can reach temp_slot_0.
                     uint64 nfw_slot_a = alloc_scratch_slot()
                     gen_expr_a64(wval)
+                    uint64 nfw_vfk_a = expr_is_float_a64    // #302: the value's float kind
                     if expr_is_float_a64 == 1 {
                         // fmov x0, d0
                         emit_a64(0x9E660000)
@@ -6489,6 +6525,15 @@ fn gen_stmt_a64(uint64 node) {
                         }
                         emit_a64_mov(10, 0)
                         emit_a64_load_x0(nfw_slot_a)
+                        // #302: convert the parked float bits to the field's kind
+                        uint64 nfw_ftk_a = struct_field_type_kind_by_tok(nsi_wa, field_tok)
+                        uint64 nfw_ffk_a = 0
+                        if nfw_ftk_a < 256 { nfw_ffk_a = legacy_fkind_of_type(nfw_ftk_a) }
+                        if nfw_ffk_a != 0 && nfw_vfk_a != 0 && nfw_ffk_a != nfw_vfk_a {
+                            emit_a64_x0_bits_to_float(nfw_vfk_a)
+                            a64_fcoerce(nfw_vfk_a, nfw_ffk_a)
+                            emit_a64_float_bits_to_x0(nfw_ffk_a)
+                        }
                         if nfsz_wa == 1 { emit_a64_strb(0, 10, 0) }
                         else if nfsz_wa == 2 { emit_a64_strh(0, 10, 0) }
                         else if nfsz_wa == 4 { emit_a64_str32(0, 10, 0) }
@@ -6539,6 +6584,7 @@ fn gen_stmt_a64(uint64 node) {
                 // Check if field is a float type
                 uint64 fftk_w = struct_field_type_kind_by_tok(si, field_tok)
                 if fftk_w == 96 {
+                    a64_fcoerce(expr_is_float_a64, 1)   // #302: narrow/widen to the field
                     // f64 field: value is in d0, save to temp, compute addr, store
                     emit_a64_store_d0(temp_slot_0)
                     uint64 foff = struct_field_offset(si, field_tok)
@@ -6551,6 +6597,7 @@ fn gen_stmt_a64(uint64 node) {
                     return
                 }
                 if fftk_w == 95 {
+                    a64_fcoerce(expr_is_float_a64, 2)   // #302: narrow/widen to the field
                     // f32 field: value is in s0, save to temp, compute addr, store
                     emit_a64_store_s0(temp_slot_0)
                     uint64 foff = struct_field_offset(si, field_tok)
