@@ -3579,8 +3579,10 @@ which always use the legacy backends) and `--emit=lkm`, by-value struct
 arguments and returns of `extern fn` and `@export` functions follow the
 platform C ABI (x86_64 System V, Windows x64, AAPCS64) for structs whose
 KernRift layout equals C's — no `f16`/`f32` fields (they take an 8-byte slot
-in KernRift) and every field naturally aligned — when the struct is 1, 2, 4
-or 8 bytes, 9–16 bytes of integer or `f64` members, or larger than 16 bytes.
+in KernRift) and every field naturally aligned — when the struct is 1–8
+bytes of integer members (on Windows x64 the 3-, 5-, 6- and 7-byte ones go by
+reference to a caller-owned copy, as Win64 requires), 8 or 16 bytes of `f64`
+members, 9–16 bytes of integer members, or larger than 16 bytes.
 Not yet: structs mixing `f64` and integer members in one 16-byte struct, `f64`
 HFAs of 3–4 members on arm64, and any struct with `f32`/`f16` members or
 alignment padding. Pass those by pointer; tracked as #315–#320, which will

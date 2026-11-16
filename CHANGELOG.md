@@ -133,20 +133,20 @@ now narrowed, as every other `f32` store already was, and an `f32` stored into a
 `--legacy`, `-c` and `--emit=lkm` passed the address of the caller's own struct, so a C function that modified
 its parameter modified the caller's variable. The caller now passes a private copy, as both ABIs require — for
 structs whose KernRift layout matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout
-handling is task L1b). This applies on Windows x64 to structs whose size is not 1, 2, 4 or 8 bytes, and on
+handling is tracked as #315–#320). This applies on Windows x64 to structs whose size is not 1, 2, 4 or 8 bytes, and on
 arm64 to structs over 16 bytes that are not HFAs.
 
 **Changed: Windows x64 structs of 3, 5, 6 or 7 bytes are passed by reference (#315).** Windows x64 passes a
 struct by value only when it is 1, 2, 4 or 8 bytes. `--legacy`, `-c` and `--emit=lkm` passed 3/5/6/7-byte
 structs by value, which C does not read. The new rule follows both ABIs for structs whose KernRift layout
-matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout handling is task L1b).
+matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout handling is tracked as #315–#320).
 **Rebuild objects built by an older krc that define or call a function taking such a struct.**
 
 **Fixed: calling an `extern fn` that returns a struct crashed (#308).** With `--legacy`, `-c` and
 `--emit=lkm`, on x86_64 and arm64, the struct returned by a C function was treated as a pointer. It is now
 received in the registers (or through the hidden result pointer) as the platform C ABI requires, for structs
 whose KernRift layout matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout
-handling is task L1b).
+handling is tracked as #315–#320).
 
 **Fixed: a call to a function returning a struct over 16 bytes passed the wrong first argument (#310).** On
 x86_64 with `--legacy`, `-c` and `--emit=lkm`, `fn mk(u64 x) -> Big` received the address of the result in
@@ -166,7 +166,7 @@ multiple of 8).
 `--legacy`, `-c` and `--emit=lkm` passed such a struct as a pointer, while the System V ABI (and therefore C)
 passes its bytes in the stack argument area. KernRift functions now follow the ABI both as caller and callee,
 so they link correctly with C in both directions for structs whose KernRift layout matches C's (see LANGUAGE.md
-§24, "Structs across the C boundary"; full C layout handling is task L1b). **This changes the calling
+§24, "Structs across the C boundary"; full C layout handling is tracked as #315–#320). **This changes the calling
 convention of KernRift functions that take a struct over 16 bytes: rebuild every object and module built by an
 older krc that defines or calls such a function; mixing old and new objects passes garbage.**
 
