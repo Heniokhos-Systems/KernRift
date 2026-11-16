@@ -5771,8 +5771,21 @@ fn emit_compare(uint64 op_tok_kind) {
 // ---------------------------------------------------------------------------
 
 // Generate code for an expression. Result is in %rax.
+// A Call's value is a struct only when the called function is declared to
+// return one (#248). Every arm of gen_expr_node that evaluates arguments --
+// user calls and builtins alike -- leaves behind the flag of its LAST
+// argument; this is the one place that drops it.
 @export
 fn gen_expr(uint64 node) {
+    gen_expr_node(node)
+    if node != 0 && ast_kind(node) == 35 {
+        uint32 cs_tok = ast_data1(node)
+        uint64 wcs_tok = cs_tok
+        if fn_ret_struct_lookup(wcs_tok) == 0xFFFFFFFF { expr_is_struct = 0xFFFFFFFF }
+    }
+}
+
+fn gen_expr_node(uint64 node) {
     // Invalidate rax cache — gen_expr will put a new value in rax
     rax_invalidate()
     expr_is_struct = 0xFFFFFFFF
@@ -11510,9 +11523,6 @@ fn gen_expr(uint64 node) {
         uint64 ret_fk = fn_ret_float_lookup(wct_ret)
         expr_is_float = ret_fk
 
-        // The call's value is a struct only when the CALLEE returns one; the
-        // flag the last argument left behind must not survive (#248).
-        expr_is_struct = 0xFFFFFFFF
         // Check if callee returns a struct
         uint64 ret_struct_si = fn_ret_struct_lookup(callee_tok)
         if ret_struct_si != 0xFFFFFFFF {
