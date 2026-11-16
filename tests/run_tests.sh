@@ -9322,10 +9322,10 @@ rm -rf "$SDD_T"
 # r13,r14,rbp, r15 IR only}, inw_{rbx,r12,r13,r14,r15}, clob_{rbx,r12,r13,
 # r14,rbp}, legacy out/inw/clob_rbx; arm64 IR+O0 out/inw/clob x19-x22 and
 # x24-x27 (out_x23 IR only, out_x27 O0 only); riscv32 IR+O0 every s-register
-# (out/inw/clob_s4 O0 only). arm64 --legacy out/inw/clob_x30 are KNOWN RED (#226,
-# D3: a legacy arm64 leaf does not save x30, so `ret` jumps to the block's
-# value -- a Bus error / SIGSEGV on 2.11.0, main and this fix alike); they
-# FAIL until #226 is fixed and are listed in the release's known-reds list.
+# (out/inw/clob_s4 O0 only). arm64 --legacy out/inw/clob_x30 were red until
+# #226 was fixed (D3: a legacy arm64 leaf did not save x30, so `ret` jumped to
+# the block's value -- a Bus error / SIGSEGV on 2.11.0); a legacy leaf whose
+# asm names x19/x20/x29/x30 now keeps its frame record.
 ALR_T=$(mktemp -d)
 # alr_runner ARCH ROW -> ALR_R: the runner prefix for an ARCH binary (none on
 # the host arch, else qemu-user); skips ROW (already in TOTAL) and returns 1
@@ -9977,12 +9977,11 @@ fn f(uint64 a, uint64 b) -> uint64 {
 fn main() { exit(f(11, 22)) }
 ALREOF
 alr_row asm_dead_out_dest_banned_x86_64 x86_64 7 $ALR_T/n.kr IR --O0 --legacy
-# asm_legacy_obj_callee_saved_x86_64 (KNOWN RED, #235): a block that writes
-# rbp and r13 (listed in clobbers()) in an @export function built with -c
-# and called from C. The legacy x86_64 prologue saves only rbx/r12, so the C
-# caller's r13 and rbp come back changed (r13=5 rbp=5) -- on 2.11.0, main
-# and this branch alike. The IR backends save the whole callee-saved file in
-# a function with asm. Fails until #235 is fixed.
+# asm_legacy_obj_callee_saved_x86_64 (#235): a block that writes rbp and r13
+# (listed in clobbers()) in an @export function built with -c and called
+# from C. The legacy x86_64 prologue saved only rbx/r12, so the C caller's
+# r13 and rbp came back changed (r13=5 rbp=5 on 2.11.0); it now saves the
+# callee-saved registers the function's asm names, as the IR backends do.
 cat > $ALR_T/lf.kr <<'ALREOF'
 @export
 fn f(uint64 a) -> uint64 {
@@ -10018,12 +10017,421 @@ else
     fi
     if [ "$ALR_GOT" = "r=5 r13=1234 rbp=5678" ]; then
         PASS=$((PASS + 1))
-        echo "  asm_legacy_obj_callee_saved_x86_64: PASS ($ALR_GOT: the C caller's r13/rbp survive; #235 is fixed -- remove it from the known reds)"
+        echo "  asm_legacy_obj_callee_saved_x86_64: PASS ($ALR_GOT: the C caller's r13/rbp survive)"
     else
         echo "FAIL: asm_legacy_obj_callee_saved_x86_64 (#235: want r=5 r13=1234 rbp=5678, got $ALR_GOT)"
         FAIL=$((FAIL + 1))
     fi
 fi
+
+# --- the legacy prologues save the callee-saved registers asm names (#235,
+# #226, #241) -----------------------------------------------------------------
+# A function whose asm names (in()/out()/clobbers()) a callee-saved register
+# must save it. The x86_64 legacy prologue (--legacy, -c/--emit=obj incl.
+# Windows COFF, --emit=lkm, Mach-O/PE/fat) saved only rbx and r12: named rbp
+# and r13-r15 -- on Windows also rsi/rdi -- now get frame slots after r12
+# (SAVE_NONVOL codes on Windows; rbp is pushed there and refused by #143). The
+# arm64 legacy prologue never saved x21-x28, and off Windows a leaf's frame
+# record (x29/x30, x19/x20) was NOP'd, so a leaf naming x19-x30 changed the
+# caller's register and one writing x30 returned to the block's value (#226):
+# x21-x28 now get slots after the frame record (save_reg codes on Windows), and
+# a leaf keeps its record when x19/x20/x29/x30 is named or the legacy
+# file_size built-in writes x19 (#241). The IR x86_64 Windows prologue pushes
+# named rsi/rdi. A pre-scan miss is a located internal error (#235), never a
+# silent missing save; @naked saves nothing.
+# Caller probes: main holds a sentinel in the register across f (one block
+# writes it, a second reads it back) -- exit 7 = preserved, 120 = destroyed.
+# x30 rows check f's own return (139 = SIGSEGV on the block's value; 135
+# SIGBUS natively on arm64). Red values are those of 2.11.0 and of the
+# branch's base.
+LCS_D=$SUITE_TMP/lcsrows; rm -rf $LCS_D; mkdir -p $LCS_D
+LCS_FX="$DIR/fixtures/callee_saved"
+# lcs_probe ARCH SHAPE REG > FILE: SHAPE leaf (f has no call) or nonleaf (f
+# calls g, which is not inlined: it is called twice).
+lcs_probe() {
+    local src=x9 mov="mov $3, x9" back="mov x9, $3" call="uint64 r = 0"
+    if [ $1 = x86_64 ]; then src=rcx; mov="mov $3, rcx"; back="mov rcx, $3"; fi
+    [ $2 = nonleaf ] && call="uint64 r = g(a)"
+    printf 'fn g(uint64 a) -> uint64 {\n    uint64 t = a + 1\n    return t\n}\n'
+    printf 'fn f(uint64 a) -> uint64 {\n    %s\n    asm { "%s" } in(a -> %s) clobbers(%s)\n    return r\n}\n' "$call" "$mov" $src $3
+    printf 'fn main() {\n    uint64 s = 0x5A5A\n    uint64 got = 0\n    uint64 k = g(1)\n'
+    printf '    asm { "%s" } in(s -> %s) clobbers(%s)\n    uint64 z = f(77)\n' "$mov" $src $3
+    printf '    asm { "%s" } out(%s -> got)\n    if got != 0x5A5A { exit(120) }\n' "$back" $src
+    printf '    if k + z == 0 { exit(121) }\n    exit(7)\n}\n'
+}
+for LCS_R in x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29; do
+    lcs_probe arm64 leaf $LCS_R > $LCS_D/p.kr
+    alr_row asm_legacy_callee_saved_leaf_${LCS_R}_arm64 arm64 7 $LCS_D/p.kr --legacy
+done
+# x19, x20 and x29 in a non-leaf are controls: its frame record saved them.
+for LCS_R in x19 x20 x21 x22 x23 x24 x25 x26 x27 x28 x29; do
+    lcs_probe arm64 nonleaf $LCS_R > $LCS_D/p.kr
+    alr_row asm_legacy_callee_saved_nonleaf_${LCS_R}_arm64 arm64 7 $LCS_D/p.kr --legacy
+done
+# rbx and r12 are controls: the x86_64 legacy prologue always saved them.
+for LCS_R in rbp r13 r14 r15 rbx r12; do
+    lcs_probe x86_64 leaf $LCS_R > $LCS_D/p.kr
+    alr_row asm_legacy_callee_saved_${LCS_R}_x86_64 x86_64 7 $LCS_D/p.kr --legacy
+done
+# lcs_nest CONSTRUCT REG: f's only block sits inside CONSTRUCT; REG x21 is a
+# caller probe, x30 checks f's own return (main exits f's 7).
+lcs_nest() {
+    local b="asm { \"mov $2, x9\" } in(b -> x9) clobbers($2)" s
+    case $1 in
+        if)     s="if b == 5 { $b }" ;;
+        else)   s="if b == 6 { r = 1 } else { $b }" ;;
+        elseif) s="if b == 6 { r = 1 } else if b == 5 { $b }" ;;
+        while)  s="while i < 1 { i = i + 1  $b }" ;;
+        for)    s="for k in 0..1 { $b }" ;;
+        match)  s="match b { 5 => { $b } _ => { r = 2 } }" ;;
+        nested) s="if b == 5 { while i < 1 { i = i + 1; if a == 11 { $b } } }" ;;
+    esac
+    printf 'fn f(uint64 a, uint64 b) -> uint64 {\n    uint64 r = 0\n    uint64 i = 0\n    %s\n    return 7 + r\n}\n' "$s"
+    if [ $2 = x30 ]; then printf 'fn main() { exit(f(11, 5)) }\n'; return; fi
+    printf 'fn main() {\n    uint64 s = 0x5A5A\n    uint64 got = 0\n'
+    printf '    asm { "mov %s, x9" } in(s -> x9) clobbers(%s)\n    uint64 z = f(11, 5)\n' $2 $2
+    printf '    asm { "mov x9, %s" } out(x9 -> got)\n    if got != 0x5A5A { exit(120) }\n    exit(z)\n}\n' $2
+}
+for LCS_C in if else elseif while for match nested; do
+    lcs_nest $LCS_C x21 > $LCS_D/p.kr
+    alr_row asm_legacy_callee_saved_nested_${LCS_C}_arm64 arm64 7 $LCS_D/p.kr --legacy
+done
+for LCS_C in if else elseif while for match nested; do
+    lcs_nest $LCS_C x30 > $LCS_D/p.kr
+    alr_row asm_legacy_lr_nested_${LCS_C}_arm64 arm64 7 $LCS_D/p.kr --legacy
+done
+# asm_legacy_file_size_leaf_x19_arm64 (#241): a leaf whose only call is the
+# file_size built-in (two svc, x19 holds the fd between them). Red: 120.
+cat > $LCS_D/p.kr <<'LCSEOF'
+fn f(uint64 fd) -> uint64 {
+    uint64 n = file_size(fd)
+    return n
+}
+fn main() {
+    uint64 s = 0x5A5A
+    uint64 got = 0
+    asm { "mov x19, x9" } in(s -> x9) clobbers(x19)
+    uint64 z = f(0)
+    asm { "mov x9, x19" } out(x9 -> got)
+    if got != 0x5A5A { exit(120) }
+    if z == 0x5A5A { exit(121) }
+    exit(7)
+}
+LCSEOF
+alr_row asm_legacy_file_size_leaf_x19_arm64 arm64 7 $LCS_D/p.kr --legacy
+# lcs_section FILE FN: the lines of function FN in an --emit=asm listing.
+lcs_section() { awk -v f="$2:" '$0 == f { p = 1; next } /^[A-Za-z_][A-Za-z0-9_]*:$/ { p = 0 } p' "$1"; }
+# lcs_ok ROW WHAT / lcs_bad ROW WHY: one verdict (the row already in TOTAL).
+lcs_ok() { PASS=$((PASS + 1)); echo "  $1: PASS ($2)"; }
+lcs_bad() { echo "FAIL: $1 ($2)"; FAIL=$((FAIL + 1)); }
+# asm_legacy_callee_saved_loop_compile_arm64: x21 named inside `loop { }`
+# (whose --legacy bodies are broken, #247 -- so compile and listing only):
+# builds, no internal error, and f saves and restores x21.
+cat > $LCS_D/p.kr <<'LCSEOF'
+fn f(uint64 a) -> uint64 {
+    uint64 i = 0
+    loop {
+        asm { "mov x21, x9" } in(a -> x9) clobbers(x21)
+        i = i + 1
+        if i > 0 { break }
+    }
+    return 7
+}
+fn main() { exit(f(1)) }
+LCSEOF
+TOTAL=$((TOTAL + 1))
+rm -f $LCS_D/p.s
+if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 --legacy --emit=asm $LCS_D/p.kr -o $LCS_D/p.s > $LCS_D/err 2>&1 || [ ! -f $LCS_D/p.s ]; then
+    lcs_bad asm_legacy_callee_saved_loop_compile_arm64 "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"
+elif lcs_section $LCS_D/p.s f | grep -q 'str x21, \[sp, #' && lcs_section $LCS_D/p.s f | grep -q 'ldr x21, \[sp, #'; then
+    lcs_ok asm_legacy_callee_saved_loop_compile_arm64 "x21 inside loop { }: builds, f has str/ldr x21"
+else
+    lcs_bad asm_legacy_callee_saved_loop_compile_arm64 "f's listing has no str/ldr x21, [sp, #k]"
+fi
+# lcs_cobj ROW C WANT: $LCS_D/ROW.kr built with -c --arch=arm64, linked into the
+# freestanding C caller C (clang + ld.lld for aarch64 on x86_64, run with
+# qemu; cc natively on arm64); the program must exit WANT.
+lcs_cobj() {
+    local row=$1 caller=$2 want=$3 got
+    TOTAL=$((TOTAL + 1))
+    alr_runner arm64 $row || return
+    if [ "$RUN_ARCH" = arm64 ]; then
+        if ! command -v cc > /dev/null 2>&1; then skip_row $row "no cc (links the -c object into a C caller)"; return; fi
+        set -- cc -O1 -ffreestanding -fno-stack-protector -nostdlib -static
+    else
+        if ! command -v clang > /dev/null 2>&1 || ! command -v ld.lld > /dev/null 2>&1; then
+            skip_row $row "clang and ld.lld needed (link the arm64 -c object into a C caller)"; return
+        fi
+        set -- clang --target=aarch64-linux-gnu -O1 -ffreestanding -fno-stack-protector -nostdlib -static -fuse-ld=lld
+    fi
+    rm -f $LCS_D/o.o $LCS_D/cp
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 -c $LCS_D/$row.kr -o $LCS_D/o.o > $LCS_D/err 2>&1; then
+        lcs_bad $row "krc -c failed: $(grep -m1 error $LCS_D/err | cut -c1-140)"; return
+    fi
+    if ! "$@" "$LCS_FX/$caller" $LCS_D/o.o -o $LCS_D/cp > $LCS_D/err 2>&1; then
+        lcs_bad $row "link failed: $(head -1 $LCS_D/err | cut -c1-140)"; return
+    fi
+    got=$( ( ulimit -c 0; timeout -k 5 "$RUN_TEST_TIMEOUT" $ALR_R $LCS_D/cp < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if [ "$got" = "$want" ]; then lcs_ok $row "C caller exits $got"; else lcs_bad $row "want $want, got $got"; fi
+}
+# asm_legacy_obj_callee_saved_arm64: an @export f naming x19, x21, x28, x29;
+# the C caller keeps x19/x21/x28. Red: 119.
+cat > $LCS_D/asm_legacy_obj_callee_saved_arm64.kr <<'LCSEOF'
+@export
+fn f(uint64 a) -> uint64 {
+    uint64 r = 0
+    asm { "mov x21, x9"; "mov x29, x9"; "mov x19, x9"; "mov x28, x9" } in(a -> x9) out(x21 -> r) clobbers(x19, x28, x29)
+    return r
+}
+LCSEOF
+lcs_cobj asm_legacy_obj_callee_saved_arm64 a_obj.c 7
+# asm_legacy_obj_lr_arm64 (#226): the same with x30 only. Red: 139.
+cat > $LCS_D/asm_legacy_obj_lr_arm64.kr <<'LCSEOF'
+@export
+fn f(uint64 a) -> uint64 {
+    uint64 r = 0
+    asm { "mov x21, x9"; "mov x30, x9" } in(a -> x9) out(x21 -> r) clobbers(x30)
+    return r
+}
+LCSEOF
+lcs_cobj asm_legacy_obj_lr_arm64 a_obj.c 7
+# asm_legacy_obj_file_size_x19_arm64 (#241): a -c leaf calling file_size; the
+# C caller keeps x19. Red: 119.
+cat > $LCS_D/asm_legacy_obj_file_size_x19_arm64.kr <<'LCSEOF'
+@export
+fn f(uint64 fd) -> uint64 {
+    uint64 n = file_size(fd)
+    return n
+}
+LCSEOF
+lcs_cobj asm_legacy_obj_file_size_x19_arm64 fsz.c 7
+# asm_legacy_lkm_callee_saved_x86_64: --emit=lkm: f names rbp and r13; the
+# .ko's bytes have `mov [rsp+d], rbp/r13` before the block and the matching
+# `mov rbp/r13, [rsp+d]` after it, before `add rsp`. Red: absent.
+cat > $LCS_D/lkm.kr <<'LCSEOF'
+@export
+fn f(uint64 a) -> uint64 {
+    uint64 r = 0
+    asm { "mov r12, rax"; "mov rbp, rax"; "mov r13, rax" } in(a -> rax) out(r12 -> r) clobbers(rbp, r13)
+    return r
+}
+@module_init
+fn init() -> uint64 { return 0 }
+@module_exit
+fn fini() { }
+LCSEOF
+TOTAL=$((TOTAL + 1))
+rm -f $LCS_D/lkm.ko
+if ! command -v python3 > /dev/null 2>&1; then
+    skip_row asm_legacy_lkm_callee_saved_x86_64 "needs python3 (decodes the .ko bytes)"
+elif ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=x86_64 --emit=lkm $LCS_D/lkm.kr -o $LCS_D/lkm.ko > $LCS_D/err 2>&1 || [ ! -f $LCS_D/lkm.ko ]; then
+    lcs_bad asm_legacy_lkm_callee_saved_x86_64 "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"
+else
+    LCS_O=$(python3 -B - $LCS_D/lkm.ko <<'LCSPY'
+import sys
+b = open(sys.argv[1], 'rb').read()
+a = b.find(bytes.fromhex('4989c44889c54989c5'))   # mov r12, rax; mov rbp, rax; mov r13, rax
+if a < 0: print('the asm bytes are not in the .ko'); sys.exit(1)
+e = b.find(bytes.fromhex('4881c4'), a)             # add rsp, imm32 (the epilogue)
+bad = []
+for name, st, ld in (('rbp', '48896c24', '488b6c24'), ('r13', '4c896c24', '4c8b6c24')):
+    s = b.rfind(bytes.fromhex(st), max(0, a - 64), a)
+    l = b.find(bytes.fromhex(ld), a, e)
+    if s < 0 or l < 0 or b[s + 4] != b[l + 4]:
+        bad.append(name)
+if e < 0 or bad: print('no save/reload of ' + ' '.join(bad or ['(no epilogue)'])); sys.exit(1)
+print('rbp and r13 stored before the block, reloaded from the same slots before add rsp')
+LCSPY
+)
+    if [ $? = 0 ]; then lcs_ok asm_legacy_lkm_callee_saved_x86_64 "$LCS_O"; else lcs_bad asm_legacy_lkm_callee_saved_x86_64 "$LCS_O"; fi
+fi
+# asm_legacy_callee_saved_listing_arm64_<os>: macOS and Android --legacy
+# listings: leaf f1 naming x21 saves/restores it; leaf f2 writing x30 keeps
+# its frame record (stp x29, x30 not NOP'd). Red: absent.
+cat > $LCS_D/l.kr <<'LCSEOF'
+fn f1(uint64 a) -> uint64 {
+    asm { "mov x21, x9" } in(a -> x9) clobbers(x21)
+    return a
+}
+fn f2(uint64 a) -> uint64 {
+    asm { "mov x30, x9" } in(a -> x9) clobbers(x30)
+    return a
+}
+fn main() { exit(f1(3) + f2(4)) }
+LCSEOF
+for LCS_OS in macos android; do
+    TOTAL=$((TOTAL + 1))
+    rm -f $LCS_D/l.s
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 --target=$LCS_OS --legacy --emit=asm $LCS_D/l.kr -o $LCS_D/l.s > $LCS_D/err 2>&1 || [ ! -f $LCS_D/l.s ]; then
+        lcs_bad asm_legacy_callee_saved_listing_arm64_$LCS_OS "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"
+        continue
+    fi
+    LCS_W=""
+    lcs_section $LCS_D/l.s f1 | grep -q 'str x21, \[sp, #' || LCS_W="$LCS_W f1 has no str x21;"
+    lcs_section $LCS_D/l.s f1 | grep -q 'ldr x21, \[sp, #' || LCS_W="$LCS_W f1 has no ldr x21;"
+    lcs_section $LCS_D/l.s f2 | grep -q 'a9007bfd  stp x29, x30, \[sp\]' || LCS_W="$LCS_W f2's stp x29, x30 is NOP'd;"
+    if [ -z "$LCS_W" ]; then lcs_ok asm_legacy_callee_saved_listing_arm64_$LCS_OS "$LCS_OS listing: f1 saves x21, f2 keeps its frame record"
+    else lcs_bad asm_legacy_callee_saved_listing_arm64_$LCS_OS "$LCS_W"; fi
+done
+# asm_legacy_callee_saved_listing_macho_x86_64: the x86_64 Mach-O --legacy
+# listing of f naming r13 has `mov [rsp+d], r13` and `mov r13, [rsp+d]`.
+# Red: absent.
+lcs_probe x86_64 leaf r13 > $LCS_D/p.kr
+TOTAL=$((TOTAL + 1))
+rm -f $LCS_D/p.s
+if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=x86_64 --target=macos --emit=macho --legacy --emit=asm $LCS_D/p.kr -o $LCS_D/p.s > $LCS_D/err 2>&1 || [ ! -f $LCS_D/p.s ]; then
+    lcs_bad asm_legacy_callee_saved_listing_macho_x86_64 "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"
+elif lcs_section $LCS_D/p.s f | grep -qE ': 4c 89 6c 24 [0-9a-f]{2}  mov \[rsp\+0x[0-9a-f]+\], r13$' \
+     && lcs_section $LCS_D/p.s f | grep -qE ': 4c 8b 6c 24 [0-9a-f]{2}  mov r13, \[rsp\+0x[0-9a-f]+\]$'; then
+    lcs_ok asm_legacy_callee_saved_listing_macho_x86_64 "f stores r13 to and reloads it from its slot"
+else
+    lcs_bad asm_legacy_callee_saved_listing_macho_x86_64 "f's listing has no mov [rsp+d], r13 / mov r13, [rsp+d]"
+fi
+# asm_legacy_file_size_fat_slice_arm64 (#241): --legacy --targets=linux-arm64
+# of a leaf f calling file_size; in the arm64 slice (krbo_slice.py) the words
+# stp x29, x30, [sp] and stp x19, x20, [sp, #16] occur twice (main and f).
+# Red: once each (f's were NOP'd). $KRC_RAW: --targets= without --arch=.
+cat > $LCS_D/fs.kr <<'LCSEOF'
+fn f(uint64 fd) -> uint64 {
+    uint64 n = file_size(fd)
+    return n
+}
+fn main() { exit(f(0)) }
+LCSEOF
+TOTAL=$((TOTAL + 1))
+rm -f $LCS_D/fs.krbo $LCS_D/fs.bin
+if ! command -v python3 > /dev/null 2>&1; then
+    skip_row asm_legacy_file_size_fat_slice_arm64 "needs python3 (tests/helpers/krbo_slice.py)"
+elif ! timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRC_RAW_CC" --legacy --targets=linux-arm64 $LCS_D/fs.kr -o $LCS_D/fs.krbo > $LCS_D/err 2>&1; then
+    lcs_bad asm_legacy_file_size_fat_slice_arm64 "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"
+elif ! python3 -B "$DIR/helpers/krbo_slice.py" $LCS_D/fs.krbo 2 $LCS_D/fs.bin 2> $LCS_D/err; then
+    lcs_bad asm_legacy_file_size_fat_slice_arm64 "krbo_slice: $(head -1 $LCS_D/err)"
+else
+    LCS_O=$(python3 -B -c 'import sys,struct; b=open(sys.argv[1],"rb").read(); w=[struct.unpack_from("<I",b,i)[0] for i in range(0,len(b)-3,4)]; print(w.count(0xA9007BFD), w.count(0xA90153F3))' $LCS_D/fs.bin)
+    if [ "$LCS_O" = "2 2" ]; then lcs_ok asm_legacy_file_size_fat_slice_arm64 "stp x29, x30 / stp x19, x20: 2 / 2 in the linux-arm64 slice"
+    else lcs_bad asm_legacy_file_size_fat_slice_arm64 "stp x29, x30 / stp x19, x20 counts '$LCS_O', want '2 2'"; fi
+fi
+# asm_naked_no_saves_<arch>_legacy (control): an @naked f naming r13 / x21 and
+# x30 gets no saves -- its first instruction is the block's first.
+printf '@naked\nfn f() {\n    asm { "mov r13, rax"; "ret" } clobbers(r13)\n}\nfn main() {\n    f()\n    exit(7)\n}\n' > $LCS_D/nx.kr
+printf '@naked\nfn f() {\n    asm { "mov x21, x9"; "ret" } clobbers(x21, x30)\n}\nfn main() {\n    f()\n    exit(7)\n}\n' > $LCS_D/na.kr
+for LCS_P in "x86_64|nx|49 89 c5" "arm64|na|aa0903f5"; do
+    LCS_A=${LCS_P%%|*}; LCS_F=${LCS_P#*|}; LCS_W=${LCS_F#*|}; LCS_F=${LCS_F%%|*}
+    TOTAL=$((TOTAL + 1))
+    rm -f $LCS_D/n.s
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$LCS_A --legacy --emit=asm $LCS_D/$LCS_F.kr -o $LCS_D/n.s > $LCS_D/err 2>&1 || [ ! -f $LCS_D/n.s ]; then
+        lcs_bad asm_naked_no_saves_${LCS_A}_legacy "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"
+        continue
+    fi
+    LCS_O=$(lcs_section $LCS_D/n.s f | head -1)
+    case "$LCS_O" in
+        *": $LCS_W "*|*": $LCS_W") lcs_ok asm_naked_no_saves_${LCS_A}_legacy "f starts with the block's $LCS_W" ;;
+        *) lcs_bad asm_naked_no_saves_${LCS_A}_legacy "f's first instruction is '$LCS_O', want the block's $LCS_W" ;;
+    esac
+done
+# Windows x86_64 (Wine; natively in the N1 batch, tests/windows/native_corpus.lst):
+# the caller probes of tests/fixtures/callee_saved, --legacy and IR PE images.
+# lcs_pe ROW FIXTURE FLAGS: exit 7 under $KR_WINE / wine.
+LCS_WINE=$(wine_path)
+lcs_pe() {
+    local rc
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$LCS_WINE" ]; then wine_na $1; return; fi
+    mkdir -p $LCS_D/w; rm -f $LCS_D/w/p.exe
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=x86_64 --target=windows --emit=pe $3 "$LCS_FX/$2" -o $LCS_D/w/p.exe > $LCS_D/err 2>&1 || [ ! -f $LCS_D/w/p.exe ]; then
+        lcs_bad $1 "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"; return
+    fi
+    rc=$( ( cd $LCS_D/w && ulimit -c 0 && timeout -k 5 "$RUN_TEST_TIMEOUT" $LCS_WINE ./p.exe < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if [ "$rc" = 7 ]; then lcs_ok $1 "$2 ${3:-IR}: exits 7"; else lcs_bad $1 "$2 ${3:-IR}: want 7, got $rc"; fi
+}
+lcs_pe asm_legacy_callee_saved_windows_x86_64_wine xw_r13.kr --legacy
+lcs_pe asm_legacy_rsi_rdi_windows_x86_64_wine xw_rsi.kr --legacy
+lcs_pe asm_ir_rsi_rdi_windows_x86_64_wine xw_rsi.kr ""
+lcs_pe asm_ir_rsi_rdi_both_windows_x86_64_wine xw.kr ""
+lcs_pe asm_ir_r13_windows_x86_64_wine xw_r13.kr ""
+# lcs_codes FILE: "<n> <KIND> <REG>" per unwind code kind/register of an
+# image or object (llvm-readobj --unwind), sorted.
+lcs_codes() { llvm-readobj --unwind "$1" 2> /dev/null | grep -oE '(SAVE|PUSH)_NONVOL reg=(R13|R14|R15|RSI|RDI)' | sort | uniq -c | awk '{ print $1, $2, $3 }' | tr '\n' ' '; }
+# pe_unwind_asm_cs_x86_64: those five PE images pass tests/helpers/
+# pe_unwind_check.py (C0-C6, C3b, C4b) and carry one SAVE_NONVOL (--legacy)
+# or PUSH_NONVOL (IR) code per function naming rsi/rdi/r13-r15. Red: absent.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
+    skip_row pe_unwind_asm_cs_x86_64 "needs python3 and llvm-readobj"
+else
+    LCS_W=""
+    for LCS_P in "xw_r13.kr|--legacy|2 SAVE_NONVOL reg=R13 2 SAVE_NONVOL reg=R14 1 SAVE_NONVOL reg=R15 " \
+                 "xw_rsi.kr|--legacy|2 SAVE_NONVOL reg=RDI 2 SAVE_NONVOL reg=RSI " \
+                 "xw_rsi.kr||3 PUSH_NONVOL reg=R13 3 PUSH_NONVOL reg=R14 3 PUSH_NONVOL reg=R15 2 PUSH_NONVOL reg=RDI 2 PUSH_NONVOL reg=RSI " \
+                 "xw.kr||3 PUSH_NONVOL reg=R13 3 PUSH_NONVOL reg=R14 3 PUSH_NONVOL reg=R15 1 PUSH_NONVOL reg=RDI 2 PUSH_NONVOL reg=RSI " \
+                 "xw_r13.kr||3 PUSH_NONVOL reg=R13 3 PUSH_NONVOL reg=R14 3 PUSH_NONVOL reg=R15 "; do
+        LCS_F=${LCS_P%%|*}; LCS_M=${LCS_P#*|}; LCS_E=${LCS_M#*|}; LCS_M=${LCS_M%%|*}
+        rm -f $LCS_D/u.exe $LCS_D/u.lst
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=x86_64 --target=windows --emit=pe $LCS_M "$LCS_FX/$LCS_F" -o $LCS_D/u.exe --test-listing=$LCS_D/u.lst > $LCS_D/err 2>&1; then
+            LCS_W="$LCS_W $LCS_F ${LCS_M:-IR}: build failed;"; continue
+        fi
+        LCS_O=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch x86_64 $LCS_D/u.exe --listing $LCS_D/u.lst 2>&1) \
+            || LCS_W="$LCS_W $LCS_F ${LCS_M:-IR}: checker $(grep -m1 -v ': PASS' <<< "$LCS_O" | cut -c1-120);"
+        [ "$(lcs_codes $LCS_D/u.exe)" = "$LCS_E" ] || LCS_W="$LCS_W $LCS_F ${LCS_M:-IR}: codes '$(lcs_codes $LCS_D/u.exe)', want '$LCS_E';"
+    done
+    if [ -z "$LCS_W" ]; then lcs_ok pe_unwind_asm_cs_x86_64 "5 images: checker 9/9, one save code per function and named register"
+    else lcs_bad pe_unwind_asm_cs_x86_64 "$LCS_W"; fi
+fi
+# win_a64_legacy_asm_cs_codes: the arm64 --legacy PE of aw.kr passes the
+# checker and has a save_reg code `str xN, [sp, #k]` for every named x21-x28
+# of each function in its prologue, and `ldr xN` in its epilog scope (f: x21-
+# x24, x28; h: x23; main: x21, x28 -- 8 each). Red: none.
+# win_a64_legacy_asm_lr_leaf_codes (control): a Windows arm64 --legacy leaf
+# writing x30 keeps save_fplr (Windows never NOP'd the record) and passes.
+printf 'fn f(uint64 a) -> uint64 {\n    asm { "mov x30, x9" } in(a -> x9) clobbers(x30)\n    return a\n}\nfn main() { exit(f(3)) }\n' > $LCS_D/lr.kr
+for LCS_P in "win_a64_legacy_asm_cs_codes|$LCS_FX/aw.kr" "win_a64_legacy_asm_lr_leaf_codes|$LCS_D/lr.kr"; do
+    LCS_N=${LCS_P%%|*}; LCS_F=${LCS_P#*|}
+    TOTAL=$((TOTAL + 1))
+    if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
+        skip_row $LCS_N "needs python3 and llvm-readobj"; continue
+    fi
+    rm -f $LCS_D/a.exe $LCS_D/a.lst
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 --target=windows --emit=pe --legacy "$LCS_F" -o $LCS_D/a.exe --test-listing=$LCS_D/a.lst > $LCS_D/err 2>&1; then
+        lcs_bad $LCS_N "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"; continue
+    fi
+    LCS_W=""
+    LCS_O=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 $LCS_D/a.exe --listing $LCS_D/a.lst 2>&1) \
+        || LCS_W="$LCS_W checker $(grep -m1 -v ': PASS' <<< "$LCS_O" | cut -c1-120);"
+    llvm-readobj --unwind $LCS_D/a.exe > $LCS_D/u.txt 2>&1
+    if [ $LCS_N = win_a64_legacy_asm_cs_codes ]; then
+        LCS_S=$(grep -cE '; str x2[1-8], \[sp, #[0-9]+\]' $LCS_D/u.txt); LCS_L=$(grep -cE '; ldr x2[1-8], \[sp, #[0-9]+\]' $LCS_D/u.txt)
+        [ "$LCS_S $LCS_L" = "8 8" ] || LCS_W="$LCS_W str/ldr x21-x28 codes $LCS_S/$LCS_L, want 8/8;"
+        LCS_OK="checker 9/9; 8 str x21-x28 codes in the prologues, 8 ldr in the epilog scopes"
+    else
+        grep -qE '; stp x29, x30, \[sp, #0\]' $LCS_D/u.txt || LCS_W="$LCS_W no save_fplr code;"
+        LCS_OK="checker 9/9; the leaf keeps save_fplr"
+    fi
+    if [ -z "$LCS_W" ]; then lcs_ok $LCS_N "$LCS_OK"; else lcs_bad $LCS_N "$LCS_W"; fi
+done
+# win_coff_asm_cs_codes_<arch>: --target=windows --emit=obj (legacy COFF) of
+# xw.kr / aw.kr: the checker's rule C1 (well-formed, llvm-readobj agrees; the
+# other rules need a linked image) and x86_64 SAVE/PUSH_NONVOL codes 11 -> 19,
+# arm64 str x21-x28 save_reg codes 0 -> 8.
+for LCS_P in "x86_64|xw.kr|19" "arm64|aw.kr|8"; do
+    LCS_A=${LCS_P%%|*}; LCS_F=${LCS_P#*|}; LCS_E=${LCS_F#*|}; LCS_F=${LCS_F%%|*}
+    LCS_N=win_coff_asm_cs_codes_$LCS_A
+    TOTAL=$((TOTAL + 1))
+    if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1; then
+        skip_row $LCS_N "needs python3 and llvm-readobj"; continue
+    fi
+    rm -f $LCS_D/c.obj $LCS_D/c.lst
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$LCS_A --target=windows --emit=obj "$LCS_FX/$LCS_F" -o $LCS_D/c.obj --test-listing=$LCS_D/c.lst > $LCS_D/err 2>&1; then
+        lcs_bad $LCS_N "build failed: $(grep -m1 error $LCS_D/err | cut -c1-160)"; continue
+    fi
+    LCS_W=""
+    LCS_O=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch $LCS_A $LCS_D/c.obj --listing $LCS_D/c.lst --rules C1 2>&1) \
+        || LCS_W="$LCS_W checker $(grep -m1 -v ': PASS' <<< "$LCS_O" | cut -c1-120);"
+    if [ $LCS_A = x86_64 ]; then LCS_C=$(llvm-readobj --unwind $LCS_D/c.obj 2>&1 | grep -cE 'SAVE_NONVOL|PUSH_NONVOL')
+    else LCS_C=$(llvm-readobj --unwind $LCS_D/c.obj 2>&1 | grep -cE '; str x2[1-8], \[sp, #[0-9]+\]'); fi
+    [ "$LCS_C" = "$LCS_E" ] || LCS_W="$LCS_W $LCS_C save codes, want $LCS_E;"
+    if [ -z "$LCS_W" ]; then lcs_ok $LCS_N "COFF: rule C1 PASS, $LCS_C save codes"; else lcs_bad $LCS_N "$LCS_W"; fi
+done
+rm -rf $LCS_D
 
 # asm_naked_spill_warns_x86_64 (#222, a visible decision, not a fix): an
 # @naked body whose six in() registers are the whole naked colour file. The
@@ -37284,6 +37692,385 @@ peu_ref 1 "abig.kr:1:4: error: function 'big' has a stack frame of 256 MiB or mo
 peu_ref 0 - abig --arch=arm64 --target=windows --emit=pe
 if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_refusals "23 cases: naked/asm/legacy-naked refused on Windows slices that ship, accepted elsewhere"
 else pe_row_bad pe_unwind_refusals "$PEU_WHY"; fi
+# --- arm64 registers inline asm must not write (#242, #246, #249, #251, #252)
+# macOS keeps the platform register in x18 (the system may change it at any
+# time), Android its shadow call stack, Windows the TEB; on Windows x29 is the
+# frame pointer every unwind record relies on. No prologue can save them, so
+# naming x18 in in()/out()/clobbers() (macOS, Android; Windows: #143) and every
+# instruction text that writes x18 -- or, on Windows, x29/w29/fp -- is a
+# located error: as a destination, an stx* status register, the second
+# register of a pair/exchange/atomic, or by base-register writeback
+# (`[x18], #8`, `[x18, #8]!`), in any letter case and in every instruction of
+# the string (`;`, a newline, `\n`, `\r`). The check judges the SOURCE text,
+# before the assembler (#245: the assembler may drop writeback or trailing
+# text), so a form the assembler rejects still gets the x18/x29 error. One
+# case-blind classification of the arm64 mnemonics (asm_wc_* in codegen.kr)
+# decides which registers an instruction writes, for #143's scanner too:
+# `bic` is not a branch (#251), and an ld<op>/swp first register is only read
+# (#252). Linux and bare metal (--target=none) are unchanged. Raw-hex asm
+# cannot be checked: a located warning on macOS/Android, as on Windows.
+# Every row is build-side; f's asm string is at 3:11 (x18_src).
+X18_D=$SUITE_TMP/x18rows; rm -rf $X18_D; mkdir -p $X18_D
+# x18_src TEXT [CONSTRAINTS] > FILE: the asm string TEXT (printf %s: a
+# backslash stays a backslash, so '\n' is the KernRift escape) in f.
+x18_src() {
+    printf 'fn f(uint64 a) -> uint64 {\n    uint64 v = a\n    asm { "%s" } %s\n    return v\n}\nfn main() { exit(f(7)) }\n' "$1" "${2:-in(v -> x9) clobbers(x0, x1)}"
+}
+# x18_flags OS MODE -> X18_F: the compiler flags of one configuration.
+x18_flags() {
+    case $1 in
+        macos|android|linux|none) X18_F="--arch=arm64 --target=$1" ;;
+        windows) X18_F="--arch=arm64 --target=windows --emit=pe" ;;
+    esac
+    case $2 in
+        legacy) X18_F="$X18_F --legacy" ;;
+        obj) X18_F="--arch=arm64 --target=$1 --emit=obj"; [ $1 = linux ] && X18_F="--arch=arm64 -c" ;;
+    esac
+}
+# x18_one WANT FILE FLAGS...: build $X18_D/FILE; a mismatch is appended to
+# X18_BAD. WANT: "ok" (builds; no #143/#242/#246/#249 diagnostic), "asm" (the
+# inline assembler's own error, no register refusal), "warn:LINE" (builds,
+# stderr has the line LINE), or the exact error line (exit 1, no output).
+x18_one() {
+    local want=$1 f=$2 rc; shift 2
+    rm -f $X18_D/o.out
+    ( cd $X18_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC "$@" $f -o o.out > o.so 2> o.se ); rc=$?
+    case $want in
+        ok)
+            if [ $rc != 0 ] || [ ! -f $X18_D/o.out ] || grep -qE ': error:|#143|#242|#246|#249' $X18_D/o.se; then
+                X18_BAD="$X18_BAD $f[$*]: want a build, got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
+            fi ;;
+        asm)
+            if [ $rc != 1 ] || ! grep -qE 'unrecognized asm instruction|bad operands' $X18_D/o.se || grep -qE '#143|#242|#246|#249' $X18_D/o.se; then
+                X18_BAD="$X18_BAD $f[$*]: want the assembler's error, got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
+            fi ;;
+        warn:*)
+            if [ $rc != 0 ] || [ ! -f $X18_D/o.out ] || ! grep -qxF -- "${want#warn:}" $X18_D/o.se; then
+                X18_BAD="$X18_BAD $f[$*]: want a build with '${want#warn:}', got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
+            fi ;;
+        *)
+            if [ $rc != 1 ] || [ -e $X18_D/o.out ] || ! grep -qxF -- "$want" $X18_D/o.se; then
+                X18_BAD="$X18_BAD $f[$*]: want '$want', got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
+            fi ;;
+    esac
+}
+# x18_row ROW WHAT: the verdict of the x18_one calls since X18_BAD="".
+x18_row() {
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$X18_BAD" ]; then PASS=$((PASS + 1)); echo "  $1: PASS ($2)"
+    else echo "FAIL: $1 ($2:$X18_BAD)"; FAIL=$((FAIL + 1)); fi
+    X18_BAD=""
+}
+X18_BAD=""
+# The messages (f's asm string at 3:11; why = the register's reason).
+X18_WHY_macos=" -- here x18, which on macOS is the platform register the system may change at any time (#242); use another register"
+X18_WHY_android=" -- here x18, which on Android holds the shadow call stack (#242); use another register"
+X18_WHY_windows=" -- here x18, which on Windows holds the TEB (#246); use another register"
+X18_WHY_x29=" -- here the frame pointer x29, which every Windows unwind record relies on (#249); use another register"
+X18_WB="f.kr:3:11: error: this asm instruction writes back to its base register"
+X18_W1="f.kr:3:11: error: this asm instruction writes its first register"
+X18_W2="f.kr:3:11: error: this asm instruction writes its second register"
+X18_143="f.kr:3:11: error: this asm instruction writes x29/x18 -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143); use another register"
+X18_143_2="f.kr:3:11: error: this asm instruction writes x29/x18 as its second register -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143); use another register"
+X18_NAME_macos="error: an inline-asm in()/out()/clobbers() register cannot be 'x18'; on macOS x18 is the platform register, which the system may change at any time (#242); use another register"
+X18_NAME_android="error: an inline-asm in()/out()/clobbers() register cannot be 'x18'; on Android x18 holds the shadow call stack (#242); use another register"
+X18_RAW="f.kr:3:11: warning: asm given as raw bytes cannot be checked for writes to x18 (#242)"
+
+# asm_x18_name_refused_<os>_<clause>_arm64_<mode> (#242): x18 in in(), out()
+# or clobbers() -- located at the register token. Red: builds.
+for X18_OS in macos android; do
+    for X18_C in in out clob; do
+        case $X18_C in
+            in)   X18_K='in(v -> x18)';   X18_L="f.kr:3:27: " ;;
+            out)  X18_K='out(x18 -> v)';  X18_L="f.kr:3:23: " ;;
+            clob) X18_K='clobbers(x18)';  X18_L="f.kr:3:28: " ;;
+        esac
+        x18_src 'nop' "$X18_K" > $X18_D/f.kr
+        for X18_M in ir legacy; do
+            x18_flags $X18_OS $X18_M
+            eval "X18_E=\"$X18_L\$X18_NAME_$X18_OS\""
+            x18_one "$X18_E" f.kr $X18_F
+            x18_row asm_x18_name_refused_${X18_OS}_${X18_C}_arm64_$X18_M "$X18_K on $X18_OS ${X18_M}: the #242 error at the register"
+        done
+    done
+done
+# asm_x18_text_refused_<os>_<form>_arm64_<mode> (#242): an instruction that
+# writes x18 -- as its first register, the second of an ldp, or by writeback
+# (post-index load, pre-index load, post-index store). Red: builds.
+for X18_OS in macos android; do
+    eval "X18_Y=\$X18_WHY_$X18_OS"
+    for X18_P in "first|mov x18, x9|$X18_W1" "ldp2|ldp x0, x18, [x9]|$X18_W2" "wbpost|ldr x0, [x18], #8|$X18_WB" \
+                 "wbpre|ldr x0, [x18, #8]!|$X18_WB" "wbstore|str x0, [x18], #8|$X18_WB"; do
+        X18_N=${X18_P%%|*}; X18_T=${X18_P#*|}; X18_E=${X18_T#*|}; X18_T=${X18_T%%|*}
+        x18_src "$X18_T" > $X18_D/f.kr
+        for X18_M in ir legacy; do
+            x18_flags $X18_OS $X18_M
+            x18_one "$X18_E$X18_Y" f.kr $X18_F
+            x18_row asm_x18_text_refused_${X18_OS}_${X18_N}_arm64_$X18_M "'$X18_T' on $X18_OS ${X18_M}: refused at the string"
+        done
+    done
+done
+# asm_x18_text_refused_unassembled_arm64: forms the assembler does not accept
+# (stxr status, swp/ldxp second register, w18) get the x18 error, not the
+# assembler's -- the source is judged first. Red: the assembler's error.
+x18_flags macos ir
+for X18_P in "stxr w18, x0, [x9]|$X18_W1" "swp x0, x18, [x9]|$X18_W2" "ldxp x0, x18, [x9]|$X18_W2" "mov w18, w9|$X18_W1"; do
+    x18_src "${X18_P%%|*}" > $X18_D/f.kr
+    x18_one "${X18_P#*|}$X18_WHY_macos" f.kr $X18_F
+done
+x18_row asm_x18_text_refused_unassembled_arm64 "stxr w18 / swp x0, x18 / ldxp x0, x18 / mov w18 on macOS: the x18 error, judged before the assembler"
+# asm_x18_naked_refused_<os>_arm64: the check runs in @naked bodies too.
+printf '@naked\nfn f() {\n    asm { "mov x18, x9"; "ret" }\n}\nfn main() { f()  exit(7) }\n' > $X18_D/n.kr
+for X18_OS in macos android; do
+    eval "X18_Y=\$X18_WHY_$X18_OS"
+    for X18_M in ir legacy; do
+        x18_flags $X18_OS $X18_M
+        x18_one "n.kr:3:11: error: this asm instruction writes its first register$X18_Y" n.kr $X18_F
+    done
+    x18_row asm_x18_naked_refused_${X18_OS}_arm64 "@naked body writing x18 on $X18_OS, IR and --legacy"
+done
+# asm_x18_raw_hex_warns_<os>_arm64: raw hex cannot be checked -- a located
+# warning, the build goes on. Red: builds silently.
+x18_src '0xD2800012' > $X18_D/f.kr
+for X18_OS in macos android; do
+    for X18_M in ir legacy; do
+        x18_flags $X18_OS $X18_M
+        x18_one "warn:$X18_RAW" f.kr $X18_F
+    done
+    x18_row asm_x18_raw_hex_warns_${X18_OS}_arm64 "raw hex on $X18_OS, IR and --legacy: builds with the #242 warning"
+done
+# asm_x18_reads_accepted_arm64 (control): reading x18 builds everywhere.
+for X18_T in 'mov x9, x18' 'ldr x0, [x18, #8]' 'str x18, [x9]'; do
+    x18_src "$X18_T" > $X18_D/f.kr
+    for X18_OS in macos android windows; do
+        for X18_M in ir legacy; do x18_flags $X18_OS $X18_M; x18_one ok f.kr $X18_F; done
+    done
+done
+x18_row asm_x18_reads_accepted_arm64 "mov x9, x18 / ldr x0, [x18, #8] / str x18, [x9] build on macOS, Android, Windows, IR and --legacy"
+# asm_x18_linux_baremetal_accepted_arm64 (control): x18 is an ordinary
+# register on Linux (IR, -c, --legacy) and bare metal.
+for X18_P in "|in(v -> x18)" "|out(x18 -> v)" "|clobbers(x18)" "mov x18, x9|" "ldp x0, x18, [x9]|" \
+             "ldr x0, [x18], #8|" "ldr x0, [x18, #8]!|" "str x0, [x18], #8|" "ldp x0, x1, [x18], #16|"; do
+    X18_T=${X18_P%%|*}; X18_K=${X18_P#*|}
+    if [ -z "$X18_T" ]; then x18_src nop "$X18_K" > $X18_D/f.kr; else x18_src "$X18_T" > $X18_D/f.kr; fi
+    for X18_M in ir obj legacy; do x18_flags linux $X18_M; x18_one ok f.kr $X18_F; done
+    if [ -z "$X18_T" ]; then X18_T=nop; else X18_K='in(v -> x9) clobbers(x0, x1)'; fi
+    printf 'fn f(uint64 a) -> uint64 {\n    uint64 v = a\n    asm { "%s" } %s\n    return v\n}\nfn main() {\n    uint64 _r = f(7)\n    loop { }\n}\n' "$X18_T" "$X18_K" > $X18_D/b.kr
+    x18_one ok b.kr --arch=arm64 --target=none
+done
+x18_row asm_x18_linux_baremetal_accepted_arm64 "x18 names, writes and writeback build on Linux (IR, -c, --legacy) and --target=none"
+# asm_x18_windows_writeback_refused_arm64_<mode> (#246): the writeback #143's
+# scanner missed. Red: builds.
+for X18_M in ir legacy obj; do
+    for X18_T in 'ldp x0, x1, [x18], #16' 'ldr x0, [x18], #8' 'ldr x0, [x18, #8]!' 'str x0, [x18], #8'; do
+        x18_src "$X18_T" > $X18_D/f.kr
+        x18_flags windows $X18_M
+        x18_one "$X18_WB$X18_WHY_windows" f.kr $X18_F
+    done
+    x18_row asm_x18_windows_writeback_refused_arm64_$X18_M "x18 writeback (ldp/ldr post, ldr pre, str post) on Windows $X18_M: the #246 error"
+done
+# asm_x18_windows_143_unchanged_arm64 (control): what #143 refused before is
+# refused with #143's message as before (names; lower-case first register;
+# its load-pair message now reads "... writes x29/x18 as its second
+# register", since it also covers swp, ld<op> and casp).
+x18_src 'nop' 'in(v -> x18)' > $X18_D/f.kr
+for X18_M in ir legacy obj; do x18_flags windows $X18_M; x18_one "f.kr:3:27: error: this asm constraint binds the frame/TEB register -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143); use another register" f.kr $X18_F; done
+x18_src 'mov x18, x9' > $X18_D/f.kr
+for X18_M in ir legacy obj; do x18_flags windows $X18_M; x18_one "$X18_143" f.kr $X18_F; done
+x18_row asm_x18_windows_143_unchanged_arm64 "in(v -> x18) and mov x18, x9 on Windows IR/legacy/obj: #143's refusals, texts unchanged"
+
+# asm_x29_writeback_refused_windows_arm64_<mode>_<form> (#249): the frame
+# pointer's writeback, which #143's scanner missed. Red: builds.
+for X18_M in ir legacy obj; do
+    for X18_P in "post|ldr x0, [x29], #8" "pre|ldr x0, [x29, #8]!" "store|str x0, [x29], #8" "ldppost|ldp x0, x1, [x29], #16"; do
+        X18_N=${X18_P%%|*}; X18_T=${X18_P#*|}
+        x18_src "$X18_T" > $X18_D/f.kr
+        x18_flags windows $X18_M
+        x18_one "$X18_WB$X18_WHY_x29" f.kr $X18_F
+        x18_row asm_x29_writeback_refused_windows_arm64_${X18_M}_$X18_N "'$X18_T' on Windows ${X18_M}: the #249 error"
+    done
+done
+# asm_x29_fp_alias_refused_windows_arm64 (#249): fp is x29. Red: the
+# assembler's error.
+x18_src 'ldr x0, [fp], #8' > $X18_D/f.kr
+x18_flags windows ir; x18_one "$X18_WB$X18_WHY_x29" f.kr $X18_F
+x18_row asm_x29_fp_alias_refused_windows_arm64 "ldr x0, [fp], #8 on Windows: the #249 error, not the assembler's"
+# asm_x29_status_second_refused_windows_arm64 (#249): stxr's status register
+# and swp's second register are written; #143's scanner, now classified,
+# refuses them. Red: the assembler's error.
+x18_flags windows ir
+x18_src 'stxr w29, x0, [x9]' > $X18_D/f.kr; x18_one "$X18_143" f.kr $X18_F
+x18_src 'swp x0, x29, [x9]' > $X18_D/f.kr; x18_one "$X18_143_2" f.kr $X18_F
+x18_row asm_x29_status_second_refused_windows_arm64 "stxr w29 / swp x0, x29 on Windows: refused (#143's classified scanner)"
+# asm_ldp_second_refused_windows_arm64: #143's load-pair refusal of a written
+# second register, now classified (ldp writes both) and worded "... as its
+# second register" (it also covers swp, ld<op> and casp). Red: the old text
+# "this asm load-pair writes x29/x18".
+for X18_R in x18 x29; do
+    x18_src "ldp x0, $X18_R, [x9]" > $X18_D/f.kr
+    for X18_M in ir legacy obj; do x18_flags windows $X18_M; x18_one "$X18_143_2" f.kr $X18_F; done
+done
+x18_row asm_ldp_second_refused_windows_arm64 "ldp x0, x18|x29, [x9] on Windows IR/legacy/obj: #143's second-register refusal, new text"
+# asm_x29_case_refused_windows_arm64 (#249): upper case. Red: the assembler's
+# error.
+x18_src 'MOV X29, X9' > $X18_D/f.kr
+for X18_M in ir legacy obj; do x18_flags windows $X18_M; x18_one "$X18_W1$X18_WHY_x29" f.kr $X18_F; done
+x18_row asm_x29_case_refused_windows_arm64 "MOV X29, X9 on Windows IR/legacy/obj: the #249 error"
+# asm_x29_ordinary_off_windows_arm64 (control): x29 is guarded on Windows
+# only -- the same writeback and bic forms build on macOS, Android, Linux.
+for X18_T in 'ldr x0, [x29], #8' 'ldr x0, [x29, #8]!' 'str x0, [x29], #8' 'ldp x0, x1, [x29], #16' 'bic x29, x9, x10'; do
+    x18_src "$X18_T" > $X18_D/f.kr
+    for X18_OS in macos android linux; do x18_flags $X18_OS ir; x18_one ok f.kr $X18_F; done
+done
+x18_row asm_x29_ordinary_off_windows_arm64 "x29 writeback and bic build on macOS, Android and Linux"
+# asm_bic_refused_<reg>_<os>_arm64_<mode> (#251): bic writes its first
+# register; both scanners used to exempt every b* mnemonic as a branch. Red:
+# builds (bic fp: the assembler's error).
+x18_src 'bic x18, x9, x10' > $X18_D/f.kr
+for X18_OS in macos android; do
+    eval "X18_Y=\$X18_WHY_$X18_OS"
+    for X18_M in ir legacy; do
+        x18_flags $X18_OS $X18_M
+        x18_one "$X18_W1$X18_Y" f.kr $X18_F
+        x18_row asm_bic_refused_x18_${X18_OS}_arm64_$X18_M "bic x18, x9, x10 on $X18_OS ${X18_M}: the #242 error"
+    done
+done
+for X18_R in x18 x29 fp; do
+    x18_src "bic $X18_R, x9, x10" > $X18_D/f.kr
+    for X18_M in ir legacy obj; do
+        x18_flags windows $X18_M
+        x18_one "$X18_143" f.kr $X18_F
+        x18_row asm_bic_refused_${X18_R}_windows_arm64_$X18_M "bic $X18_R, x9, x10 on Windows ${X18_M}: #143's refusal"
+    done
+done
+# asm_ldop_first_read_not_refused_windows_arm64 (#252): ldadd's first
+# register is its source; #143 refused it as a write. Now it reaches the
+# assembler (which does not accept ldadd yet).
+x18_src 'ldadd x18, x0, [x9]' > $X18_D/f.kr
+for X18_M in ir legacy; do x18_flags windows $X18_M; x18_one asm f.kr $X18_F; done
+x18_row asm_ldop_first_read_not_refused_windows_arm64 "ldadd x18, x0, [x9] on Windows IR/legacy: not refused as a write"
+# asm_x18_case_read_not_refused_arm64 (control): STR X18, [X9] reads x18 --
+# the classification is case-blind (an earlier prototype refused it).
+x18_src 'STR X18, [X9]' > $X18_D/f.kr
+x18_flags macos ir; x18_one asm f.kr $X18_F
+x18_row asm_x18_case_read_not_refused_arm64 "STR X18, [X9] on macOS: the assembler's error, not a write refusal"
+# asm_x18_case_write_refused_arm64: BIC X18, X9, X10 writes x18. Red: the
+# assembler's error.
+x18_src 'BIC X18, X9, X10' > $X18_D/f.kr
+for X18_OS in macos android; do eval "X18_Y=\$X18_WHY_$X18_OS"; x18_flags $X18_OS ir; x18_one "$X18_W1$X18_Y" f.kr $X18_F; done
+x18_row asm_x18_case_write_refused_arm64 "BIC X18, X9, X10 on macOS and Android: the #242 error"
+# asm_x18_text_refused_multi_<os>_arm64: the second `;` instruction is
+# checked too. Red: builds (the assembler drops it, #245).
+x18_src 'mov x1, x9; mov x18, x9' > $X18_D/f.kr
+for X18_OS in macos android; do
+    eval "X18_Y=\$X18_WHY_$X18_OS"
+    for X18_M in ir legacy; do x18_flags $X18_OS $X18_M; x18_one "$X18_W1$X18_Y" f.kr $X18_F; done
+    x18_row asm_x18_text_refused_multi_${X18_OS}_arm64 "'mov x1, x9; mov x18, x9' on $X18_OS, IR and --legacy"
+done
+x18_src 'mov x1, x9; mov x29, x9' > $X18_D/f.kr
+x18_flags windows ir; x18_one "$X18_W1$X18_WHY_x29" f.kr $X18_F
+x18_row asm_x29_text_refused_multi_windows_arm64 "'mov x1, x9; mov x29, x9' on Windows: the #249 error"
+# asm_write_class_covers_assembler: every mnemonic asm_emit_a64 accepts is in
+# exactly one write-classification list (tests/helpers/asm_write_class_cover.py),
+# so a mnemonic added to the assembler cannot be exempted from the x18/x29
+# checks by default. The _mutation row is the row's own control: the same
+# check over a copy with bic removed from the first-register list must FAIL
+# naming bic.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then
+    skip_row asm_write_class_covers_assembler "needs python3"
+else
+    X18_O=$(python3 -B "$DIR/helpers/asm_write_class_cover.py" "$DIR/../src/codegen.kr" 2>&1); X18_RC=$?
+    if [ $X18_RC = 0 ]; then PASS=$((PASS + 1)); echo "  asm_write_class_covers_assembler: PASS ($(head -1 <<< "$X18_O"))"
+    else echo "FAIL: asm_write_class_covers_assembler (rc=$X18_RC: $(tr '\n' ' ' <<< "$X18_O" | cut -c1-300))"; FAIL=$((FAIL + 1)); fi
+fi
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then
+    skip_row asm_write_class_covers_assembler_mutation "needs python3"
+else
+    sed 's/^\(fn asm_wc_first() -> uint64 { return "|.*\)|bic|/\1|/' "$DIR/../src/codegen.kr" > $X18_D/cg_mut.kr
+    if cmp -s "$DIR/../src/codegen.kr" $X18_D/cg_mut.kr; then
+        echo "FAIL: asm_write_class_covers_assembler_mutation (no |bic| entry in asm_wc_first to remove)"; FAIL=$((FAIL + 1))
+    else
+        X18_O=$(python3 -B "$DIR/helpers/asm_write_class_cover.py" $X18_D/cg_mut.kr 2>&1); X18_RC=$?
+        if [ $X18_RC = 1 ] && grep -qx 'UNCLASSIFIED: bic' <<< "$X18_O"; then
+            PASS=$((PASS + 1)); echo "  asm_write_class_covers_assembler_mutation: PASS (bic removed: the check fails naming it)"
+        else echo "FAIL: asm_write_class_covers_assembler_mutation (want rc 1 and 'UNCLASSIFIED: bic', got rc=$X18_RC: $(tr '\n' ' ' <<< "$X18_O" | cut -c1-200))"; FAIL=$((FAIL + 1)); fi
+    fi
+fi
+# asm_readonly_unaccepted_reaches_assembler_<fam>_arm64: read-only forms the
+# assembler does not accept yet (store atomics, unprivileged/release stores,
+# pointer-auth branches, setf) are classified as writing nothing, so they get
+# the assembler's error, not a false write refusal (macOS and Windows PE).
+for X18_P in "stop|stadd x18, [x9]|staddlh w18, [x9]" "sttr|sttr x18, [x9]|sttrb w18, [x9]" "stlur|stlur x18, [x9]" \
+             "stllr|stllrb w18, [x9]" "pac|braa x18, x9|blraaz x18" "setf|setf8 w18"; do
+    X18_N=${X18_P%%|*}; X18_R=${X18_P#*|}
+    while [ -n "$X18_R" ]; do
+        X18_T=${X18_R%%|*}; case $X18_R in *'|'*) X18_R=${X18_R#*|} ;; *) X18_R="" ;; esac
+        x18_src "$X18_T" > $X18_D/f.kr
+        for X18_OS in macos windows; do x18_flags $X18_OS ir; x18_one asm f.kr $X18_F; done
+    done
+    x18_row asm_readonly_unaccepted_reaches_assembler_${X18_N}_arm64 "${X18_P#*|} on macOS and Windows: the assembler's error"
+done
+# asm_unknown_mnemonic_fails_closed_arm64 (control): an unknown mnemonic
+# counts as writing its first register.
+x18_src 'frob x18, x9' > $X18_D/f.kr
+x18_flags macos ir; x18_one "$X18_W1$X18_WHY_macos" f.kr $X18_F
+x18_row asm_unknown_mnemonic_fails_closed_arm64 "frob x18, x9 on macOS: the write refusal"
+# asm_x18_text_refused_newline_<form>_<os>_arm64: an instruction after the
+# escape \n (esc) or \r (cr), after a newline in the string (lit), or after a
+# carriage-return byte in the string (crlit). Red: builds (dropped).
+X18_CR=$(printf '\r')
+for X18_P in "esc|mov x1, x9\\nmov x18, x9" "cr|mov x1, x9\\rmov x18, x9" "lit|mov x1, x9
+mov x18, x9" "crlit|mov x1, x9${X18_CR}mov x18, x9"; do
+    X18_N=${X18_P%%|*}
+    x18_src "${X18_P#*|}" > $X18_D/f.kr
+    for X18_OS in macos windows; do
+        eval "X18_Y=\$X18_WHY_$X18_OS"
+        x18_flags $X18_OS ir; x18_one "$X18_W1$X18_Y" f.kr $X18_F
+        x18_row asm_x18_text_refused_newline_${X18_N}_${X18_OS}_arm64 "second instruction after a $X18_N separator on ${X18_OS}"
+    done
+done
+x18_src 'mov x1, x9\nmov x29, x9' > $X18_D/f.kr
+x18_flags windows ir; x18_one "$X18_W1$X18_WHY_x29" f.kr $X18_F
+x18_row asm_x29_text_refused_newline_windows_arm64 "'mov x1, x9\\nmov x29, x9' on Windows: the #249 error"
+# asm_x18_text_tab_refused_<os>_arm64: a tab is a blank to the check (the
+# assembler rejects it today). Red: the assembler's error.
+x18_src "ldr x0, [$(printf '\t')x18], #8" > $X18_D/f.kr
+for X18_OS in macos windows; do
+    eval "X18_Y=\$X18_WHY_$X18_OS"
+    x18_flags $X18_OS ir; x18_one "$X18_WB$X18_Y" f.kr $X18_F
+    x18_row asm_x18_text_tab_refused_${X18_OS}_arm64 "ldr x0, [<tab>x18], #8 on ${X18_OS}: the writeback error"
+done
+# asm_x18_newline_tab_linux_accepted_arm64 (control): on Linux the same
+# strings behave as before (the assembler drops what follows a separator,
+# #245; the tab form is its own error).
+for X18_T in 'mov x1, x9\nmov x18, x9' 'mov x1, x9\rmov x18, x9' 'mov x1, x9
+mov x18, x9'; do
+    x18_src "$X18_T" > $X18_D/f.kr
+    x18_flags linux ir; x18_one ok f.kr $X18_F
+done
+x18_src "ldr x0, [$(printf '\t')x18], #8" > $X18_D/f.kr
+x18_flags linux ir; x18_one asm f.kr $X18_F
+x18_row asm_x18_newline_tab_linux_accepted_arm64 "on Linux: newline-separated strings build, the tab form is the assembler's error"
+# asm_x18_fat_targets_refused_arm64: a fat build of a block naming x18 for
+# mac-arm64 + android-arm64 stops at the register, and the note names the
+# slice. asm_x18_fat_targets_linux_ok_arm64 (control): linux-arm64 builds.
+x18_src 'nop' 'in(v -> x18)' > $X18_D/f.kr
+rm -f $X18_D/o.out
+( cd $X18_D && timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRC_RAW_CC" --targets=mac-arm64,android-arm64 f.kr -o o.out > o.so 2> o.se ); X18_RC=$?
+if [ $X18_RC != 1 ] || [ -e $X18_D/o.out ] || ! grep -qxF "f.kr:3:27: $X18_NAME_macos" $X18_D/o.se \
+   || ! grep -q '^note: the error above is in the mac-arm64 slice of the fat binary' $X18_D/o.se; then
+    X18_BAD=" rc=$X18_RC $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150)"
+fi
+x18_row asm_x18_fat_targets_refused_arm64 "--targets=mac-arm64,android-arm64: the #242 error at the register, then the mac-arm64 slice note"
+rm -f $X18_D/o.out
+( cd $X18_D && timeout -k 5 "$RUN_TEST_TIMEOUT" "$KRC_RAW_CC" --targets=linux-arm64 f.kr -o o.out > o.so 2> o.se ); X18_RC=$?
+if [ $X18_RC != 0 ] || [ ! -f $X18_D/o.out ] || grep -qE ': error:|#242' $X18_D/o.se; then
+    X18_BAD=" rc=$X18_RC $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150)"
+fi
+x18_row asm_x18_fat_targets_linux_ok_arm64 "--targets=linux-arm64 of the same program builds"
+rm -rf $X18_D
 
 # --- #143 A6b-1: x86_64 IR unwind tables ----------------------------------
 # --test-listing=PATH (hidden, review ruling (a)): the listing comes from the

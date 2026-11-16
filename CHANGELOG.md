@@ -46,6 +46,19 @@ and a value or pinned parameter moves off `rbx`/`r12` (Morgana_VM's `cpuid` fixt
 bug met in the field). Not every ApexRift kernel image is byte-identical (ApexRift-d0's `kernel.kr`
 image/arx/uefi differ, harmlessly). The compiler itself is byte-identical. Rebuild anything with inline asm.
 
+**Fixed: callee-saved registers an inline-asm block writes were not preserved by `--legacy`, `-c`/`--emit=obj`
+and `--emit=lkm` code, nor `rsi`/`rdi` on Windows (#235, #226, #241).** On x86_64 those prologues saved only `rbx`
+and `r12`: a block naming `rbp` or `r13`–`r15` — even in `clobbers()` — changed it for the caller (a C program
+calling a `-c` object lost its `rbp`/`r13`). On arm64 they never saved `x21`–`x28`, and on Linux, macOS and
+Android a leaf function saved nothing, so a block naming `x19`–`x30` changed the caller's register and one
+writing `x30` crashed the function's return. On Windows x64 no backend saved `rsi`/`rdi` for a block naming them.
+The legacy arm64 `file_size` built-in also destroyed the caller's `x19` when called from a leaf function. Those
+registers are now saved and restored, with Windows unwind codes (PE and COFF). riscv32 and xtensa have no legacy
+backend and were not affected. Only functions whose asm names one of these registers, and arm64 leaf functions
+calling `file_size`, compile to different code: 135 of 13062 surveyed builds change (each gains exactly these saves) and none fails to build (KernRift's own tests and the downstream corpus); the
+compiler itself is byte-identical. Rebuild `-c` objects, modules, Windows programs and `--legacy` programs
+containing such asm.
+
 ### Correctness fixes that stop a program from building
 
 Emergency correctness breakage (ABI_POLICY.md), no deprecation period:
@@ -85,6 +98,17 @@ Inline asm (#214, #215, #218, #219), the same policy:
 - **An arm64 asm `out()` into a variable in a far stack slot, whose block names every one of
   x9–x17 (xtensa: a8–a11), is an error (#219)**: no register is left to address the slot.
   Migration: leave one of them out of the block.
+- **arm64 asm cannot use `x18` on macOS or Android (#242), nor write `x18` or the frame pointer `x29` past the
+  Windows checks (#246, #249, #251)** — naming `x18` in `in()`/`out()`/`clobbers()`, or an instruction that writes
+  it (destination, `stxr` status, second register of a pair/exchange/atomic, `[x18], #n` / `[x18, #n]!`
+  writeback; any case; any instruction after a `;` or newline) is an error located at the asm. It is the platform register
+  on macOS, the shadow-call-stack register on Android and the TEB on Windows; on Windows the same now holds for
+  `x29`/`fp`, the frame pointer every unwind record relies on. Before, Windows refused only lower-case
+  first-register and `ldp` writes, exempted `bic` as if it were a branch (#251), and wrongly refused an atomic whose
+  first register is only read (#252: no longer refused by this check; the inline assembler does not
+  support `ldadd`/`swp` yet, #245). Raw-byte asm cannot be checked and now gets a warning on macOS
+  and Android, as on Windows. Linux and bare metal are unchanged. Migration: use another register. No surveyed
+  program is affected.
 
 These are emergency correctness breakage under ABI_POLICY.md: an ignored or misread constraint
 register is a silent miscompile. No surveyed program used `clobbers()`, named the stack pointer

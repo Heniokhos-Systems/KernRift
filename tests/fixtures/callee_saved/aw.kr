@@ -1,0 +1,30 @@
+// #235 (M3): Windows arm64 legacy probe (built, not run: no arm64 Wine).
+// f names x21-x24 and x28, h names x23 and calls println, main x21 and x28;
+// each must get a str/ldr pair and a save_reg unwind code.
+fn g(uint64 a) -> uint64 {
+    uint64 t = a + 1
+    return t
+}
+fn f(uint64 a) -> uint64 {
+    uint64 r = g(a)
+    asm { "mov x21, x9"; "mov x23, x9"; "mov x24, x9"; "mov x28, x9"; "mov x22, x9" } in(a -> x9) clobbers(x21, x23, x24, x28, x22)
+    return r
+}
+fn h(uint64 a) -> uint64 {
+    asm { "mov x23, x9" } in(a -> x9) clobbers(x23)
+    println("h")
+    return a
+}
+fn main() {
+    uint64 s = 0x5A5A
+    uint64 got = 0
+    uint64 got2 = 0
+    asm { "mov x21, x9"; "mov x28, x9" } in(s -> x9) clobbers(x21, x28)
+    uint64 z = f(77)
+    asm { "mov x9, x21"; "mov x10, x28" } out(x9 -> got, x10 -> got2)
+    if got != 0x5A5A { exit(120) }
+    if got2 != 0x5A5A { exit(121) }
+    uint64 _y = h(3)
+    if z != 78 { exit(122) }
+    exit(7)
+}

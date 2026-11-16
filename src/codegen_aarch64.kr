@@ -2853,6 +2853,7 @@ fn gen_expr_a64(uint64 node) {
                 emit_a64_load_x0(temp_slot_1)
                 a64_patch_b26_here(gfs_done)       // .done
             } else {
+                a64_leg_keep = 1                   // #241: x19 is written; keep its save in a leaf
                 emit_a64_mov(19, 0)
                 emit_a64_mov_imm(1, 0)
                 emit_a64_mov_imm(2, 2)
@@ -6198,6 +6199,7 @@ fn gen_stmt_a64(uint64 node) {
     if kind == 43 {
         win_asm_refuse(node)
         asm_check_constraints(node, 1)     // #214/#218: located, every clause
+        leg_cs_backstop(node, 1)           // #235
         uint32 cons_head = ast_data3(node)
         uint64 wch_a = cons_head
 
@@ -6373,6 +6375,7 @@ fn gen_function_a64(uint64 fn_node) {
     if is_extern_a != 0 { return }
     uint32 body_check_a = ast_data3(fn_node)
     if body_check_a == 0 { return }
+    a64_leg_cs_setup(fn_node, is_naked)  // #226/#235: x21-x28 slots, keep the frame record
     cg_win_prescan(fn_node, 1)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
     // A19d(iii): an SP-fixed Windows arm64 legacy function is folded -- OUT
     // is the bottom of its frame, x29/x30 and x19/x20 sit above it at
@@ -6408,6 +6411,7 @@ fn gen_function_a64(uint64 fn_node) {
     var_count = var_count + 1
     compound_temp_slot = cg_slot_off(var_count)
     var_count = var_count + 1
+    a64_leg_cs_reserve(fn_node)          // #235
     var_frame_size = var_count * 8
     uint64 rem0 = var_frame_size & 15
     if rem0 != 0 { var_frame_size = var_frame_size + 16 - rem0 }
@@ -6600,7 +6604,8 @@ fn gen_function_a64(uint64 fn_node) {
         emit_a64(0xA9007BFD | ((a64_save / 8) << 15))         // stp x29, x30, [sp, #a64_save]
         stp_callee_off = out_len
         emit_a64(0xA90053F3 | (((a64_save + 16) / 8) << 15))  // stp x19, x20, [sp, #a64_save+16]
-        if cg_win_folded == 0 { emit_a64_add_imm(29, 31, 0) }  // mov x29, sp
+        a64_leg_cs_saves(0)                                    // #235: x21-x28 before set_fp
+        if cg_win_folded == 0 { emit_a64_add_imm(29, 31, 0); a64_leg_setfp_end = out_len }  // mov x29, sp
         if tok_matches(wnt_a64, "main", 4) != 0 && freestanding == 0 {
             // GetCommandLineA, after the prologue (spec 5.2d)
             emit_a64_win_call_iat(7)       // GetCommandLineA -> x0 = cmdline
@@ -6623,6 +6628,7 @@ fn gen_function_a64(uint64 fn_node) {
         emit_a64_add_imm(29, 31, 0)  // mov x29, sp
         stp_callee_off = out_len
         emit_a64(0xA90153F3)  // stp x19, x20, [sp, #16]
+        a64_leg_cs_saves(0)   // #235
     }
 
     uint64 saved_var_base = a64_var_base
@@ -6863,6 +6869,7 @@ fn gen_function_a64(uint64 fn_node) {
         }
     }
 
+    a64_leg_cs_saves(1)                                    // #235: restores, then the record
     uint64 ldp_callee_off = out_len
     emit_a64(0xA94053F3 | (((a64_save + 16) / 8) << 15))  // ldp x19, x20, [sp, #a64_save+16]
     uint64 ldp_fp_off = out_len
@@ -6952,11 +6959,12 @@ fn gen_function_a64(uint64 fn_node) {
         // set_fp, and the epilog shares every code from StartIndex 0
         uw_a64_prolog_insn(0x40 | (a64_save / 8), 1, stp_fp_off + 4)                // save_fplr #a64_save
         uw_a64_prolog_insn(0xC8 | (((a64_save + 16) / 8) << 8), 2, stp_callee_off + 4)  // save_regp x19, #a64_save+16
+        a64_leg_cs_unwind()                                                         // #235: save_reg x21-x28
         if cg_win_folded == 0 {
-            uw_a64_prolog_insn(0xE1, 1, stp_callee_off + 8)                         // set_fp
-            uw_a64_epilog(ldp_callee_off, 1)
+            uw_a64_prolog_insn(0xE1, 1, a64_leg_setfp_end)                          // set_fp
+            uw_a64_epilog(a64_leg_epi_start, 1)
         } else {
-            uw_a64_epilog(ldp_callee_off, 0)
+            uw_a64_epilog(a64_leg_epi_start, 0)
         }
         uw_fn_finalize()
     }
@@ -6979,7 +6987,7 @@ fn gen_function_a64(uint64 fn_node) {
             if (wsi & 0xFFFFF000) == 0xD63F0000 { has_bl = 1; break }
             scan = scan + 4
         }
-        if has_bl == 0 {
+        if has_bl == 0 && a64_leg_keep == 0 {    // #226/#241: not when x19/x20/x29/x30 are written
             // Leaf: NOP out STP x29,x30 + MOV x29,sp + STP x19,x20
             patch_u32(stp_fp_off, 0xD503201F)
             patch_u32(stp_fp_off + 4, 0xD503201F)
@@ -7257,5 +7265,74 @@ fn resolve_string_fixups_a64(uint64 str_data_start) {
             patch_u32(wco + 4, 0x91000200 | (page_off << 10) | rd)
         }
         i = i + 1
+    }
+}
+
+// ===========================================================================
+// M3 (#226, #235, #241): legacy arm64 callee-saved saves. At the end of the
+// file so cited line numbers above stay put.
+// ===========================================================================
+
+// 1 when this legacy function keeps its frame record (x29/x30/x19/x20) even as
+// a leaf: an asm block names one of them, or a builtin writes x19 (#241).
+static uint64 a64_leg_keep = 0
+static uint64 a64_leg_setfp_end = 0
+static uint64 a64_leg_epi_start = 0
+
+// Before the Windows prescan: the slot set (x21-x28) and the keep flag.
+fn a64_leg_cs_setup(uint64 fn_node, uint64 is_naked) {
+    leg_cs_mask = 0
+    a64_leg_keep = 0
+    leg_cs_naked = is_naked
+    if is_naked == 0 {
+        uint32 b = ast_data3(fn_node)
+        uint64 named = scan_asm_reg_mask(b, 1)
+        leg_cs_mask = named & 0x1FE00000
+        if (named & 0x60180000) != 0 { a64_leg_keep = 1 }
+    }
+}
+
+// After the three temp slots: reserve the slots. A function with an asm block
+// is never folded on Windows (cg_win_ps_node: kind 43 moves SP), so the saves
+// sit at [sp, #32+8n] <= 112, inside save_reg's 504.
+fn a64_leg_cs_reserve(uint64 fn_node) {
+    leg_cs_base = cg_slot_off(var_count)
+    var_count = var_count + leg_popcount(leg_cs_mask)
+    if leg_cs_mask != 0 && cg_win_folded != 0 {
+        uint32 b = ast_data3(fn_node)
+        diag_fatal_at(scan_asm_reg_tok(b, 1, leg_cs_mask), "internal compiler error (#235): a legacy arm64 function whose asm names x21-x28 was given a folded Windows frame; please report it")
+    }
+}
+
+// Save (restore == 0, ascending, recording ends) or restore (reverse).
+fn a64_leg_cs_saves(uint64 restore) {
+    if restore != 0 { a64_leg_epi_start = out_len }
+    if leg_cs_naked != 0 { return }
+    uint64 i = 0
+    while i < 8 {
+        uint64 r = 21 + i
+        if restore != 0 { r = 28 - i }
+        if ((leg_cs_mask >> r) & 1) != 0 {
+            if restore == 0 {
+                emit_a64_str(r, 31, a64_var_base + leg_cs_off(r))
+                leg_cs_end_set(r)
+            } else {
+                emit_a64_ldr(r, 31, a64_var_base + leg_cs_off(r))
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Windows: one save_reg per saved register, after save_regp x19.
+fn a64_leg_cs_unwind() {
+    uint64 r = 21
+    while r <= 28 {
+        if ((leg_cs_mask >> r) & 1) != 0 {
+            uint64 z = (a64_var_base + leg_cs_off(r)) / 8
+            uint64 xx = r - 19
+            uw_a64_prolog_insn((0xD0 | (xx >> 2)) | ((((xx & 3) << 6) | z) << 8), 2, leg_cs_end_get(r))
+        }
+        r = r + 1
     }
 }

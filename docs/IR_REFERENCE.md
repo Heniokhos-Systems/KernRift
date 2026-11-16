@@ -326,7 +326,7 @@ function main:
 - `v0 = ret v7` — `v0` is the reserved "no destination" vreg.
 - `arg v1 [0]` — argument position in `imm`.
 - Blocks print in index order, which is *also* the emission order
-  (`src/ir.kr:15968`), but not the order the lowering created edges in: an
+  (`src/ir.kr:15970`), but not the order the lowering created edges in: an
   `if`'s join block can have a lower index than its `else` arm.
 
 ---
@@ -506,7 +506,7 @@ is false; it is still present in MLRift's copy of this document.)*
 | 87 | `IR_CALL_IND` | `dest = (*src1)()` | **SE** |
 
 - **`IR_BR_COND` does not "fall through".** The false target is the block's
-  `succ0` field, read separately (`src/ir.kr:16024`). The emitter then picks
+  `succ0` field, read separately (`src/ir.kr:16026`). The emitter then picks
   one of four layout cases against the *next* block index — both-next (emit
   nothing), true-next (invert the condition, one `jcc`), false-next (`jcc`,
   no trailing `jmp`), neither (`jcc` + `jmp`). If you write a pass that
@@ -514,7 +514,7 @@ is false; it is still present in MLRift's copy of this document.)*
   the terminator's `imm`.
 - Terminators are **not** emitted from the per-instruction dispatch on any
   backend. x86 has explicit no-op cases at `src/ir.kr:13432`/`13436` and
-  skips them in the block loop (`src/ir.kr:15986`); arm64/riscv32/xtensa have
+  skips them in the block loop (`src/ir.kr:15988`); arm64/riscv32/xtensa have
   no case at all and emit terminators in their function-level loop.
 
 ### 5.6 Multi-value returns (80–83)
@@ -881,7 +881,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:16718`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:16724`). `_start` is not a seed, so freestanding riscv32 and
   xtensa (and `--emit=image`) entry points had to be added explicitly
   (`src/main.kr:4590`–`4605`).
 - **A provider reached only through override resolution gets pruned.** Under
@@ -889,7 +889,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:16548`–`16568`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:16554`–`16574`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.
@@ -1303,6 +1303,12 @@ colours were actually used, so only those get pushed. *(Its own comment,
 file as 6 colours including rbp, and the mask as reaching bit 22 on arm64's
 23-wide file. The old wording is the likely origin of the wrong claim in
 earlier revisions of this document.)*
+A function containing inline asm pushes the whole narrow x86_64 set (rbx,
+r12–r15, rbp) whatever it coloured; on Windows x64 it also pushes `rsi` and
+`rdi` when one of its blocks names them (#235: Win64 makes them nonvolatile,
+and no colour of the narrow file holds them) — after `push r15`, before
+`push rbp`, each with its `UWOP_PUSH_NONVOL` code, popped in reverse after
+`pop rbp` (`ir_win_sidi_push` / `ir_win_sidi_pop`, at the end of `src/ir.kr`).
 
 ### Colour files, verified from the init functions
 
