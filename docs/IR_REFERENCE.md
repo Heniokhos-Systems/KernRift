@@ -585,7 +585,7 @@ The old text called all six "riscv32-only". **That is wrong for 143**, which
 is created by the pow2-`MUL`→`SHL` strength reduction for *every* arch
 (`src/ir.kr:13783`) and has handlers on all four backends. 140–142 and
 144–145 are created only under `target_arch == 2` (`src/ir.kr:14020`), even
-though xtensa carries handlers for them (`src/ir_xtensa.kr:1957`, `1978`) —
+though xtensa carries handlers for them (`src/ir_xtensa.kr:1959`, `1980`) —
 those xtensa arms are dead code today.
 
 Shift-amount width is enforced in the *producer*, not the consumer:
@@ -604,7 +604,7 @@ Four emitters, one dispatch function each:
 | x86_64 | `ir_emit_x86_insn` | `src/ir.kr:9752` | `x86_nyi_op`, `src/ir.kr:9352` |
 | AArch64 | `ir_emit_arm64_insn` | `src/ir_aarch64.kr:1270` | `a64_nyi_op`, `src/ir_aarch64.kr:906` |
 | RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1107` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
-| Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1713` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
+| Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1715` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
 
 All four NYI helpers write `error: <arch>: IR op <N> not yet implemented\n`
 to fd 2 and `exit(1)`. **There is never a silent fallback.** RISC-V has a
@@ -905,7 +905,7 @@ document. It runs once per function, after lowering and before liveness.
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:13490`, written only at
 `src/main.kr:10964`) and each backend skips the whole call
 (`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2412`,
-`src/ir_xtensa.kr:2832`). Note the spelling: **`--O0`**, two dashes. There is
+`src/ir_xtensa.kr:2834`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
 **What `--O0` does *not* disable**, because these live outside
@@ -1664,7 +1664,7 @@ removed; do not re-add them without re-verifying.
     stack pointer (#218); the source comment above the first site
     (`src/ir.kr:5496`) says so.
 12. **Dead handler arms.** Xtensa's `IR_AND_IMM`/`OR_IMM`/`XOR_IMM`/
-    `SHR_IMM`/`SAR_IMM` cases (`src/ir_xtensa.kr:1957`, `1978`) are
+    `SHR_IMM`/`SAR_IMM` cases (`src/ir_xtensa.kr:1959`, `1980`) are
     unreachable — their only producer (`src/ir.kr:14020`) is gated to
     `target_arch == 2` and xtensa is arch 3. Harmless, but do not mistake
     their presence for coverage. Relatedly, 140–145 are absent from **both**

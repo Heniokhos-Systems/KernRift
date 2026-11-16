@@ -1692,6 +1692,8 @@ fn asm_emit_xt(uint64 str_tok) {
     uint64 sptr = cg_source + tstart + 1     // skip opening quote
     uint64 slen = tlen - 2                    // drop both quotes
     if slen == 0 { return }
+    asm_one_insn(str_tok, sptr, slen, 3)    // A1 (#245): the text rules
+    slen = asm_cur_sl                        // trailing blanks trimmed once
 
     // Nullary intrinsics (fixed-width words; NOP.N = 16-bit, MEMW = 24-bit).
     if asm_match(sptr, 0, "nop", 3) != 0 && slen == 3 { xt_nop_n(); return }
