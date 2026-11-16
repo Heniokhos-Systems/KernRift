@@ -5676,6 +5676,7 @@ fn gen_stmt_a64(uint64 node) {
             if arem2 != 0 { var_frame_size = var_frame_size + 16 - arem2 }
             uint64 ptr_offset = var_declare(name_tok)
             arr_elem_register(name_tok, elem_size_v)
+            arr_fkind_set_last(legacy_fkind_of_type(vardecl_resolved_kind(node)))   // #305
             arr_count_set_last(arr_size)
             emit_a64_add_imm(0, 31, a64_var_base + arr_offset)
             emit_a64_store_x0(ptr_offset)
@@ -6403,6 +6404,11 @@ fn gen_stmt_a64(uint64 node) {
                 gen_expr_a64(wi)
                 emit_a64_store_x0(compound_temp_slot)
                 gen_expr_a64(wrhs)
+                uint64 ia_efk_a = arr_fkind_lookup(ast_data1(node))      // #305
+                if ia_efk_a != 0 && expr_is_float_a64 != 0 {
+                    a64_fcoerce(expr_is_float_a64, ia_efk_a)
+                    emit_a64_float_bits_to_x0(ia_efk_a)
+                }
                 emit_a64_store_x0(ia_val_slot_a)
                 emit_a64_load_x0(compound_temp_slot)
                 emit_a64_store_x0(ia_idx_slot_a)
@@ -6410,6 +6416,11 @@ fn gen_stmt_a64(uint64 node) {
                 gen_expr_a64(wi)
                 emit_a64_store_x0(ia_idx_slot_a)
                 gen_expr_a64(wrhs)
+                uint64 ia_efk_a = arr_fkind_lookup(ast_data1(node))      // #305
+                if ia_efk_a != 0 && expr_is_float_a64 != 0 {
+                    a64_fcoerce(expr_is_float_a64, ia_efk_a)
+                    emit_a64_float_bits_to_x0(ia_efk_a)
+                }
                 emit_a64_store_x0(ia_val_slot_a)
             }
             uint32 arr_tok = ast_data1(node)

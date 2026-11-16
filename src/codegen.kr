@@ -3293,6 +3293,9 @@ fn arr_elem_register(uint64 name_tok, uint64 elem_size) {
     uint64 e4 = entry + 4
     uint32 es = elem_size
     unsafe { *(e4 as uint32) = es }
+    uint64 e12z = entry + 12
+    uint32 zfk = 0
+    unsafe { *(e12z as uint32) = zfk }
     // Default count = 0 means "unknown / unchecked" for bounds.
     uint64 e8 = entry + 8
     uint32 zero32 = 0
@@ -3310,6 +3313,34 @@ fn arr_count_set_last(uint64 count) {
     uint64 e8 = entry + 8
     uint32 c32 = count
     unsafe { *(e8 as uint32) = c32 }
+}
+
+// #305: the float kind (1 = f64, 2 = f32, 0 = not float) of the elements of the
+// array declared last / of `name_tok` (local first, then a static array).
+fn arr_fkind_set_last(uint64 fk) {
+    if arr_elem_count == 0 { return }
+    uint64 entry = arr_elem_table + (arr_elem_count - 1) * 16
+    uint64 e12 = entry + 12
+    uint32 f32v = fk
+    unsafe { *(e12 as uint32) = f32v }
+}
+fn arr_fkind_lookup(uint64 name_tok) -> uint64 {
+    uint64 i = arr_elem_count
+    while i > 0 {
+        i = i - 1
+        uint64 entry = arr_elem_table + i * 16
+        uint32 nt = 0
+        unsafe { *(entry as uint32) -> nt }
+        uint64 wnt = nt
+        if tok_text_eq(wnt, name_tok) != 0 {
+            uint64 e12 = entry + 12
+            uint32 fk = 0
+            unsafe { *(e12 as uint32) -> fk }
+            uint64 wfk = fk
+            return wfk
+        }
+    }
+    return static_fkind_of(name_tok)
 }
 
 // Look up an array's element size. Checks local (per-function) array
@@ -14051,6 +14082,7 @@ fn gen_stmt(uint64 node) {
             // Record per-element size for correct index scaling later
             arr_elem_register(name_tok, elem_size_v)
             arr_count_set_last(arr_size)
+            arr_fkind_set_last(legacy_fkind_of_type(vardecl_resolved_kind(node)))   // #305
             // lea rax, [rsp + arr_offset]
             emit_byte(0x48)
             emit_byte(0x8D)
@@ -15015,6 +15047,12 @@ fn gen_stmt(uint64 node) {
                 gen_expr(wi)
                 emit_store_rax_to_stack(compound_temp_slot)
                 gen_expr(wrhs)
+                uint64 ia_efk = arr_fkind_lookup(ast_data1(node))        // #305: narrow/widen to the element
+                if ia_efk != 0 && expr_is_float != 0 {
+                    legacy_fcoerce(expr_is_float, ia_efk)
+                    emit_float_bits_to_rax(ia_efk)
+                    rax_cache = 0
+                }
                 emit_store_rax_to_stack(ia_val_slot)
                 emit_load_rax_from_stack(compound_temp_slot)
             } else {
@@ -15023,6 +15061,12 @@ fn gen_stmt(uint64 node) {
                 emit_store_rax_to_stack(ia_idx_slot)
                 // Evaluate value → park it
                 gen_expr(wrhs)
+                uint64 ia_efk = arr_fkind_lookup(ast_data1(node))        // #305: narrow/widen to the element
+                if ia_efk != 0 && expr_is_float != 0 {
+                    legacy_fcoerce(expr_is_float, ia_efk)
+                    emit_float_bits_to_rax(ia_efk)
+                    rax_cache = 0
+                }
                 emit_store_rax_to_stack(ia_val_slot)
                 // Reload the index: the bounds check below reads it in rax
                 emit_load_rax_from_stack(ia_idx_slot)

@@ -2383,7 +2383,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11702, mirror of ir_riscv.kr:1794-1845): dest =
+    // Semantics (ir.kr:95/11719, mirror of ir_riscv.kr:1794-1845): dest =
     // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
     // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
     // the one emit site, ir.kr:2148). Assume-equal result preset AFTER the
