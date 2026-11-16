@@ -1,0 +1,43 @@
+struct R4 {
+    uint32 a
+}
+struct D8 {
+    f64 d
+}
+struct T12 {
+    uint32 a
+    uint32 b
+    uint32 c
+}
+fn k_r4(uint64 x) -> R4 { R4 r; r.a = x + 7; return r }
+fn k_d8(uint64 x) -> D8 { D8 r; r.d = int_to_f64(x) + 0.5; return r }
+fn k_t12(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e) -> T12 { T12 r; r.a = a + b; r.b = c + d; r.c = e; return r }
+struct Big {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+fn mkb(uint64 a, uint64 b, uint64 c, uint64 d, uint64 e) -> Big { Big r; r.a = a + e; r.b = b + d; r.c = c; return r }
+struct Pt {
+    uint64 x
+    uint64 y
+}
+fn Pt.sum3(Pt self, uint64 k) -> Big { Big r; r.a = self.x; r.b = self.y; r.c = k; return r }
+fn f(uint64 z) -> uint64 {
+    uint64 bad = 0
+    R4 u = k_r4(5)
+    if u.a != 12 { bad = bad + 1 }
+    D8 v = k_d8(5)
+    if f64_to_int(v.d * 2.0) != 11 { bad = bad + 2 }
+    T12 w = k_t12(1, 2, 3, 4, 5)
+    if w.a != 3 || w.b != 7 || w.c != 5 { bad = bad + 4 }
+    Big g = mkb(1, 2, 3, 4, 5)
+    if g.a != 6 || g.b != 6 || g.c != 3 { bad = bad + 8 }
+    Pt p
+    p.x = 4
+    p.y = 9
+    Big h = p.sum3(2)
+    if h.a != 4 || h.b != 9 || h.c != 2 { bad = bad + 16 }
+    return bad
+}
+fn main() { exit(f(0) + 40) }

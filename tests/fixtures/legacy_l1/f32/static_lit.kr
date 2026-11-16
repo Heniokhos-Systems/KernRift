@@ -1,0 +1,3 @@
+static f32 s = 0.0
+fn f() -> uint64 { s = 3.5; return f32_to_int(s) }
+fn main() { exit(f()) }

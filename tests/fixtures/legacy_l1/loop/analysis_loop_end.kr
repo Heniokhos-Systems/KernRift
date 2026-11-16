@@ -1,0 +1,4 @@
+fn spin() -> uint64 {
+    loop { }
+}
+fn main() { exit(0) }

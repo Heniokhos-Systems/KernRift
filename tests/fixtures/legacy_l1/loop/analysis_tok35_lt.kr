@@ -1,0 +1,10 @@
+const uint64 C1 = 1
+const uint64 C2 = 1
+fn spin() -> uint64 {
+    uint64 p1 = 0
+    uint64 p2 = 0
+    uint64 p3 = 0
+    uint64 p4 = 0
+    while 1 < 1 { }
+}
+fn main() { exit(spin()) }

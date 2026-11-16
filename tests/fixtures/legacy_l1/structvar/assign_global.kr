@@ -1,0 +1,18 @@
+struct N {
+    uint64 v
+    uint64 w
+}
+struct O {
+    uint64 f
+}
+static uint64 g = 0
+fn main() {
+    N n
+    n.v = 30
+    n.w = 4
+    uint64 q = n
+    O o
+    o.f = n
+    g = n
+    exit((o.f - q) + (g - q) + 34)
+}

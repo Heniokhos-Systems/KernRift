@@ -123,3 +123,23 @@ X18_WHY_windows
 
 # A1: the a1_flags target name of the x86_64 Windows PE configuration (rows build-side)
 x86_64_windows
+
+# L1: fixtures (tests/fixtures/obj_rows, tests/fixtures/legacy_l1/refuse), a
+# helper and l1_abi's row-name suffix
+c_win
+c_win_cmod
+c_win_fd
+c_win_g
+c_win_ret
+direct_win_arm64_overflow
+guard_win64_ret_
+l1_win_tools
+refuse_win_arm64_overflow
+windows_x86_64_wine
+abi_main_win
+# $-template suffixes of L1's row names (l1_trio, l1_abi's sfx, the
+# refusal loops): their rows are listed in native_corpus.lst
+_windows
+_windows_x86_64_wine
+_windows_arm64_overflow_refused
+_wine

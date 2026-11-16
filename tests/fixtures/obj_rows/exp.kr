@@ -1,0 +1,5 @@
+fn loc(uint64 a) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } return a + 1 }
+@export
+fn f(uint64 a) -> uint64 {
+    return loc(a) - 5
+}

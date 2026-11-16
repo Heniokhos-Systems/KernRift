@@ -1,0 +1,13 @@
+struct N {
+    uint64 v
+    uint64 w
+}
+fn main() {
+    N n
+    n.v = 30
+    n.w = 4
+    uint64 p = 0
+    p = n
+    uint64 q = n
+    exit(load64(p) + load64(q + 8) + (p - q))
+}

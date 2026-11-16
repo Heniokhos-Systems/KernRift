@@ -1,0 +1,40 @@
+struct U3 {
+    uint8 a
+    uint8 b
+    uint8 c
+}
+extern fn c_arg(U3 q) -> uint64
+extern fn c_ret(uint64 x) -> U3
+@export
+fn k_arg(U3 q) -> uint64 {
+    uint64 s = q.a * 100 + q.b * 10 + q.c * 1
+    q.a = 9
+    return s
+}
+@export
+fn k_ret(uint64 x) -> U3 {
+    U3 r
+    r.a = x + 0
+    r.b = x + 1
+    r.c = x + 2
+    return r
+}
+@export
+fn f(uint64 z) -> uint64 {
+    U3 t
+    t.a = 1
+    t.b = 2
+    t.c = 3
+    uint64 bad = 0
+    if z == 1 {
+        uint64 v1 = c_arg(t)
+        if v1 != 123 { bad = bad + 1 }
+        if t.a != 1 { bad = bad + 2 }
+    }
+    if z == 4 {
+        U3 u = c_ret(5)
+        uint64 v2 = u.a * 100 + u.b * 10 + u.c * 1
+        if v2 != 567 { bad = bad + 4 }
+    }
+    return bad
+}

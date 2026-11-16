@@ -1,0 +1,13 @@
+static uint64 s = 5
+static uint64 ro = 40
+static uint8[100] buf
+static uint64[4] arr
+static uint32 w = 0
+@export
+fn f(uint64 a) -> uint64 {
+    s = s + a
+    buf[3] = 7
+    arr[2] = 9
+    w = w + 1
+    return s + ro + buf[3] + arr[2] + w - 62
+}

@@ -1,0 +1,12 @@
+struct Q {
+    uint64 a
+    uint64 b
+}
+fn g(uint64 a1, uint64 a2, uint64 a3, uint64 a4, uint64 a5, uint64 a6, uint64 a7, Q q) -> uint64 { return a1 + q.a }
+fn main() {
+    Q q
+    q.a = 1
+    q.b = 2
+    uint64 fp = fn_addr("g")
+    exit(call_ptr(fp, 1, 2, 3, 4, 5, 6, 7, q))
+}

@@ -1,0 +1,19 @@
+struct P {
+    uint64 a
+    uint64 b
+}
+struct Q {
+    uint64 x
+}
+struct R {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+struct F {
+    f64 u
+    f64 v
+}
+fn g(P a, P b, P c, P d) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } return a.a + b.b + c.a + d.a * 10 + d.b * 100 }
+fn f() -> uint64 { P p; p.a = 1; p.b = 2; uint64 v = g(p, p, p, p); return v }
+fn main() { exit(f() - 100) }

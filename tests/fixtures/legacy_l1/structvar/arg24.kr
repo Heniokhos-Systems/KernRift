@@ -1,0 +1,14 @@
+struct S {
+    u64 f0
+    u64 f1
+    u64 f2
+}
+fn first(u64 p) -> u64 { return load64(p) }
+fn second(u64 z, u64 p) -> u64 { return load64(p) + z }
+fn main() {
+    S s = alloc(24)
+    s.f0 = 3
+    s.f1 = 4
+    s.f2 = 5
+    exit(first(s) * 10 + second(1, s))
+}

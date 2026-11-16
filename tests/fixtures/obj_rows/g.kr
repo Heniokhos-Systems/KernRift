@@ -1,0 +1,10 @@
+struct R {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+@export
+fn g(R q) -> uint64 {
+    q.a = 9
+    return q.a + q.b + q.c
+}

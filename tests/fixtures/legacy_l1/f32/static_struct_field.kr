@@ -1,0 +1,11 @@
+struct I {
+    f32 x
+    uint64 y
+}
+struct O {
+    uint64 k
+    I inn
+}
+static I gi
+fn f() -> uint64 { gi.x = 2.5; return f32_to_int(gi.x) }
+fn main() { exit(f()) }

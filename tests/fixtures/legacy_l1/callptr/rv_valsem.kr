@@ -1,0 +1,29 @@
+struct P {
+    uint32 a
+    uint32 b
+}
+struct Q {
+    uint32 x
+}
+struct R {
+    uint32 a
+    uint32 b
+    uint32 c
+}
+struct H {
+    uint32 a
+    uint32 b
+}
+fn g1(P q) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return q.a * 10 + q.b }
+fn gs(uint32 z, P q) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return z * 100 + q.a * 10 + q.b }
+fn sg(P q, uint32 z) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return z * 100 + q.a * 10 + q.b }
+fn g2(P q, P w) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return q.a * 64 + q.b * 16 + w.a * 4 + w.b }
+fn gq(Q q) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return q.x + 40 }
+fn gh(H q) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return q.a * 10 + q.b }
+fn gr(R q) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return q.a * 100 + q.b * 10 + q.c }
+fn g7(uint32 a1, uint32 a2, uint32 a3, uint32 a4, uint32 a5, uint32 a6, P q) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return a1 + a6 + q.a * 10 + q.b }
+fn gm(P q) -> uint32 { q.a = 99; return q.b }
+fn mk() -> P { P r; r.a = 7; r.b = 8; return r }
+fn mkr() -> R { R r; r.a = 1; r.b = 2; r.c = 3; return r }
+fn f() -> uint32 { P p; p.a = 1; p.b = 2; P o; o.a = 3; o.b = 1; uint32 fp = fn_addr("gm"); uint32 v = call_ptr(fp, p); return p.a * 10 + v }
+fn main() { exit(f()) }

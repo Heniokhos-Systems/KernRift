@@ -460,6 +460,31 @@ if n==3 { return 5 } else { return 9 } }' 5
 # fall-through zero because it never returns to the epilogue.
 value_case "main_void_explicit_exit"  'fn main() { write(1, "ok\n", 3) exit(4) }' 4
 
+# L1 (#247): a `loop` whose file has `!=` as its 36th token (the fourth `!=`
+# of h). The desugared condition read that token as its operator, so the body
+# never ran (0) -- on every backend; under --legacy for almost any token.
+value_case "loop_tok35_ne" 'const uint64 C1 = 1
+fn h(uint64 a) -> uint64 { return (a != 0) + (a != 0) + (a != 0) + (a != 0) }
+fn f(uint64 a) -> uint64 {
+    uint64 n = a - 5
+    loop {
+        n = n + 1
+        if n == 7 { break }
+    }
+    return n
+}
+fn main() { exit(f(5)) }' 7
+# L1 (#248): `return p.go()` on a struct p returning uint64: --legacy took the
+# call for a struct value (the stale flag of its struct argument) and read
+# memory at the result (139).
+value_case "legacy_ret_method_call" 'struct P {
+    uint64 a
+    uint64 b
+}
+fn P.go(P self) -> uint64 { return self.a + 2 }
+fn f() -> uint64 { P p; p.a = 1; p.b = 2; return p.go() }
+fn main() { exit(f()) }' 3
+
 echo "----"
 echo "Differential: $((TOTAL-DIV-KNOWN))/$TOTAL agree across backends, $KNOWN known-divergent (pinned), $DIV diverged."
 if [ "$DIV" = "0" ]; then echo "PARITY OK"; else echo "PARITY GAPS FOUND"; exit 1; fi

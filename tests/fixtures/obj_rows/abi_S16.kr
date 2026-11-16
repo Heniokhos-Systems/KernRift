@@ -1,0 +1,37 @@
+struct S16 {
+    uint64 a
+    uint64 b
+}
+extern fn c_arg(S16 q) -> uint64
+extern fn c_ret(uint64 x) -> S16
+@export
+fn k_arg(S16 q) -> uint64 {
+    uint64 s = q.a * 100 + q.b * 10
+    q.a = 9
+    return s
+}
+@export
+fn k_ret(uint64 x) -> S16 {
+    S16 r
+    r.a = x + 0
+    r.b = x + 1
+    return r
+}
+@export
+fn f(uint64 z) -> uint64 {
+    S16 t
+    t.a = 1
+    t.b = 2
+    uint64 bad = 0
+    if z == 1 {
+        uint64 v1 = c_arg(t)
+        if v1 != 120 { bad = bad + 1 }
+        if t.a != 1 { bad = bad + 2 }
+    }
+    if z == 4 {
+        S16 u = c_ret(5)
+        uint64 v2 = u.a * 100 + u.b * 10
+        if v2 != 560 { bad = bad + 4 }
+    }
+    return bad
+}

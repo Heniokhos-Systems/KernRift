@@ -1,0 +1,6 @@
+struct S {
+    uint32 a
+}
+fn loc(S s) -> uint32 { return s.a }
+@export
+fn pub(uint32 x) -> uint32 { S s; s.a = x; return loc(s) }
