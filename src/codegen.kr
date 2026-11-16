@@ -11629,7 +11629,6 @@ fn gen_expr_node(uint64 node) {
                     uint64 wsaf3 = 0
                     unsafe { *(arg_struct_flags + 3 * 8 as uint64) -> wsaf3 }
                     if wsaf3 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws3 = struct_total_size(wsaf3)
                         if cg_win_struct_by_val(wsaf3) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
@@ -11653,7 +11652,6 @@ fn gen_expr_node(uint64 node) {
                     uint64 wsaf2 = 0
                     unsafe { *(arg_struct_flags + 2 * 8 as uint64) -> wsaf2 }
                     if wsaf2 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws2 = struct_total_size(wsaf2)
                         if cg_win_struct_by_val(wsaf2) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
@@ -11676,7 +11674,6 @@ fn gen_expr_node(uint64 node) {
                     uint64 wsaf1 = 0
                     unsafe { *(arg_struct_flags + 1 * 8 as uint64) -> wsaf1 }
                     if wsaf1 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws1 = struct_total_size(wsaf1)
                         if cg_win_struct_by_val(wsaf1) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
@@ -11699,7 +11696,6 @@ fn gen_expr_node(uint64 node) {
                     uint64 wsaf0 = 0
                     unsafe { *(arg_struct_flags as uint64) -> wsaf0 }
                     if wsaf0 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws0 = struct_total_size(wsaf0)
                         if cg_win_struct_by_val(wsaf0) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
