@@ -7030,9 +7030,10 @@ fn gen_expr_node(uint64 node) {
                     emit_static_lea(soff)
                 } else {
                     emit_static_load(soff)
-                    // #302: a float static's value is a float (in xmm0)
+                    // #302: an f32/f64 static's value is a float (in xmm0); an
+                    // f16 static stays a u64 bit pattern, like every f16 value
                     uint64 sfk_l = static_fkind_of(wident_tok)
-                    if sfk_l != 0 {
+                    if sfk_l == 1 || sfk_l == 2 {
                         emit_rax_bits_to_xmm0(sfk_l)
                         expr_is_float = sfk_l
                     }
@@ -15403,6 +15404,16 @@ fn gen_stmt(uint64 node) {
             if soff != 0xFFFFFFFF {
                 // A static: refused if it is a const or a whole array/struct (#206/#207).
                 static_write_check(dest_tok)
+                // #302: an f64 load into an f32 static is narrowed (and an f32
+                // load into an f64 static widened), as `s = <value>` is. The
+                // static is read back as a float now, so its bits must be its
+                // own kind's. A raw integer load keeps its bits.
+                uint64 sfk_pl = static_fkind_of(dest_tok)
+                if (sfk_pl == 1 || sfk_pl == 2) && (wpl_fk == 1 || wpl_fk == 2) && sfk_pl != wpl_fk {
+                    emit_rax_bits_to_xmm0(wpl_fk)
+                    legacy_fcoerce(wpl_fk, sfk_pl)
+                    emit_float_bits_to_rax(sfk_pl)
+                }
                 emit_static_store(soff)
                 return
             }
