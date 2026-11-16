@@ -84,13 +84,25 @@ jobs:
       # still passes -- it just SKIPS the riscv32 and xtensa rows and then says
       # so ("ran 1508, README says 1618"). That message was being read as noise;
       # it is the suite reporting that ~86 rows on x86_64 and ~110 on arm64 were
-      # never graded. These four packages are what a full local run has.
+      # never graded. These packages are what a full local run has.
       #
       # EACH PACKAGE INSTALLS ON ITS OWN, AND A MISSING ONE IS NOT FATAL.
-      # Package names differ across releases -- on Ubuntu 26.04 arm64
-      # qemu-user-static has no candidate and the package is qemu-user
-      # (measured) -- and the runners move to 26 in October 2026. A job must not
-      # go red because a name changed; the rows skip themselves and say why.
+      # Package names differ across releases: Ubuntu 26.04 has no
+      # qemu-user-static (its qemu-user ships plain-named static binaries) and
+      # split qemu-system-riscv out of qemu-system-misc (#323: the x86_64 job
+      # skipped the 11 riscv32 system rows until qemu-system-riscv was listed;
+      # on 24.04 it is "unavailable" and qemu-system-misc has riscv32). A job
+      # must not go red because a name changed; the rows skip themselves and
+      # say why. The test scripts find qemu-user through ONE resolver,
+      # tests/helpers/qemu_bin.sh (the -static name if present, else the plain
+      # one), so no name needs bridging here (#260).
+      #
+      # --no-install-recommends, AND NO qemu-user-static (#272): qemu-user
+      # recommends qemu-user-binfmt, and 24.04's qemu-user-static ships
+      # binfmt.d files itself; either registers a binfmt_misc handler for every
+      # foreign arch, and then a row meant to run a foreign binary only through
+      # qemu_bin, or to skip because the host cannot run it, execs it directly.
+      # The next step fails the job on such a handler.
       - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
         timeout-minutes: 15
         run: |
@@ -99,38 +111,28 @@ jobs:
           # the #143 unwind checker (tests/helpers/pe_unwind_check.py) needs
           # llvm-readobj for C1 and llvm-objdump for C2-C6; without them its
           # rows skip (CI run 42504860688 had neither).
-          for p in qemu-system-misc binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
-                   qemu-user-static qemu-user llvm lld; do
-              if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq "$p" >/dev/null 2>&1; then
+          for p in qemu-system-misc qemu-system-riscv binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
+                   qemu-user llvm lld; do
+              if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends "$p" >/dev/null 2>&1; then
                   echo "  installed: $p"
               else
                   echo "  unavailable (rows will SKIP): $p"
               fi
           done
-          # BRIDGE THE NAME. THE BINARIES ARE THE SAME ONES. The suite asks for
-          # qemu-<arch>-static in 65 places. On Ubuntu 26.04 the qemu-user
-          # package ABSORBED qemu-user-static -- it declares
-          # `Replaces: qemu-user-static`, its description is literally "QEMU
-          # user mode emulation (static binaries)", and unpacking the .deb on a
-          # native arm64 machine shows /usr/bin/qemu-aarch64, qemu-riscv32 and
-          # qemu-x86_64 with no suffix at all. So these ARE the static
-          # emulators; Ubuntu dropped the suffix in the rename. Linking the
-          # name is therefore exact, not an approximation, and it beats
-          # rewriting 65 call sites. A no-op on 24.04, where qemu-user-static
-          # still installs under its own name.
-          for a in aarch64 riscv32 x86_64; do
-              if ! command -v "qemu-$a-static" >/dev/null 2>&1 \
-                 && command -v "qemu-$a" >/dev/null 2>&1; then
-                  sudo ln -sf "$(command -v "qemu-$a")" "/usr/local/bin/qemu-$a-static"
-                  echo "  linked qemu-$a-static -> qemu-$a"
-              fi
-          done
           echo "--- what the suite can now reach ---"
-          for t in qemu-system-xtensa qemu-system-riscv32 qemu-riscv32-static \
-                   qemu-x86_64-static riscv64-linux-gnu-objdump riscv64-linux-gnu-ld \
+          for t in qemu-system-xtensa qemu-system-riscv32 riscv64-linux-gnu-objdump riscv64-linux-gnu-ld \
                    xtensa-lx106-elf-objdump; do
               printf '  %-30s %s\n' "$t" "$(command -v $t >/dev/null 2>&1 && echo yes || echo NO)"
           done
+          for a in aarch64 riscv32 x86_64; do
+              printf '  %-30s %s\n' "qemu_bin $a" "$(. tests/helpers/qemu_bin.sh; qemu_bin $a || echo NO)"
+          done
+          # the xtensa boot rows go through tests/helpers/xtensa_boot.sh, which
+          # works around QEMU 10.2's -kernel regression (#228); record the version
+          qemu-system-xtensa --version 2>/dev/null | head -1 || true
+
+      - name: No foreign-arch qemu binfmt handler (#272)
+        run: bash tests/helpers/ci_binfmt_check.sh
 
       - name: Test suite
         run: |
@@ -156,8 +158,11 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq qemu-user-static
-          KRC=./build/krc2 KRC_FLAGS="--arch=arm64" SMOKE_RUNNER=qemu-aarch64-static bash tests/smoke/run.sh
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends qemu-user
+          bash tests/helpers/ci_binfmt_check.sh
+          QA64=$(. tests/helpers/qemu_bin.sh; qemu_bin aarch64) || { echo "FAIL: no qemu-aarch64 after installing qemu-user"; exit 1; }
+          [ -n "$QA64" ] || { echo "FAIL: no qemu-aarch64 after installing qemu-user"; exit 1; }
+          KRC=./build/krc2 KRC_FLAGS="--arch=arm64" SMOKE_RUNNER="$QA64" bash tests/smoke/run.sh
 
       - name: Differential harness (legacy vs IR, Linux x86_64)
         run: KRC=./build/krc2 bash tests/diff/run.sh
@@ -339,7 +344,14 @@ jobs:
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update -qq >/dev/null 2>&1
-          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y qemu-user-static gcc-aarch64-linux-gnu >/dev/null 2>&1
+          # qemu-user without its recommends (no binfmt handlers, #272); the
+          # cross gcc WITH them: its recommended libc6-dev-arm64-cross brings
+          # the ld-linux-aarch64.so.1 linked as linker64 below
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends qemu-user >/dev/null 2>&1
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y gcc-aarch64-linux-gnu >/dev/null 2>&1
+          bash tests/helpers/ci_binfmt_check.sh
+          QA64=$(. tests/helpers/qemu_bin.sh; qemu_bin aarch64) || { echo "FAIL: no qemu-aarch64 after installing qemu-user"; exit 1; }
+          [ -n "$QA64" ] || { echo "FAIL: no qemu-aarch64 after installing qemu-user"; exit 1; }
           # Symlink the Linux ARM64 linker as Android's linker64
           sudo mkdir -p /system/bin
           sudo ln -sf /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 /system/bin/linker64
@@ -348,7 +360,7 @@ jobs:
           echo 'fn main() { exit(42) }' > /tmp/android.kr
           ./build/krc2 --emit=android /tmp/android.kr -o /tmp/android-exit42
           chmod +x /tmp/android-exit42
-          set +e; qemu-aarch64-static /tmp/android-exit42; CODE=$?; set -e
+          set +e; "$QA64" /tmp/android-exit42; CODE=$?; set -e
           [ "$CODE" -eq 42 ] && echo "PASS: Android exit(42)" || { echo "FAIL: expected 42, got $CODE"; exit 1; }
 
           # Test 2: println + statics
@@ -357,17 +369,17 @@ jobs:
           fn main() { println("Android QEMU!"); inc(); inc(); inc(); exit(c) }' > /tmp/android.kr
           ./build/krc2 --emit=android /tmp/android.kr -o /tmp/android-static
           chmod +x /tmp/android-static
-          set +e; qemu-aarch64-static /tmp/android-static; CODE=$?; set -e
+          set +e; "$QA64" /tmp/android-static; CODE=$?; set -e
           [ "$CODE" -eq 3 ] && echo "PASS: Android statics (exit=3)" || { echo "FAIL: expected 3, got $CODE"; exit 1; }
 
           # Test 3: self-compile on QEMU
           ./build/krc2 --emit=android build/krc.kr -o /tmp/krc-android
           chmod +x /tmp/krc-android
           echo 'fn main() { exit(99) }' > /tmp/android-selftest.kr
-          set +e; qemu-aarch64-static /tmp/krc-android --emit=android /tmp/android-selftest.kr -o /tmp/android-selfout; COMP=$?; set -e
+          set +e; "$QA64" /tmp/krc-android --emit=android /tmp/android-selftest.kr -o /tmp/android-selfout; COMP=$?; set -e
           [ "$COMP" -eq 0 ] && echo "PASS: Android self-compile" || { echo "FAIL: compile exit=$COMP"; exit 1; }
           chmod +x /tmp/android-selfout
-          set +e; qemu-aarch64-static /tmp/android-selfout; CODE=$?; set -e
+          set +e; "$QA64" /tmp/android-selfout; CODE=$?; set -e
           [ "$CODE" -eq 99 ] && echo "PASS: Android self-compiled binary runs (exit=99)" || { echo "FAIL: expected 99, got $CODE"; exit 1; }
 
           # Test 4: Android ARM64 bootstrap fixed point under qemu. Have
@@ -377,7 +389,7 @@ jobs:
           # (~25s on qemu emulation) but covers the scenario the Redmi
           # Note 8 Pro phone runs in production.
           set +e
-          qemu-aarch64-static /tmp/krc-android --emit=android build/krc.kr -o /tmp/krc-android-2
+          "$QA64" /tmp/krc-android --emit=android build/krc.kr -o /tmp/krc-android-2
           COMP=$?
           set -e
           [ "$COMP" -eq 0 ] && echo "PASS: Android full self-compile" || { echo "FAIL: Android self-compile (exit=$COMP)"; exit 1; }
@@ -547,13 +559,25 @@ jobs:
       # still passes -- it just SKIPS the riscv32 and xtensa rows and then says
       # so ("ran 1508, README says 1618"). That message was being read as noise;
       # it is the suite reporting that ~86 rows on x86_64 and ~110 on arm64 were
-      # never graded. These four packages are what a full local run has.
+      # never graded. These packages are what a full local run has.
       #
       # EACH PACKAGE INSTALLS ON ITS OWN, AND A MISSING ONE IS NOT FATAL.
-      # Package names differ across releases -- on Ubuntu 26.04 arm64
-      # qemu-user-static has no candidate and the package is qemu-user
-      # (measured) -- and the runners move to 26 in October 2026. A job must not
-      # go red because a name changed; the rows skip themselves and say why.
+      # Package names differ across releases: Ubuntu 26.04 has no
+      # qemu-user-static (its qemu-user ships plain-named static binaries) and
+      # split qemu-system-riscv out of qemu-system-misc (#323: the x86_64 job
+      # skipped the 11 riscv32 system rows until qemu-system-riscv was listed;
+      # on 24.04 it is "unavailable" and qemu-system-misc has riscv32). A job
+      # must not go red because a name changed; the rows skip themselves and
+      # say why. The test scripts find qemu-user through ONE resolver,
+      # tests/helpers/qemu_bin.sh (the -static name if present, else the plain
+      # one), so no name needs bridging here (#260).
+      #
+      # --no-install-recommends, AND NO qemu-user-static (#272): qemu-user
+      # recommends qemu-user-binfmt, and 24.04's qemu-user-static ships
+      # binfmt.d files itself; either registers a binfmt_misc handler for every
+      # foreign arch, and then a row meant to run a foreign binary only through
+      # qemu_bin, or to skip because the host cannot run it, execs it directly.
+      # The next step fails the job on such a handler.
       - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
         timeout-minutes: 15
         run: |
@@ -562,38 +586,28 @@ jobs:
           # the #143 unwind checker (tests/helpers/pe_unwind_check.py) needs
           # llvm-readobj for C1 and llvm-objdump for C2-C6; without them its
           # rows skip (CI run 42504860688 had neither).
-          for p in qemu-system-misc binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
-                   qemu-user-static qemu-user llvm lld; do
-              if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq "$p" >/dev/null 2>&1; then
+          for p in qemu-system-misc qemu-system-riscv binutils-riscv64-linux-gnu binutils-xtensa-lx106 \
+                   qemu-user llvm lld; do
+              if sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y -qq --no-install-recommends "$p" >/dev/null 2>&1; then
                   echo "  installed: $p"
               else
                   echo "  unavailable (rows will SKIP): $p"
               fi
           done
-          # BRIDGE THE NAME. THE BINARIES ARE THE SAME ONES. The suite asks for
-          # qemu-<arch>-static in 65 places. On Ubuntu 26.04 the qemu-user
-          # package ABSORBED qemu-user-static -- it declares
-          # `Replaces: qemu-user-static`, its description is literally "QEMU
-          # user mode emulation (static binaries)", and unpacking the .deb on a
-          # native arm64 machine shows /usr/bin/qemu-aarch64, qemu-riscv32 and
-          # qemu-x86_64 with no suffix at all. So these ARE the static
-          # emulators; Ubuntu dropped the suffix in the rename. Linking the
-          # name is therefore exact, not an approximation, and it beats
-          # rewriting 65 call sites. A no-op on 24.04, where qemu-user-static
-          # still installs under its own name.
-          for a in aarch64 riscv32 x86_64; do
-              if ! command -v "qemu-$a-static" >/dev/null 2>&1 \
-                 && command -v "qemu-$a" >/dev/null 2>&1; then
-                  sudo ln -sf "$(command -v "qemu-$a")" "/usr/local/bin/qemu-$a-static"
-                  echo "  linked qemu-$a-static -> qemu-$a"
-              fi
-          done
           echo "--- what the suite can now reach ---"
-          for t in qemu-system-xtensa qemu-system-riscv32 qemu-riscv32-static \
-                   qemu-x86_64-static riscv64-linux-gnu-objdump riscv64-linux-gnu-ld \
+          for t in qemu-system-xtensa qemu-system-riscv32 riscv64-linux-gnu-objdump riscv64-linux-gnu-ld \
                    xtensa-lx106-elf-objdump; do
               printf '  %-30s %s\n' "$t" "$(command -v $t >/dev/null 2>&1 && echo yes || echo NO)"
           done
+          for a in aarch64 riscv32 x86_64; do
+              printf '  %-30s %s\n' "qemu_bin $a" "$(. tests/helpers/qemu_bin.sh; qemu_bin $a || echo NO)"
+          done
+          # the xtensa boot rows go through tests/helpers/xtensa_boot.sh, which
+          # works around QEMU 10.2's -kernel regression (#228); record the version
+          qemu-system-xtensa --version 2>/dev/null | head -1 || true
+
+      - name: No foreign-arch qemu binfmt handler (#272)
+        run: bash tests/helpers/ci_binfmt_check.sh
 
       - name: Self-compile + tests (everything to debug-kit)
         continue-on-error: true
