@@ -10834,13 +10834,13 @@ fi
 # default backend passed the caller's own struct instead of a copy. The want
 # value of each row is the direct call's (fixtures in legacy_l1/callptr).
 L1_CP="$L1_FX/callptr"
-for L1_S in one:cp_one:12 scal_struct:cp_scal_struct:112 struct_scal:cp_struct_scal:112 two:cp_two:109 8b:cp_8b:42 u32pair:cp_h32:12 sse:cp_sse:12; do
+for L1_S in one:cp_one:12 scal_struct:cp_scal_struct:112 struct_scal:cp_struct_scal:112 two:cp_two:109 8b:cp_8b:42 u32pair:cp_h32:57 sse:cp_sse:12; do
     L1_F=${L1_S#*:}; L1_W=${L1_F#*:}; L1_F=${L1_F%%:*}
     l1_row callptr_struct_${L1_S%%:*}_x86_64 $L1_W $L1_CP/$L1_F.kr x:IR x:--O0 x:--legacy
     l1_row callptr_struct_${L1_S%%:*}_arm64 $L1_W $L1_CP/$L1_F.kr a:IR a:--O0 a:--legacy
 done
 # Windows x64: 8 B, {u32,u32} and 16 B (the 16-byte one goes by reference).
-l1_row callptr_struct_windows_x86_64_wine 0 "$L1_CP/cp_8b.kr@42 $L1_CP/cp_h32.kr@12 $L1_CP/cp_one.kr@12" w:IR w:--legacy
+l1_row callptr_struct_windows_x86_64_wine 0 "$L1_CP/cp_8b.kr@42 $L1_CP/cp_h32.kr@57 $L1_CP/cp_one.kr@12" w:IR w:--legacy
 l1_row callptr_struct_7th_arm64 15 $L1_CP/cp_7.kr a:IR a:--O0 a:--legacy
 # arm64 --legacy call_ptr with an f64 argument: d0, not x0. Red: 130.
 l1_row callptr_f64_arm64_legacy 12 $L1_CP/cp_f64.kr a:IR a:--O0 a:--legacy

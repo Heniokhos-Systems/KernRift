@@ -30,5 +30,5 @@ fn g7(uint64 a1, uint64 a2, uint64 a3, uint64 a4, uint64 a5, uint64 a6, P q) -> 
 fn gm(P q) -> uint64 { q.a = 99; return q.b }
 fn mk() -> P { P r; r.a = 7; r.b = 8; return r }
 fn mkr() -> R { R r; r.a = 1; r.b = 2; r.c = 3; return r }
-fn f() -> uint64 { H q; q.a = 1; q.b = 2; uint64 fp = fn_addr("gh"); uint64 v = call_ptr(fp, q); return v }
+fn f() -> uint64 { H q; q.a = 5; q.b = 7; uint64 fp = fn_addr("gh"); uint64 v = call_ptr(fp, q); return v }
 fn main() { exit(f()) }
