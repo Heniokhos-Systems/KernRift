@@ -37729,7 +37729,8 @@ x18_flags() {
 }
 # x18_one WANT FILE FLAGS...: build $X18_D/FILE; a mismatch is appended to
 # X18_BAD. WANT: "ok" (builds; no #143/#242/#246/#249 diagnostic), "asm" (the
-# inline assembler's own error, no register refusal), "warn:LINE" (builds,
+# inline assembler's own error -- since A1 also its located "is not supported
+# by the inline assembler" -- and no register refusal), "warn:LINE" (builds,
 # stderr has the line LINE), or the exact error line (exit 1, no output).
 x18_one() {
     local want=$1 f=$2 rc; shift 2
@@ -37741,7 +37742,7 @@ x18_one() {
                 X18_BAD="$X18_BAD $f[$*]: want a build, got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
             fi ;;
         asm)
-            if [ $rc != 1 ] || ! grep -qE 'unrecognized asm instruction|bad operands' $X18_D/o.se || grep -qE '#143|#242|#246|#249' $X18_D/o.se; then
+            if [ $rc != 1 ] || ! grep -qE 'unrecognized asm instruction|bad operands|is not supported by the inline assembler' $X18_D/o.se || grep -qE '#143|#242|#246|#249' $X18_D/o.se; then
                 X18_BAD="$X18_BAD $f[$*]: want the assembler's error, got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
             fi ;;
         warn:*)
@@ -37945,15 +37946,16 @@ for X18_R in x18 x29 fp; do
 done
 # asm_ldop_first_read_not_refused_windows_arm64 (#252): ldadd's first
 # register is its source; #143 refused it as a write. Now it reaches the
-# assembler (which does not accept ldadd yet).
+# assembler, which refuses it as not supported (A1, #245).
 x18_src 'ldadd x18, x0, [x9]' > $X18_D/f.kr
 for X18_M in ir legacy; do x18_flags windows $X18_M; x18_one asm f.kr $X18_F; done
 x18_row asm_ldop_first_read_not_refused_windows_arm64 "ldadd x18, x0, [x9] on Windows IR/legacy: not refused as a write"
 # asm_x18_case_read_not_refused_arm64 (control): STR X18, [X9] reads x18 --
-# the classification is case-blind (an earlier prototype refused it).
+# the classification is case-blind (an earlier prototype refused it). Since
+# A1 (#245) the assembler's error is its lower-case rule.
 x18_src 'STR X18, [X9]' > $X18_D/f.kr
-x18_flags macos ir; x18_one asm f.kr $X18_F
-x18_row asm_x18_case_read_not_refused_arm64 "STR X18, [X9] on macOS: the assembler's error, not a write refusal"
+x18_flags macos ir; x18_one "f.kr:3:11: error: arm64 inline asm is written in lower case -- mnemonics, registers and system registers; this one has 'S' (#245)" f.kr $X18_F
+x18_row asm_x18_case_read_not_refused_arm64 "STR X18, [X9] on macOS: the assembler's lower-case error, not a write refusal"
 # asm_x18_case_write_refused_arm64: BIC X18, X9, X10 writes x18. Red: the
 # assembler's error.
 x18_src 'BIC X18, X9, X10' > $X18_D/f.kr
@@ -38001,7 +38003,8 @@ fi
 # asm_readonly_unaccepted_reaches_assembler_<fam>_arm64: read-only forms the
 # assembler does not accept yet (store atomics, unprivileged/release stores,
 # pointer-auth branches, setf) are classified as writing nothing, so they get
-# the assembler's error, not a false write refusal (macOS and Windows PE).
+# the assembler's error (since A1 its located "is not supported"), not a false
+# write refusal (macOS and Windows PE).
 for X18_P in "stop|stadd x18, [x9]|staddlh w18, [x9]" "sttr|sttr x18, [x9]|sttrb w18, [x9]" "stlur|stlur x18, [x9]" \
              "stllr|stllrb w18, [x9]" "pac|braa x18, x9|blraaz x18" "setf|setf8 w18"; do
     X18_N=${X18_P%%|*}; X18_R=${X18_P#*|}
@@ -38042,17 +38045,18 @@ for X18_OS in macos windows; do
     x18_flags $X18_OS ir; x18_one "$X18_WB$X18_Y" f.kr $X18_F
     x18_row asm_x18_text_tab_refused_${X18_OS}_arm64 "ldr x0, [<tab>x18], #8 on ${X18_OS}: the writeback error"
 done
-# asm_x18_newline_tab_linux_accepted_arm64 (control): on Linux the same
-# strings behave as before (the assembler drops what follows a separator,
-# #245; the tab form is its own error).
-for X18_T in 'mov x1, x9\nmov x18, x9' 'mov x1, x9\rmov x18, x9' 'mov x1, x9
-mov x18, x9'; do
-    x18_src "$X18_T" > $X18_D/f.kr
-    x18_flags linux ir; x18_one ok f.kr $X18_F
-done
+# asm_x18_newline_tab_linux_refused_arm64: on Linux (no x18/x29 check) the
+# same strings reach the assembler, which since A1 (#245) refuses a second
+# instruction and an inner tab at the string (it used to drop what followed
+# a separator; the row was _accepted_ then).
+A1SEP="f.kr:3:11: error: an asm string holds exactly one instruction; this one goes on after"
+x18_src 'mov x1, x9\nmov x18, x9' > $X18_D/f.kr; x18_flags linux ir; x18_one "$A1SEP '\\n' (asm text is not escape-processed) (#245)" f.kr $X18_F
+x18_src 'mov x1, x9\rmov x18, x9' > $X18_D/f.kr; x18_flags linux ir; x18_one "$A1SEP '\\r' (asm text is not escape-processed) (#245)" f.kr $X18_F
+x18_src 'mov x1, x9
+mov x18, x9' > $X18_D/f.kr; x18_flags linux ir; x18_one "$A1SEP a newline (#245)" f.kr $X18_F
 x18_src "ldr x0, [$(printf '\t')x18], #8" > $X18_D/f.kr
-x18_flags linux ir; x18_one asm f.kr $X18_F
-x18_row asm_x18_newline_tab_linux_accepted_arm64 "on Linux: newline-separated strings build, the tab form is the assembler's error"
+x18_flags linux ir; x18_one "f.kr:3:11: error: arm64 inline asm separates operands with spaces; this instruction has a tab (#245)" f.kr $X18_F
+x18_row asm_x18_newline_tab_linux_refused_arm64 "on Linux: the newline-separated strings and the tab form get the assembler's one-instruction / tab errors"
 # asm_x18_fat_targets_refused_arm64: a fat build of a block naming x18 for
 # mac-arm64 + android-arm64 stops at the register, and the note names the
 # slice. asm_x18_fat_targets_linux_ok_arm64 (control): linux-arm64 builds.
