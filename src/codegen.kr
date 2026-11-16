@@ -20934,7 +20934,7 @@ static uint64 import_failed = 0
 // created yet therefore got a green build and no artifact.
 //
 // Checked HERE, not in codegen_write_output: main.kr:1967 (asm listing) and
-// main.kr:5671 (esp32 image) call this directly and bypass
+// main.kr:5697 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {

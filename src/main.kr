@@ -2062,18 +2062,18 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 else if wi == 0xD5033FBF { write(fd, "dmb sy", 6) }
                 else if (wi & 0xFFFFFFE0) == 0xD50B7E20 {
                     write(fd, "dc civac, ", 10)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                 }
                 else if (wi & 0xFFFFFFE0) == 0xD50B7520 {
                     write(fd, "ic ivau, ", 9)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                 }
                 else if wi == 0xD69F03E0 { write(fd, "eret", 4) }
                 else if wi == 0xD4000001 { write(fd, "svc #0", 6) }
                 // MOVZ 64-bit
                 else if (wi & 0xFF800000) == 0xD2800000 {
                     write(fd, "movz ", 5)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                     write(fd, ", #", 3)
                     uint64 imm16 = (wi >> 5) & 0xFFFF
                     drl = fmt_uint(drb, imm16)
@@ -2150,7 +2150,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 // LDR 64-bit unsigned offset
                 else if (wi & 0xFFC00000) == 0xF9400000 {
                     write(fd, "ldr ", 4)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                     write(fd, ", [", 3)
                     write_a64_xreg(fd, rn)
                     uint64 imm12 = (wi >> 10) & 0xFFF
@@ -2165,7 +2165,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 // STR 64-bit unsigned offset
                 else if (wi & 0xFFC00000) == 0xF9000000 {
                     write(fd, "str ", 4)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                     write(fd, ", [", 3)
                     write_a64_xreg(fd, rn)
                     uint64 imm12 = (wi >> 10) & 0xFFF
@@ -2176,6 +2176,24 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         write(fd, drb, drl)
                     }
                     write(fd, "]", 1)
+                }
+                // LDR / STR 64-bit pre/post-index (A1, #245): imm9 signed, unscaled
+                else if (wi & 0xFFA00400) == 0xF8000400 {
+                    if (wi & 0x00400000) != 0 { write(fd, "ldr ", 4) } else { write(fd, "str ", 4) }
+                    write_a64_xzr(fd, rd)
+                    write(fd, ", [", 3)
+                    write_a64_xreg(fd, rn)
+                    uint64 imm9 = (wi >> 12) & 0x1FF
+                    uint64 pre = (wi >> 11) & 1
+                    if pre == 0 { write(fd, "], #", 4) } else { write(fd, ", #", 3) }
+                    if (imm9 & 0x100) != 0 {
+                        write(fd, "-", 1)
+                        drl = fmt_uint(drb, 512 - imm9)
+                    } else {
+                        drl = fmt_uint(drb, imm9)
+                    }
+                    write(fd, drb, drl)
+                    if pre != 0 { write(fd, "]!", 2) }
                 }
                 // LDR 32-bit unsigned offset
                 else if (wi & 0xFFC00000) == 0xB9400000 {
@@ -2238,17 +2256,21 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 // STP 64-bit: signed offset / pre-index / post-index
                 else if (wi & 0xFFC00000) == 0xA9000000 || (wi & 0xFFC00000) == 0xA9800000 || (wi & 0xFFC00000) == 0xA8800000 {
                     write(fd, "stp ", 4)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                     write(fd, ", ", 2)
                     uint64 rt2 = (wi >> 10) & 0x1F
-                    write_a64_xreg(fd, rt2)
+                    write_a64_xzr(fd, rt2)
                     write(fd, ", [", 3)
                     write_a64_xreg(fd, rn)
                     uint64 imm7 = (wi >> 15) & 0x7F
                     uint64 soff = imm7
                     if (imm7 & 0x40) != 0 { soff = soff | 0xFFFFFFFFFFFFFF80 }
                     soff = soff * 8
-                    if soff != 0 {
+                    // post-index (A1, #281): `[xN], #imm`, also #0; it was listed
+                    // as the signed-offset form
+                    uint64 is_post = 0
+                    if (wi & 0xFFC00000) == 0xA8800000 { is_post = 1  write(fd, "]", 1) }
+                    if soff != 0 || is_post != 0 {
                         write(fd, ", #", 3)
                         if (soff & 0x8000000000000000) != 0 {
                             write(fd, "-", 1)
@@ -2257,7 +2279,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         drl = fmt_uint(drb, soff)
                         write(fd, drb, drl)
                     }
-                    write(fd, "]", 1)
+                    if is_post == 0 { write(fd, "]", 1) }
                     if (wi & 0xFFC00000) == 0xA9800000 {
                         write(fd, "!", 1)
                     }
@@ -2265,17 +2287,21 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 // LDP 64-bit: signed offset / pre-index / post-index
                 else if (wi & 0xFFC00000) == 0xA9400000 || (wi & 0xFFC00000) == 0xA9C00000 || (wi & 0xFFC00000) == 0xA8C00000 {
                     write(fd, "ldp ", 4)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                     write(fd, ", ", 2)
                     uint64 rt2 = (wi >> 10) & 0x1F
-                    write_a64_xreg(fd, rt2)
+                    write_a64_xzr(fd, rt2)
                     write(fd, ", [", 3)
                     write_a64_xreg(fd, rn)
                     uint64 imm7 = (wi >> 15) & 0x7F
                     uint64 soff = imm7
                     if (imm7 & 0x40) != 0 { soff = soff | 0xFFFFFFFFFFFFFF80 }
                     soff = soff * 8
-                    if soff != 0 {
+                    // post-index (A1, #281): `[xN], #imm`, also #0; it was listed
+                    // as the signed-offset form
+                    uint64 is_post = 0
+                    if (wi & 0xFFC00000) == 0xA8C00000 { is_post = 1  write(fd, "]", 1) }
+                    if soff != 0 || is_post != 0 {
                         write(fd, ", #", 3)
                         if (soff & 0x8000000000000000) != 0 {
                             write(fd, "-", 1)
@@ -2284,7 +2310,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                         drl = fmt_uint(drb, soff)
                         write(fd, drb, drl)
                     }
-                    write(fd, "]", 1)
+                    if is_post == 0 { write(fd, "]", 1) }
                     if (wi & 0xFFC00000) == 0xA9C00000 {
                         write(fd, "!", 1)
                     }
@@ -2437,7 +2463,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                 // MRS
                 else if (wi & 0xFFF00000) == 0xD5300000 {
                     write(fd, "mrs ", 4)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                     write(fd, ", ", 2)
                     uint64 sop0 = ((wi >> 19) & 1) + 2
                     uint64 sop1 = (wi >> 16) & 0x7
@@ -2456,7 +2482,7 @@ fn emit_asm_listing(uint64 output_path, uint64 arch, uint64 text_start, uint64 s
                     uint64 sop2 = (wi >> 5) & 0x7
                     write_a64_sysreg(fd, sop0, sop1, scrn, scrm, sop2)
                     write(fd, ", ", 2)
-                    write_a64_xreg(fd, rd)
+                    write_a64_xzr(fd, rd)
                 }
                 // Load/store exclusive and load-acquire/store-release, the
                 // single-register forms (o1 = 0): size[31:30] 001000 o2[23]
@@ -12449,4 +12475,10 @@ fn main() {
         compile(input_path, output_path, arch, emit_mode)
     }
     exit(0)
+}
+
+// A1 (#281): register 31 in a transfer or data field is xzr, not sp.
+fn write_a64_xzr(uint64 fd, uint64 reg) {
+    if reg == 31 { write(fd, "xzr", 3)  return }
+    write_a64_xreg(fd, reg)
 }
