@@ -2445,6 +2445,23 @@ fn struct_classify_abi(uint64 struct_idx) {
     unsafe { *(flags_addr as uint16) = fl16 }
 }
 
+// #309: how a struct is RETURNED. Windows x64: 1/2/4/8 bytes in rax (whatever
+// the field types), anything else through a hidden pointer the caller passes
+// in rcx (returned in rax) -- reported as 3 like SysV MEMORY. Elsewhere the
+// SysV classification decides.
+fn cg_ret_class0(uint64 si) -> uint64 {
+    if target_os == 2 {
+        uint64 sz = struct_total_size(si)
+        if sz == 1 || sz == 2 || sz == 4 || sz == 8 { return 1 }
+        return 3
+    }
+    return struct_abi_class0(si)
+}
+fn cg_ret_class1(uint64 si) -> uint64 {
+    if target_os == 2 { return 0 }
+    return struct_abi_class1(si)
+}
+
 fn struct_abi_class0(uint64 struct_idx) -> uint64 {
     uint64 base = struct_table + struct_idx * struct_entry_size + 12
     uint16 val = 0
@@ -5274,7 +5291,11 @@ fn cg_win_ps_call(uint64 node) {
         return
     }
     // a named call (a user function, an extern or routed import)
-    if cg_win_ps_arm == 0 { cg_win_ps_need(cg_win_call_area(argc)) }
+    if cg_win_ps_arm == 0 {
+        uint64 ps_rs = fn_ret_struct_lookup(t)
+        if ps_rs != 0xFFFFFFFF && cg_ret_class0(ps_rs) == 3 { argc = argc + 1 }   // #309: hidden rcx
+        cg_win_ps_need(cg_win_call_area(argc))
+    }
     else { cg_win_ps_need(cg_a64_call_area(argc)) }
 }
 
@@ -11414,7 +11435,7 @@ fn gen_expr_node(uint64 node) {
         uint64 caller_sret_area = 0
         uint64 caller_sret_check = fn_ret_struct_lookup(callee_tok)
         if caller_sret_check != 0xFFFFFFFF {
-            uint64 caller_sret_c0_chk = struct_abi_class0(caller_sret_check)
+            uint64 caller_sret_c0_chk = cg_ret_class0(caller_sret_check)      // #309
             if caller_sret_c0_chk == 3 {
                 caller_sret_needed = 1
                 // Allocate stack space for the return value
@@ -11427,6 +11448,44 @@ fn gen_expr_node(uint64 node) {
                 uint64 csrem = var_frame_size & 15
                 if csrem != 0 { var_frame_size = var_frame_size + 16 - csrem }
             }
+        }
+
+        // #309: Win64 passes the result pointer as the FIRST positional
+        // argument (rcx); the visible arguments shift right by one.
+        if target_os == 2 && caller_sret_needed != 0 {
+            if arg_count >= 64 {
+                write(2, "error: too many call arguments (max 64)\n", 40)
+                fatal_exit()
+            }
+            uint64 wsr_base = cg_slot_off(var_count)
+            uint64 wsr_c = 0
+            while wsr_c < arg_count + 1 { var_count = var_count + 1; wsr_c = wsr_c + 1 }
+            var_frame_size = var_count * 8
+            uint64 wsr_rem = var_frame_size & 15
+            if wsr_rem != 0 { var_frame_size = var_frame_size + 16 - wsr_rem }
+            uint64 wsr_i = arg_count
+            while wsr_i > 0 {
+                wsr_i = wsr_i - 1
+                emit_load_rax_from_stack(arg_slots_base + wsr_i * 8)
+                emit_store_rax_to_stack(wsr_base + wsr_i * 8 + 8)
+                uint64 wsr_ff = 0
+                unsafe { *(arg_float_flags + wsr_i * 8 as uint64) -> wsr_ff }
+                unsafe { *(arg_float_flags + wsr_i * 8 + 8 as uint64) = wsr_ff }
+                uint64 wsr_sf = 0
+                unsafe { *(arg_struct_flags + wsr_i * 8 as uint64) -> wsr_sf }
+                unsafe { *(arg_struct_flags + wsr_i * 8 + 8 as uint64) = wsr_sf }
+            }
+            // lea rax, [rsp + caller_sret_area]
+            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84)
+            emit_byte(0x24); emit_u32_le(caller_sret_area)
+            rax_cache = 0
+            emit_store_rax_to_stack(wsr_base)
+            uint64 wsr_z = 0
+            unsafe { *(arg_float_flags as uint64) = wsr_z }
+            uint64 wsr_n = 0xFFFFFFFF
+            unsafe { *(arg_struct_flags as uint64) = wsr_n }
+            arg_count = arg_count + 1
+            arg_slots_base = wsr_base
         }
 
         uint64 l1_forced = 0
@@ -11967,7 +12026,7 @@ fn gen_expr_node(uint64 node) {
         // Check if callee returns a struct
         uint64 ret_struct_si = fn_ret_struct_lookup(callee_tok)
         if ret_struct_si != 0xFFFFFFFF {
-            uint64 rc0 = struct_abi_class0(ret_struct_si)
+            uint64 rc0 = cg_ret_class0(ret_struct_si)                         // #309
             if rc0 == 3 {
                 // MEMORY class: data was written into caller_sret_area by callee
                 // via the hidden sret pointer.  Point rax at that area.
@@ -11989,7 +12048,7 @@ fn gen_expr_node(uint64 node) {
                 var_frame_size = var_count * 8
                 uint64 rsrem = var_frame_size & 15
                 if rsrem != 0 { var_frame_size = var_frame_size + 16 - rsrem }
-                uint64 rc1 = struct_abi_class1(ret_struct_si)
+                uint64 rc1 = cg_ret_class1(ret_struct_si)
                 // Eightbyte 0: store from rax or xmm0
                 if rc0 == 1 {
                     emit_store_rax_to_stack(ret_soff)
@@ -14610,8 +14669,8 @@ fn gen_stmt(uint64 node) {
         if expr_is_struct != 0xFFFFFFFF {
             uint64 ret_si = expr_is_struct
             uint64 ret_size = struct_total_size(ret_si)
-            uint64 ret_c0 = struct_abi_class0(ret_si)
-            uint64 ret_c1 = struct_abi_class1(ret_si)
+            uint64 ret_c0 = cg_ret_class0(ret_si)                             // #309
+            uint64 ret_c1 = cg_ret_class1(ret_si)
             // rax = pointer to struct data
             emit_store_rax_to_stack(temp_slot_0)
             if ret_c0 == 3 {
@@ -15680,7 +15739,7 @@ fn gen_function(uint64 fn_node) {
     if wrt != 0 {
         uint64 sret_si = struct_lookup(wrt)
         if sret_si != 0xFFFFFFFF {
-            uint64 sret_c0 = struct_abi_class0(sret_si)
+            uint64 sret_c0 = cg_ret_class0(sret_si)                           // #309
             if sret_c0 == 3 {
                 // Reserve a stack slot for the sret pointer
                 sret_slot = cg_slot_off(var_count)
