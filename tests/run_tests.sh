@@ -37975,7 +37975,10 @@ x18_row asm_x29_text_refused_multi_windows_arm64 "'mov x1, x9; mov x29, x9' on W
 # asm_write_class_covers_assembler: every mnemonic asm_emit_a64 accepts is in
 # exactly one write-classification list (tests/helpers/asm_write_class_cover.py),
 # so a mnemonic added to the assembler cannot be exempted from the x18/x29
-# checks by default. The _mutation row is the row's own control: the same
+# checks by default. Since A1 (#286) the script also refuses a mnemonic
+# hidden from its extraction and a drift of asm_a64_accepted(), and the row
+# wants at least the 34 mnemonics of A1 (the A1 block's cover rows are the
+# script's controls). The _mutation row is the row's own control: the same
 # check over a copy with bic removed from the first-register list must FAIL
 # naming bic.
 TOTAL=$((TOTAL + 1))
@@ -37983,8 +37986,10 @@ if ! command -v python3 > /dev/null 2>&1; then
     skip_row asm_write_class_covers_assembler "needs python3"
 else
     X18_O=$(python3 -B "$DIR/helpers/asm_write_class_cover.py" "$DIR/../src/codegen.kr" 2>&1); X18_RC=$?
-    if [ $X18_RC = 0 ]; then PASS=$((PASS + 1)); echo "  asm_write_class_covers_assembler: PASS ($(head -1 <<< "$X18_O"))"
-    else echo "FAIL: asm_write_class_covers_assembler (rc=$X18_RC: $(tr '\n' ' ' <<< "$X18_O" | cut -c1-300))"; FAIL=$((FAIL + 1)); fi
+    # A1 (#286): the extracted set cannot shrink silently -- 34 mnemonics at A1
+    X18_N=$(sed -n 's/^asm_write_class_cover: \([0-9]*\) assembler mnemonics.*/\1/p' <<< "$X18_O")
+    if [ $X18_RC = 0 ] && [ "${X18_N:-0}" -ge 34 ]; then PASS=$((PASS + 1)); echo "  asm_write_class_covers_assembler: PASS ($(head -1 <<< "$X18_O"))"
+    else echo "FAIL: asm_write_class_covers_assembler (rc=$X18_RC, ${X18_N:-no} mnemonics, want rc 0 and >= 34: $(tr '\n' ' ' <<< "$X18_O" | cut -c1-300))"; FAIL=$((FAIL + 1)); fi
 fi
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then
