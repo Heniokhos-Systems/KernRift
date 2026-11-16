@@ -11510,6 +11510,9 @@ fn gen_expr(uint64 node) {
         uint64 ret_fk = fn_ret_float_lookup(wct_ret)
         expr_is_float = ret_fk
 
+        // The call's value is a struct only when the CALLEE returns one; the
+        // flag the last argument left behind must not survive (#248).
+        expr_is_struct = 0xFFFFFFFF
         // Check if callee returns a struct
         uint64 ret_struct_si = fn_ret_struct_lookup(callee_tok)
         if ret_struct_si != 0xFFFFFFFF {

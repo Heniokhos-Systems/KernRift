@@ -2397,25 +2397,20 @@ fn parse_stmt() -> uint64 {
         uint64 lp8 = lp + 8
         uint32 one_len = 1
         unsafe { *(lp8 as uint32) = one_len }
-        // Build: Compare(==, IntLit(1), IntLit(1))
-        uint64 lit_a = ast_alloc(AstKind.IntLit)
+        // Build: While(IntLit(1)) -- the condition is the literal itself.
+        // No Compare: a Compare's data1 is an operator TOKEN INDEX, and this
+        // desugar has no operator token to point at (#247).
+        uint64 lit_one = ast_alloc(AstKind.IntLit)
         uint32 lt = loop_tok
-        ast_set_data1(lit_a, lt)
-        ast_set_tok(lit_a, lt)
-        uint64 lit_b = ast_alloc(AstKind.IntLit)
-        ast_set_data1(lit_b, lt)
-        ast_set_tok(lit_b, lt)
-        uint64 cmp_node = ast_alloc(AstKind.Compare)
-        uint32 eq_kind = 35   // ==
-        ast_set_data1(cmp_node, eq_kind)
-        uint32 la = lit_a
-        ast_set_child(cmp_node, la)
-        uint32 lb = lit_b
-        ast_set_data2(cmp_node, lb)
-        // Build While wrapping the cmp + user body.
+        ast_set_data1(lit_one, lt)
+        ast_set_tok(lit_one, lt)
         uint64 while_node = ast_alloc(AstKind.While)
-        uint32 cn = cmp_node
+        uint32 cn = lit_one
         ast_set_child(while_node, cn)
+        // data4 = 1: this While is a desugared `loop` (analysis.kr's
+        // sema_loop_is_infinite). No backend reads a While's data4.
+        uint32 loop_mark = 1
+        ast_set_data4(while_node, loop_mark)
         uint32 bn = body_block
         ast_set_data1(while_node, bn)
         return while_node
