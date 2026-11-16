@@ -15572,7 +15572,19 @@ fn gen_function(uint64 fn_node) {
 
     // Extern declarations have no body — skip codegen entirely. The linker
     // will resolve the symbol in the final binary.
-    if is_extern != 0 { return }
+    // R24: an extern's STRUCT return type must be known at its call sites
+    // (fn_ret_struct_lookup), or the caller treats rax/x0 as the struct's
+    // address. Float returns are registered by the type-check pre-pass and
+    // survive; the struct table is rebuilt here, so register it before leaving.
+    if is_extern != 0 {
+        uint32 ext_rt = ast_data2(fn_node)
+        uint64 wext_rt = ext_rt
+        if wext_rt != 0 {
+            uint64 ext_si = struct_lookup(wext_rt)
+            if ext_si != 0xFFFFFFFF { fn_ret_struct_register(name_tok, ext_si) }
+        }
+        return
+    }
     uint32 body_check = ast_data3(fn_node)
     if body_check == 0 { return }
     cg_win_prescan(fn_node, 0)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
