@@ -17450,10 +17450,13 @@ done
 #      calls are bound by the platform linker. --target=windows --emit=obj
 #      runs the legacy codegen, which does route on an executable build, so
 #      the predicate's "executable build" clause is what keeps these as
-#      relocations. win_iat_abi.kr makes five extern calls; the COFF .text
-#      section header (the first section, NumberOfRelocations at +32) must
-#      count exactly five relocations on both arches. Routed calls carry no
-#      relocation, so a leak drops the count to 0.
+#      relocations. win_iat_abi.kr makes five extern calls; the .text
+#      relocations (the first section's; PointerToRelocations at +24,
+#      NumberOfRelocations at +32) must hold exactly five call relocations
+#      (IMAGE_REL_AMD64_REL32 = 4 / IMAGE_REL_ARM64_BRANCH26 = 3) on both
+#      arches. Routed calls carry no relocation, so a leak drops the count to
+#      0. Since L1 (#298/#299) an arm64 object also relocates its string
+#      literals (PAGEBASE_REL21 + PAGEOFFSET_12A), which are not counted.
 TOTAL=$((TOTAL + 1))
 RWI_WHY=""
 for rwi_a in x86_64 arm64; do
@@ -17464,7 +17467,14 @@ for rwi_a in x86_64 arm64; do
         RWI_WHY="$RWI_WHY $rwi_a:first-section-not-.text"; continue
     fi
     RWI_NREL=$(pe_u "$RWI_DIR/o.obj" 52 2)
-    [ "$RWI_NREL" = "5" ] || RWI_WHY="$RWI_WHY $rwi_a:$RWI_NREL-relocations-want-5"
+    RWI_RP=$(pe_u "$RWI_DIR/o.obj" 44 4)
+    RWI_CT=4; [ $rwi_a = arm64 ] && RWI_CT=3
+    RWI_NCALL=0; RWI_I=0
+    while [ $RWI_I -lt "$RWI_NREL" ]; do
+        [ "$(pe_u "$RWI_DIR/o.obj" $((RWI_RP + RWI_I * 10 + 8)) 2)" = "$RWI_CT" ] && RWI_NCALL=$((RWI_NCALL + 1))
+        RWI_I=$((RWI_I + 1))
+    done
+    [ "$RWI_NCALL" = "5" ] || RWI_WHY="$RWI_WHY $rwi_a:$RWI_NCALL-call-relocations-want-5"
 done
 if [ -z "$RWI_WHY" ]; then
     PASS=$((PASS + 1)); echo "  win_import_obj_keeps_relocations: PASS"
