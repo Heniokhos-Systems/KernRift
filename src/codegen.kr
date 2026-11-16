@@ -3420,6 +3420,34 @@ fn emit_static_store(uint64 data_offset) {
     emit_u32_le(0)
 }
 
+// #295: 1 when argument i of the rewritten SysV argument list must go on the
+// stack because its struct did not fit in the remaining registers.
+fn cg_arg_forced_stack(uint64 tbl, uint64 i) -> uint64 {
+    if tbl == 0 { return 0 }
+    uint64 p = tbl + i * 8
+    uint64 v = 0
+    unsafe { *(p as uint64) -> v }
+    return v
+}
+
+// #295: the int / SSE registers a by-value struct takes under SysV (MEMORY
+// class: its address, one int register). Returns ni | (ns << 8).
+fn cg_sysv_struct_regs(uint64 si) -> uint64 {
+    uint64 c0 = struct_abi_class0(si)
+    uint64 c1 = struct_abi_class1(si)
+    uint64 sz = struct_total_size(si)
+    uint64 ni = 0
+    uint64 ns = 0
+    if c0 == 3 { return 1 }
+    if c0 == 1 { ni = 1 }
+    if c0 == 2 { ns = 1 }
+    if sz > 8 {
+        if c1 == 1 { ni = ni + 1 }
+        if c1 == 2 { ns = ns + 1 }
+    }
+    return ni | (ns << 8)
+}
+
 // Resolve all static RIP-relative fixups. Call after all code is emitted.
 // data_start = out_len at the time statics are placed.
 @export
@@ -9427,6 +9455,7 @@ fn gen_expr_node(uint64 node) {
             // value, larger as the address. The argument list is rewritten into
             // a fresh run of slots, so everything below is unchanged and a
             // call_ptr without struct arguments emits the same bytes as before.
+            uint64 cp_forced = 0
             if cp_has_struct != 0 {
                 uint64 xn = 0
                 uint64 xa = 0
@@ -9452,6 +9481,9 @@ fn gen_expr_node(uint64 node) {
                 uint64 xrem = var_frame_size & 15
                 if xrem != 0 { var_frame_size = var_frame_size + 16 - xrem }
                 uint64 xkinds = cg_alloc(xn * 8 + 8)
+                cp_forced = cg_alloc(xn * 8 + 8)
+                uint64 cpg = 0
+                uint64 cpf = 0
                 uint64 xj = 0
                 xa = 0
                 while xa < arg_count {
@@ -9462,6 +9494,18 @@ fn gen_expr_node(uint64 node) {
                     uint64 xfk = 0
                     unsafe { *(xfkp as uint64) -> xfk }
                     uint64 xsrc = arg_slots_base + xa * 8
+                    // #295: a struct whose eightbytes do not all fit in the
+                    // registers still free goes whole on the stack (SysV).
+                    uint64 xforce = 0
+                    if xsi2 != 0xFFFFFFFF && target_os != 2 && struct_abi_class0(xsi2) != 3 {
+                        uint64 xrr = cg_sysv_struct_regs(xsi2)
+                        if cpg + (xrr & 0xFF) > 6 || cpf + (xrr >> 8) > 8 { xforce = 1 } else { cpg = cpg + (xrr & 0xFF); cpf = cpf + (xrr >> 8) }
+                    } else if xfk != 0 {
+                        cpf = cpf + 1
+                    } else {
+                        cpg = cpg + 1
+                    }
+                    uint64 xfj0 = xj
                     if xsi2 == 0xFFFFFFFF {
                         emit_load_rax_from_stack(xsrc)
                         emit_store_rax_to_stack(xbase + xj * 8)
@@ -9496,6 +9540,11 @@ fn gen_expr_node(uint64 node) {
                         unsafe { *(xkp_xk1 as uint64) = xk1 }
                             xj = xj + 1
                         }
+                    }
+                    while xfj0 < xj {
+                        uint64 xfcp = cp_forced + xfj0 * 8
+                        unsafe { *(xfcp as uint64) = xforce }
+                        xfj0 = xfj0 + 1
                     }
                     xa = xa + 1
                 }
@@ -9588,7 +9637,10 @@ fn gen_expr_node(uint64 node) {
                     unsafe { *(cfkp as uint64) -> cfk }
                     uint64 iip = cp_iidx + ci * 8
                     uint64 fip = cp_fidx + ci * 8
-                    if cfk != 0 {
+                    if cg_arg_forced_stack(cp_forced, ci) != 0 {
+                        unsafe { *(iip as uint64) = 0xFFFFFFFFFFFFFFFF }
+                        unsafe { *(fip as uint64) = 0xFFFFFFFFFFFFFFFF }
+                    } else if cfk != 0 {
                         unsafe { *(fip as uint64) = nflt }
                         unsafe { *(iip as uint64) = 0xFFFFFFFFFFFFFFFF }
                         nflt = nflt + 1
@@ -9610,7 +9662,7 @@ fn gen_expr_node(uint64 node) {
                         uint64 sfip = cp_fidx + si * 8
                         uint64 sfi = 0
                         unsafe { *(sfip as uint64) -> sfi }
-                        if sfi < 6 {
+                        if sfi < 8 {
                             if sfk == 2 {
                                 emit_load_xmmN_f32(sfi, ssoff)
                             } else {
@@ -9647,7 +9699,7 @@ fn gen_expr_node(uint64 node) {
                         uint64 qfip = cp_fidx + cq * 8
                         uint64 qfi = 0
                         unsafe { *(qfip as uint64) -> qfi }
-                        if qfi >= 6 { q_stack = 1 }
+                        if qfi >= 8 { q_stack = 1 }
                     } else {
                         uint64 qiip = cp_iidx + cq * 8
                         uint64 qii = 0
@@ -11216,6 +11268,7 @@ fn gen_expr_node(uint64 node) {
             }
         }
 
+        uint64 l1_forced = 0
         uint64 win_stack = 0
         if target_os == 2 {
             // Windows x64: shadow space (32 bytes min) + overflow args
@@ -11240,6 +11293,13 @@ fn gen_expr_node(uint64 node) {
             while oi < arg_count {
                 // Load from temp slot (shifted by win_stack)
                 emit_load_rax_from_stack(arg_slots_base + oi * 8 + win_stack)
+                // #295: a struct of <= 8 bytes is passed by VALUE in its slot.
+                uint64 wosf = 0
+                unsafe { *(arg_struct_flags + oi * 8 as uint64) -> wosf }
+                if wosf != 0xFFFFFFFF && abi_struct_pass_by_val != 0 && struct_total_size(wosf) <= 8 {
+                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)   // mov rax, [rax]
+                    rax_cache = 0
+                }
                 // Store to [rsp + 32 + (oi-4)*8]
                 uint64 soff = 32 + (oi - 4) * 8
                 if soff < 128 {
@@ -11351,6 +11411,127 @@ fn gen_expr_node(uint64 node) {
             }
         } else {
             // SysV calling convention: separate int/float register allocation
+            // #295: a by-value struct that does not fit in the registers still
+            // free is passed whole on the stack (its eightbytes, in argument
+            // order) while later arguments keep using registers. The loader
+            // below only knows "next register", so in that case the argument
+            // list is rewritten into eightbytes with a per-entry stack mark.
+            if abi_struct_pass_by_val != 0 {
+                uint64 xs_gi = caller_sret_needed
+                uint64 xs_fi = 0
+                uint64 xs_need = 0
+                uint64 xs_any = 0
+                uint64 xs_a = 0
+                while xs_a < arg_count {
+                    uint64 xs_sf = 0
+                    unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xs_sf }
+                    uint64 xs_ff = 0
+                    unsafe { *(arg_float_flags + xs_a * 8 as uint64) -> xs_ff }
+                    if xs_sf != 0xFFFFFFFF {
+                        xs_any = 1
+                        uint64 xs_r = cg_sysv_struct_regs(xs_sf)
+                        uint64 xs_ni = xs_r & 0xFF
+                        uint64 xs_ns = xs_r >> 8
+                        if xs_gi + xs_ni > 6 || xs_fi + xs_ns > 8 { xs_need = 1 } else { xs_gi = xs_gi + xs_ni; xs_fi = xs_fi + xs_ns }
+                    } else if xs_ff != 0 {
+                        xs_fi = xs_fi + 1
+                    } else {
+                        xs_gi = xs_gi + 1
+                    }
+                    xs_a = xs_a + 1
+                }
+                if xs_any != 0 && (xs_gi > 6 || xs_fi > 8) { xs_need = 1 }
+                if xs_need != 0 {
+                    uint64 xn = 0
+                    xs_a = 0
+                    while xs_a < arg_count {
+                        uint64 xc_sf = 0
+                        unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xc_sf }
+                        if xc_sf != 0xFFFFFFFF && struct_abi_class0(xc_sf) != 3 {
+                            xn = xn + (struct_total_size(xc_sf) + 7) / 8
+                        } else {
+                            xn = xn + 1
+                        }
+                        xs_a = xs_a + 1
+                    }
+                    if xn > 64 {
+                        uint64 xe = "error: too many call arguments (max 64, a by-value struct counts once per eightbyte)\n"
+                        write(2, xe, str_len(xe))
+                        fatal_exit()
+                    }
+                    uint64 xbase = cg_slot_off(var_count)
+                    uint64 xcn = 0
+                    while xcn < xn { var_count = var_count + 1; xcn = xcn + 1 }
+                    var_frame_size = var_count * 8
+                    uint64 xrem = var_frame_size & 15
+                    if xrem != 0 { var_frame_size = var_frame_size + 16 - xrem }
+                    uint64 xff = cg_alloc(xn * 8 + 8)
+                    l1_forced = cg_alloc(xn * 8 + 8)
+                    uint64 xj = 0
+                    uint64 pg = caller_sret_needed
+                    uint64 pf = 0
+                    xs_a = 0
+                    while xs_a < arg_count {
+                        uint64 xe_sf = 0
+                        unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xe_sf }
+                        uint64 xe_ff = 0
+                        unsafe { *(arg_float_flags + xs_a * 8 as uint64) -> xe_ff }
+                        uint64 xsrc = arg_slots_base + xs_a * 8
+                        if xe_sf != 0xFFFFFFFF && struct_abi_class0(xe_sf) != 3 {
+                            uint64 xr = cg_sysv_struct_regs(xe_sf)
+                            uint64 xni = xr & 0xFF
+                            uint64 xns = xr >> 8
+                            uint64 xforce = 0
+                            if pg + xni > 6 || pf + xns > 8 { xforce = 1 } else { pg = pg + xni; pf = pf + xns }
+                            uint64 xsl = (struct_total_size(xe_sf) + 7) / 8
+                            uint64 xk = 0
+                            while xk < xsl {
+                                emit_load_rax_from_stack(xsrc)
+                                if xk == 0 {
+                                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
+                                } else {
+                                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x40); emit_byte(0x08)
+                                }
+                                rax_cache = 0
+                                emit_store_rax_to_stack(xbase + xj * 8)
+                                uint64 xcls = struct_abi_class0(xe_sf)
+                                if xk == 1 { xcls = struct_abi_class1(xe_sf) }
+                                uint64 xfv = 0
+                                if xcls == 2 { xfv = 1 }
+                                uint64 xfp = xff + xj * 8
+                                unsafe { *(xfp as uint64) = xfv }
+                                uint64 xfp2 = l1_forced + xj * 8
+                                unsafe { *(xfp2 as uint64) = xforce }
+                                xj = xj + 1
+                                xk = xk + 1
+                            }
+                        } else {
+                            emit_load_rax_from_stack(xsrc)
+                            emit_store_rax_to_stack(xbase + xj * 8)
+                            uint64 xfp3 = xff + xj * 8
+                            unsafe { *(xfp3 as uint64) = xe_ff }
+                            uint64 zf = 0
+                            uint64 xfp4 = l1_forced + xj * 8
+                            unsafe { *(xfp4 as uint64) = zf }
+                            if xe_ff != 0 { pf = pf + 1 } else { pg = pg + 1 }
+                            xj = xj + 1
+                        }
+                        xs_a = xs_a + 1
+                    }
+                    uint64 xw = 0
+                    while xw < xn {
+                        uint64 xfv2 = 0
+                        uint64 xfp5 = xff + xw * 8
+                        unsafe { *(xfp5 as uint64) -> xfv2 }
+                        unsafe { *(arg_float_flags + xw * 8 as uint64) = xfv2 }
+                        uint64 nonev = 0xFFFFFFFF
+                        unsafe { *(arg_struct_flags + xw * 8 as uint64) = nonev }
+                        xw = xw + 1
+                    }
+                    arg_count = xn
+                    arg_slots_base = xbase
+                }
+            }
             // First pass: load float args into xmm registers
             uint64 call_float_idx = 0
             uint64 fi = 0
@@ -11358,7 +11539,7 @@ fn gen_expr_node(uint64 node) {
                 uint64 ff_addr = arg_float_flags + fi * 8
                 uint64 ff_val = 0
                 unsafe { *(ff_addr as uint64) -> ff_val }
-                if ff_val != 0 && call_float_idx < 8 {
+                if ff_val != 0 && call_float_idx < 8 && cg_arg_forced_stack(l1_forced, fi) == 0 {
                     emit_load_xmmN_f64(call_float_idx, arg_slots_base + fi * 8)
                     call_float_idx = call_float_idx + 1
                 }
@@ -11385,7 +11566,7 @@ fn gen_expr_node(uint64 node) {
                 uint64 fi_addr = arg_float_flags + ii * 8
                 uint64 fi_val = 0
                 unsafe { *(fi_addr as uint64) -> fi_val }
-                if fi_val == 0 {
+                if fi_val == 0 && cg_arg_forced_stack(l1_forced, ii) == 0 {
                     // Check if this is a struct arg
                     uint64 saf_addr = arg_struct_flags + ii * 8
                     uint64 saf_val = 0
@@ -11532,11 +11713,13 @@ fn gen_expr_node(uint64 node) {
             uint64 oasv = 0
             unsafe { *(oas as uint64) -> oasv }
             if oasv != 0xFFFFFFFF && abi_struct_pass_by_val != 0 { ovf_has_struct = 1 }
-            uint64 on_stack = 0
-            if oafv != 0 {
-                if ovf_f < 8 { ovf_f = ovf_f + 1 } else { on_stack = 1 }
-            } else {
-                if ovf_i < 6 { ovf_i = ovf_i + 1 } else { on_stack = 1 }
+            uint64 on_stack = cg_arg_forced_stack(l1_forced, oa)
+            if on_stack == 0 {
+                if oafv != 0 {
+                    if ovf_f < 8 { ovf_f = ovf_f + 1 } else { on_stack = 1 }
+                } else {
+                    if ovf_i < 6 { ovf_i = ovf_i + 1 } else { on_stack = 1 }
+                }
             }
             if on_stack != 0 {
                 uint64 ovp = ovf_idx + ovf_n * 8
@@ -15609,8 +15792,56 @@ fn gen_function(uint64 fn_node) {
                     // Spill eightbytes from registers into contiguous struct area
                     uint64 sv_c0 = struct_abi_class0(param_si_spill)
                     uint64 sv_c1 = struct_abi_class1(param_si_spill)
+                    // #295: a struct that does not fit in the registers still free
+                    // arrived whole on the stack, its eightbytes in order.
+                    uint64 sv_r = cg_sysv_struct_regs(param_si_spill)
+                    uint64 sv_ovf = 0
+                    if int_pidx + (sv_r & 0xFF) > 6 || float_pidx + (sv_r >> 8) > 8 { sv_ovf = 1 }
+                    if sv_ovf != 0 {
+                        if sv_c0 == 3 {
+                            if stack_pidx >= 64 {
+                                write(2, "error: too many stack parameters (max 64)\n", 42)
+                                fatal_exit()
+                            }
+                            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84); emit_byte(0x24)
+                            uint64 ovpl_1 = out_len
+                            emit_u32_le(0)
+                            uint64 ovpe_1 = overflow_patches + (stack_pidx) * 8
+                            uint32 ovpl32_1 = ovpl_1
+                            unsafe { *(ovpe_1 as uint32) = ovpl32_1 }
+                            if overflow_patch_count < (stack_pidx) + 1 { overflow_patch_count = (stack_pidx) + 1 }
+                            stack_pidx = stack_pidx + 1
+                            emit_store_rax_to_stack(temp_slot_0)
+                            uint64 oq = 0
+                            while oq < sv_sslots {
+                                emit_load_rax_from_stack(temp_slot_0)
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(oq * 8)
+                                rax_cache = 0
+                                emit_store_rax_to_stack(struct_area + oq * 8)
+                                oq = oq + 1
+                            }
+                        } else {
+                            uint64 oe = 0
+                            while oe < sv_sslots {
+                                if stack_pidx >= 64 {
+                                    write(2, "error: too many stack parameters (max 64)\n", 42)
+                                    fatal_exit()
+                                }
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84); emit_byte(0x24)
+                                uint64 ovpl_2 = out_len
+                                emit_u32_le(0)
+                                uint64 ovpe_2 = overflow_patches + (stack_pidx) * 8
+                                uint32 ovpl32_2 = ovpl_2
+                                unsafe { *(ovpe_2 as uint32) = ovpl32_2 }
+                                if overflow_patch_count < (stack_pidx) + 1 { overflow_patch_count = (stack_pidx) + 1 }
+                                stack_pidx = stack_pidx + 1
+                                emit_store_rax_to_stack(struct_area + oe * 8)
+                                oe = oe + 1
+                            }
+                        }
+                    }
 
-                    if sv_c0 == 1 {
+                    if sv_ovf == 0 && sv_c0 == 1 {
                         // INTEGER eightbyte 0: spill from current int register to [rsp+struct_area]
                         if struct_area < 128 {
                             uint8 sa8 = struct_area
@@ -15667,7 +15898,7 @@ fn gen_function(uint64 fn_node) {
                         int_pidx = int_pidx + 1
                     }
 
-                    if sv_c1 == 1 && sv_ssize > 8 {
+                    if sv_ovf == 0 && sv_c1 == 1 && sv_ssize > 8 {
                         // INTEGER eightbyte 1: spill from NEXT int register to [rsp+struct_area+8]
                         uint64 sa2 = struct_area + 8
                         if sa2 < 128 {
@@ -15726,13 +15957,13 @@ fn gen_function(uint64 fn_node) {
                     }
 
                     // SSE eightbyte 0: spill from xmmN to [rsp + struct_area]
-                    if sv_c0 == 2 {
+                    if sv_ovf == 0 && sv_c0 == 2 {
                         emit_store_xmmN_f64(float_pidx, struct_area)
                         float_pidx = float_pidx + 1
                     }
 
                     // SSE eightbyte 1: spill from xmmN to [rsp + struct_area + 8]
-                    if sv_c1 == 2 && sv_ssize > 8 {
+                    if sv_ovf == 0 && sv_c1 == 2 && sv_ssize > 8 {
                         uint64 sv_sa2 = struct_area + 8
                         emit_store_xmmN_f64(float_pidx, sv_sa2)
                         float_pidx = float_pidx + 1
@@ -15740,7 +15971,7 @@ fn gen_function(uint64 fn_node) {
 
                     // MEMORY class: register holds a pointer to struct data
                     // Copy struct bytes from pointer to local stack area
-                    if sv_c0 == 3 {
+                    if sv_ovf == 0 && sv_c0 == 3 {
                         // Spill the pointer register to temp_slot_0
                         if int_pidx == 0 {
                             // mov rax, rdi (48 89 F8)
@@ -15816,7 +16047,35 @@ fn gen_function(uint64 fn_node) {
                     if wv_rem != 0 { var_frame_size = var_frame_size + 16 - wv_rem }
 
                     // Spill register value to struct area
-                    if wv_ssize <= 8 {
+                    if pidx >= 4 {
+                        // #295: the 5th+ argument arrived in its stack slot: the
+                        // value (<= 8 bytes) or the address of the struct.
+                        if pidx - 4 >= 64 {
+                            write(2, "error: too many stack parameters (max 64)\n", 42)
+                            fatal_exit()
+                        }
+                        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84); emit_byte(0x24)
+                        uint64 ovpl_3 = out_len
+                        emit_u32_le(0)
+                        uint64 ovpe_3 = overflow_patches + (pidx - 4) * 8
+                        uint32 ovpl32_3 = ovpl_3
+                        unsafe { *(ovpe_3 as uint32) = ovpl32_3 }
+                        if overflow_patch_count < (pidx - 4) + 1 { overflow_patch_count = (pidx - 4) + 1 }
+                        stack_pidx = stack_pidx + 1
+                        if wv_ssize <= 8 {
+                            emit_store_rax_to_stack(wv_struct_area)
+                        } else {
+                            emit_store_rax_to_stack(temp_slot_0)
+                            uint64 woq = 0
+                            while woq < wv_sslots {
+                                emit_load_rax_from_stack(temp_slot_0)
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(woq * 8)
+                                rax_cache = 0
+                                emit_store_rax_to_stack(wv_struct_area + woq * 8)
+                                woq = woq + 1
+                            }
+                        }
+                    } else if wv_ssize <= 8 {
                         if wv_struct_area < 128 {
                             uint8 wsa8 = wv_struct_area
                             if pidx == 0 {
