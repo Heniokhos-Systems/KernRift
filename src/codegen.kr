@@ -12687,6 +12687,11 @@ fn asm_a64_imm(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
             if c >= 65 { if c <= 70 { d = c - 55 } }
         }
         if d >= base { break }
+        // A1 (#279): refuse the digit that would carry the value past 2^64,
+        // before the multiply (it wrapped). The range is each field's business:
+        // a logical immediate is a 64-bit value.
+        if base == 10 && (v > 1844674407370955161 || (v == 1844674407370955161 && d > 5)) { asm_a64_form_fatal(sptr, slen, "the immediate does not fit in 64 bits (#279)") }
+        if base == 16 && v > 0x0FFFFFFFFFFFFFFF { asm_a64_form_fatal(sptr, slen, "the immediate does not fit in 64 bits (#279)") }
         v = v * base + d
         digits = digits + 1
         i = i + 1
@@ -12730,6 +12735,7 @@ fn asm_a64_movwide(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
     if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }    // MOVZ/MOVK Rd: 31 is xzr
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 iv = asm_a64_imm(sptr, o, slen)
@@ -12757,8 +12763,10 @@ fn asm_a64_movwide(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
             if sh == 32 { hw = 2 }
             if sh == 48 { hw = 3 }
             if sh != 0 { if sh != 16 { if sh != 32 { if sh != 48 { asm_a64_operr(sptr, slen) } } } }
+            c = c + a64_tok_len
         }
     }
+    asm_a64_end(sptr, slen, c)
     emit_a64(base | (hw << 21) | (iv << 5) | rd)
 }
 
@@ -12863,14 +12871,22 @@ fn asm_a64_logical(uint64 sptr, uint64 slen, uint64 off, uint64 rbase, uint64 ib
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
     if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    uint64 rd_sp = a64_reg_sp
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rn: 31 is xzr in both forms (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rm = asm_a64_reg(sptr, o, slen)
-    if rm != 0xFF { emit_a64(rbase | (rm << 16) | (rn << 5) | rd)  return }
+    if rm != 0xFF {
+        if a64_reg_sp != 0 || rd_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // register form: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
+        emit_a64(rbase | (rm << 16) | (rn << 5) | rd)
+        return
+    }
+    if rd == 31 && rd_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // immediate form: Rd 31 is SP
     if ibase == 0 { asm_a64_operr(sptr, slen) }
     uint64 iv = asm_a64_imm(sptr, o, slen)
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
@@ -12878,6 +12894,7 @@ fn asm_a64_logical(uint64 sptr, uint64 slen, uint64 off, uint64 rbase, uint64 ib
     uint64 want = iv
     if inv != 0 { want = ~iv }
     if a64_bitmask_encode(want) == 0 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, o + a64_tok_len)
     emit_a64(ibase | (a64_bm_n << 22) | (a64_bm_immr << 16) | (a64_bm_imms << 10) | (rn << 5) | rd)
 }
 
@@ -12885,14 +12902,26 @@ fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rba
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
     if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    uint64 rd_sp = a64_reg_sp
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    uint64 rn_sp = a64_reg_sp
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rm = asm_a64_reg(sptr, o, slen)
-    if rm != 0xFF { emit_a64(rbase | (rm << 16) | (rn << 5) | rd)  return }
+    if rm != 0xFF {
+        // shifted-register form: 31 is xzr in every field (#276); sp needs the
+        // extended-register form, which is not accepted
+        if rd_sp != 0 || rn_sp != 0 || a64_reg_sp != 0 { asm_a64_operr(sptr, slen) }
+        asm_a64_end(sptr, slen, o + a64_tok_len)
+        emit_a64(rbase | (rm << 16) | (rn << 5) | rd)
+        return
+    }
+    // immediate form: 31 is SP for Rd and Rn; `xzr` has no encoding there
+    if rd == 31 && rd_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
+    if rn == 31 && rn_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
     uint64 iv = asm_a64_imm(sptr, o, slen)
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
     if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
@@ -12900,6 +12929,7 @@ fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rba
     // accepted here because a value above 4095 silently truncating into it is
     // precisely the class of bug this whole change is about.
     if iv > 4095 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, o + a64_tok_len)
     emit_a64(ibase | (iv << 10) | (rn << 5) | rd)
 }
 
@@ -12912,12 +12942,14 @@ fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, o, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt: 31 is xzr (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     o = asm_a64_want(sptr, o, slen, 91)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    if rn == 31 && a64_reg_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // base: 31 is sp
     o = asm_a64_ws(sptr, o + a64_tok_len, slen)
     uint64 iv = 0
     uint64 neg = 0
@@ -12984,16 +13016,19 @@ fn asm_a64_pair(uint64 sptr, uint64 slen, uint64 off, uint64 is_load) {
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, o, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt: 31 is xzr (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rt2 = asm_a64_reg(sptr, o, slen)
     if rt2 == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt2: 31 is xzr
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     o = asm_a64_want(sptr, o, slen, 91)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    if rn == 31 && a64_reg_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // base: 31 is sp
     o = asm_a64_ws(sptr, o + a64_tok_len, slen)
 
     uint64 iv = 0
@@ -13251,6 +13286,8 @@ fn asm_a64_sys(uint64 sptr, uint64 slen, uint64 off, uint64 op1, uint64 crn, uin
     uint64 c = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, c, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Xt: 31 is xzr (#276)
+    asm_a64_end(sptr, slen, c + a64_tok_len)
     emit_a64(0xD5080000 | (op1 << 16) | (crn << 12) | (crm << 8) | (op2 << 5) | rt)
 }
 
@@ -13262,15 +13299,19 @@ fn asm_a64_pstate(uint64 sptr, uint64 slen, uint64 off, uint64 op2) {
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
     if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
     if iv > 15 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, off + a64_tok_len)
     emit_a64(0xD500401F | (3 << 16) | (iv << 8) | (op2 << 5))
 }
 
-// imm16 at bit 5, for `smc` and `brk`. Same refusal rule and the same reason.
+// imm16 at bit 5, for `svc`, `smc`, `hvc` and `brk`. Same refusal rule and the
+// same reason.
 fn asm_a64_imm16(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
+    off = asm_a64_ws(sptr, off, slen)
     uint64 iv = asm_a64_imm(sptr, off, slen)
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
     if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
     if iv > 65535 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, off + a64_tok_len)
     emit_a64(base | (iv << 5))
 }
 
@@ -13333,10 +13374,10 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "wfe", 3) != 0 && slen == 3 { emit_a64(0xD503205F); return }
     if asm_match(sptr, 0, "sev", 3) != 0 && slen == 3 { emit_a64(0xD503209F); return }
     if asm_match(sptr, 0, "isb", 3) != 0 && slen == 3 { emit_a64(0xD5033FDF); return }
-    if asm_match(sptr, 0, "dsb sy", 6) != 0 { emit_a64(0xD5033F9F); return }
-    if asm_match(sptr, 0, "dmb sy", 6) != 0 { emit_a64(0xD5033FBF); return }
-    if asm_match(sptr, 0, "dsb ish", 7) != 0 { emit_a64(0xD5033B9F); return }
-    if asm_match(sptr, 0, "dmb ish", 7) != 0 { emit_a64(0xD5033BBF); return }
+    if asm_match(sptr, 0, "dsb sy", 6) != 0 && asm_rest_blank(sptr, slen, 6) != 0 { emit_a64(0xD5033F9F); return }
+    if asm_match(sptr, 0, "dmb sy", 6) != 0 && asm_rest_blank(sptr, slen, 6) != 0 { emit_a64(0xD5033FBF); return }
+    if asm_match(sptr, 0, "dsb ish", 7) != 0 && asm_rest_blank(sptr, slen, 7) != 0 { emit_a64(0xD5033B9F); return }
+    if asm_match(sptr, 0, "dmb ish", 7) != 0 && asm_rest_blank(sptr, slen, 7) != 0 { emit_a64(0xD5033BBF); return }
     // --- cache, TLB and system instructions -----------------------------------
     //
     // DC, IC, TLBI and AT ARE ALL ONE ENCODING. They are aliases of
@@ -13394,20 +13435,9 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "brk ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4200000)  return }
     if asm_match(sptr, 0, "ret", 3) != 0 && slen == 3 { emit_a64(0xD65F03C0); return }
     if asm_match(sptr, 0, "eret", 4) != 0 && slen == 4 { emit_a64(0xD69F03E0); return }
-    // Supervisor call: svc #N (16-bit imm)
-    if asm_match(sptr, 0, "svc #", 5) != 0 {
-        uint64 imm = 0
-        uint64 si = 5
-        while si < slen {
-            uint64 saddr = sptr + si
-            uint64 sch = 0
-            unsafe { *(saddr as uint8) -> sch }
-            if sch >= 48 && sch <= 57 { imm = imm * 10 + sch - 48 }
-            si = si + 1
-        }
-        emit_a64(0xD4000001 | (imm << 5))
-        return
-    }
+    // Supervisor call: svc #N (imm16). It used to add up every decimal digit of
+    // the rest of the string (`svc #0x80` was svc #80, #273).
+    if asm_match(sptr, 0, "svc ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4000001)  return }
     // MSR sysreg, xN
     if asm_match(sptr, 0, "msr ", 4) != 0 {
         uint64 sreg = 0
@@ -13421,26 +13451,21 @@ fn asm_emit_a64(uint64 str_tok) {
             if cc == 44 { break }
             ci = ci + 1
         }
-        // Parse sysreg name (offset 4 to ci)
-        sreg = asm_a64_sysreg(sptr, 4, ci)
+        // The name is one token [4, e), then only blanks up to the comma, then
+        // Xt (#274: one character used to be skipped after the comma and every
+        // digit to the end added up, so `msr tpidr_el0, xzr` used x0).
+        uint64 e = 4
+        while e < ci && load8(sptr + e) != 32 { e = e + 1 }
+        uint64 bi = e
+        while bi < ci { if asm_blank(load8(sptr + bi)) == 0 { asm_a64_operr(sptr, slen) }  bi = bi + 1 }
+        sreg = asm_a64_sysreg(sptr, 4, e)
         if sreg == 0xFFFFFFFF { asm_a64_sysreg_err(sptr, slen) }
-        // Parse xN after comma+space
-        uint64 ri = ci + 1
-        uint64 ra = sptr + ri
-        uint64 rc = 0
-        unsafe { *(ra as uint8) -> rc }
-        if rc == 32 { ri = ri + 1 }
-        // Skip 'x'
-        ri = ri + 1
-        uint64 rnum = 0
-        while ri < slen {
-            uint64 rra = sptr + ri
-            uint64 rrc = 0
-            unsafe { *(rra as uint8) -> rrc }
-            if rrc >= 48 && rrc <= 57 { rnum = rnum * 10 + rrc - 48 }
-            ri = ri + 1
-        }
-        rt = rnum
+        if ci >= slen { asm_a64_operr(sptr, slen) }
+        uint64 ro = asm_a64_ws(sptr, ci + 1, slen)
+        rt = asm_a64_reg(sptr, ro, slen)
+        if rt == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Xt: 31 is xzr
+        asm_a64_end(sptr, slen, ro + a64_tok_len)
         emit_a64(0xD5100000 | sreg | rt)
         return
     }
@@ -13448,26 +13473,19 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "mrs ", 4) != 0 {
         uint64 sreg = 0
         uint64 rt = 0
-        // Parse xN (starts at offset 4, skip 'x')
-        uint64 ri = 5
-        uint64 rnum = 0
-        while ri < slen {
-            uint64 rra = sptr + ri
-            uint64 rrc = 0
-            unsafe { *(rra as uint8) -> rrc }
-            if rrc == 44 { break }
-            if rrc >= 48 && rrc <= 57 { rnum = rnum * 10 + rrc - 48 }
-            ri = ri + 1
-        }
-        rt = rnum
-        // Parse sysreg name after ", "
-        uint64 si = ri + 1
-        uint64 sa = sptr + si
-        uint64 sc = 0
-        unsafe { *(sa as uint8) -> sc }
-        if sc == 32 { si = si + 1 }
-        sreg = asm_a64_sysreg(sptr, si, slen)
+        // Xt, a comma, then the name as one token (#274: the register used to
+        // be every digit before the comma, and text after the name was ignored).
+        uint64 ro = asm_a64_ws(sptr, 4, slen)
+        rt = asm_a64_reg(sptr, ro, slen)
+        if rt == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Xt: 31 is xzr
+        uint64 si = asm_a64_want(sptr, ro + a64_tok_len, slen, 44)
+        if si == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+        uint64 se = si
+        while se < slen && load8(sptr + se) != 32 && load8(sptr + se) != 44 { se = se + 1 }
+        sreg = asm_a64_sysreg(sptr, si, se)
         if sreg == 0xFFFFFFFF { asm_a64_sysreg_err(sptr, slen) }
+        asm_a64_end(sptr, slen, se)
         emit_a64(0xD5300000 | sreg | rt)
         return
     }
@@ -13492,8 +13510,15 @@ fn asm_emit_a64(uint64 str_tok) {
             // `mov` involving SP is an ADD #0, not an ORR with XZR: register 31
             // reads as XZR in the ORR encoding, so the ORR form would move zero
             // and look right. This is the distinction a64_reg_sp exists for.
-            if rd_sp != 0 { emit_a64(0x91000000 | (rm << 5) | rd)  return }
-            if rm_sp != 0 { emit_a64(0x91000000 | (rm << 5) | rd)  return }
+            asm_a64_end(sptr, slen, o + a64_tok_len)
+            // ADD #0 reads and writes 31 as SP, so `mov sp, xzr` / `mov xzr, sp`
+            // have no encoding (they assembled as `mov sp, sp`, #276)
+            if rd_sp != 0 || rm_sp != 0 {
+                if rd == 31 && rd_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
+                if rm == 31 && rm_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
+                emit_a64(0x91000000 | (rm << 5) | rd)
+                return
+            }
             emit_a64(0xAA0003E0 | (rm << 16) | rd)
             return
         }
@@ -13504,6 +13529,8 @@ fn asm_emit_a64(uint64 str_tok) {
         // assembler will not silently emit two instructions for one written
         // line: the caller writes both, and sees both.
         if iv > 65535 { asm_a64_operr(sptr, slen) }
+        if rd_sp != 0 { asm_a64_zr_fatal(sptr, slen) }      // MOVZ Rd: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(0xD2800000 | (iv << 5) | rd)
         return
     }
@@ -13523,6 +13550,8 @@ fn asm_emit_a64(uint64 str_tok) {
         uint64 o = asm_a64_ws(sptr, 3, slen)
         uint64 rn = asm_a64_reg(sptr, o, slen)
         if rn == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Rn: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(0xD61F0000 | (rn << 5))
         return
     }
@@ -13530,6 +13559,8 @@ fn asm_emit_a64(uint64 str_tok) {
         uint64 o = asm_a64_ws(sptr, 4, slen)
         uint64 rn = asm_a64_reg(sptr, o, slen)
         if rn == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Rn: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(0xD63F0000 | (rn << 5))
         return
     }
@@ -21705,4 +21736,12 @@ fn asm_a64_form_fatal(uint64 sptr, uint64 slen, uint64 why) {
     write(2, "\n", 1)
     diag_span_of(asm_cur_tok)
     fatal_exit()
+}
+
+// A1 (#276): register 31 spelled as the register the field does not mean.
+fn asm_a64_sp_fatal(uint64 sptr, uint64 slen) {
+    asm_a64_form_fatal(sptr, slen, "register 31 here is the stack pointer; 'xzr' cannot be encoded (#276)")
+}
+fn asm_a64_zr_fatal(uint64 sptr, uint64 slen) {
+    asm_a64_form_fatal(sptr, slen, "register 31 here is the zero register; 'sp' cannot be encoded (#276)")
 }
