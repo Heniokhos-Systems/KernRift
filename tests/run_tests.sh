@@ -5968,7 +5968,7 @@ mutants = [
         'for p in qemu-user llvm; do\n  ' + APT + '"$p"\ndone'), BF), 1),
     ('no binfmt check after a qemu-user install', wf(GOOD, ('x', APT + '--no-install-recommends qemu-user')), 1),
     ('a silent qemu_bin substitution', wf(GOOD, BF, ('x', 'Q=$(. tests/helpers/qemu_bin.sh; qemu_bin aarch64)')), 1),
-    ('a qemu-<arch>-static binary', wf(GOOD, BF, ('x', 'qemu-aarch64' + '-static /tmp/a')), 1),
+    ('a qemu-<arch>-static binary', wf(GOOD, BF, ('x', 'qemu-aarch64' + '-static a.out')), 1),
 ]
 bad = []
 for label, text, want in mutants:
