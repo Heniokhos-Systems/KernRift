@@ -968,6 +968,8 @@ fn emit_a64_static_store(uint64 data_offset) {
 // registers, a struct of <= 16 bytes as one or two x-register eightbytes, a
 // larger struct as its address; floats in d0-d7. Integer and float arguments
 // count separately; those that find no register go to the stack in order.
+// The `call_ptr` token of the call being lowered, for the located refusal below.
+static uint64 a64_cp_tok = 0
 fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, uint64 fkp, uint64 sfp) {
     // Pass 1: expand into (slot, is_float) pairs in fresh frame slots.
     uint64 xn = 0
@@ -1122,9 +1124,7 @@ fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, 
     }
     uint64 stack_bytes = cg_a64_stack_area(novf)
     if target_os == 2 && stack_bytes > cg_a64_call_area(arg_count) {
-        uint64 e2 = "error: call_ptr: by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy\n"
-        write(2, e2, str_len(e2))
-        fatal_exit()
+        diag_fatal_at(a64_cp_tok, "call_ptr: by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy")
     }
     if stack_bytes > 0 {
         uw_sp_site_set("G4")
@@ -3704,6 +3704,7 @@ fn gen_expr_a64_node(uint64 node) {
                 weval = anxt
             }
             if cpa_special != 0 {
+                a64_cp_tok = ast_data1(node)
                 a64_call_ptr_aapcs(ptr_slot, arg_slots_base, arg_count, cpa_fk, cpa_sf)
                 return
             }
@@ -5274,9 +5275,7 @@ fn gen_expr_a64_node(uint64 node) {
                     a5_a = a5_a + 1
                 }
                 if target_os == 2 && cg_a64_stack_area(a5_nstack) > cg_a64_call_area(arg_count) {
-                    uint64 a5_we = "error: by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy\n"
-                    write(2, a5_we, str_len(a5_we))
-                    fatal_exit()
+                    diag_fatal_at(ast_data1(node), "by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy")
                 }
                 uint64 a5_w = 0
                 while a5_w < a5_xn {
