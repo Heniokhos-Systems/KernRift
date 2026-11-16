@@ -20701,8 +20701,48 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     out_len = 0
 
-    // Merge text+data into one section (we use the same trick as ELF).
-    uint64 section_size = text_len + data_len
+    // #301: statics get their own __DATA,__data section at address text_len
+    // (= data_start, so the x86_64 displacements baked against the blob stay
+    // right), reached through relocations: x86_64 a section-relative
+    // X86_64_RELOC_SIGNED per site; arm64 ARM64_RELOC_PAGE21 + PAGEOFF12
+    // against a section-start local symbol (ltmp0 / ltmp1) with
+    // ARM64_RELOC_ADDEND, as the LLVM assembler writes them. arm64 string
+    // and fn_addr pairs (#298/#299) get the same pair against ltmp0.
+    uint64 section_size = text_len
+    uint64 has_data = 0
+    if data_len > 0 { has_data = 1 }
+    uint64 n_sfix = 0
+    if has_data != 0 { n_sfix = static_fixup_count }
+    uint64 n_pc = 0
+    if arch == 1 { n_pc = a64_pc_count() }
+    uint64 n_ltmp = 0
+    if arch == 1 && n_pc > 0 { n_ltmp = 1 }
+    if arch == 1 && n_sfix > 0 { n_ltmp = 2 }
+    if arch == 1 {
+        uint64 zi = 0
+        while zi < n_sfix + n_pc {
+            uint64 zsite = 0
+            if zi < n_sfix {
+                uint64 zfe = static_fixups + zi * 8
+                uint32 zc = 0
+                unsafe { *(zfe as uint32) -> zc }
+                zsite = zc
+            } else {
+                zsite = a64_pc_site(zi - n_sfix)
+            }
+            uint64 zp = blob + zsite
+            uint32 zw = 0
+            unsafe { *(zp as uint32) -> zw }
+            uint32 zw1 = zw & 0x9F00001F
+            unsafe { *(zp as uint32) = zw1 }
+            uint64 zp2 = zp + 4
+            uint32 zw2 = 0
+            unsafe { *(zp2 as uint32) -> zw2 }
+            uint32 zw3 = zw2 & 0xFFC003FF
+            unsafe { *(zp2 as uint32) = zw3 }
+            zi = zi + 1
+        }
+    }
 
     // Build string table:
     //   idx 0: \0 (null)
@@ -20786,14 +20826,43 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    uint64 ltmp0_str = strtab_len
+    if n_ltmp > 0 {
+        uint64 lt = 0
+        while lt < 2 {
+            uint64 lp0 = strtab_buf + strtab_len
+            uint8 c_l = 108
+            unsafe { *(lp0 as uint8) = c_l }
+            uint64 lp1 = lp0 + 1
+            uint8 c_t = 116
+            unsafe { *(lp1 as uint8) = c_t }
+            uint64 lp2 = lp0 + 2
+            uint8 c_m = 109
+            unsafe { *(lp2 as uint8) = c_m }
+            uint64 lp3 = lp0 + 3
+            uint8 c_p = 112
+            unsafe { *(lp3 as uint8) = c_p }
+            uint64 lp4 = lp0 + 4
+            uint8 c_d = 48 + lt
+            unsafe { *(lp4 as uint8) = c_d }
+            uint64 lp5 = lp0 + 5
+            unsafe { *(lp5 as uint8) = nul }
+            strtab_len = strtab_len + 6
+            lt = lt + 1
+        }
+    }
+
     // Layout offsets
     uint64 hdr_size = 288  // mach_header + LC_SEGMENT_64 + LC_SYMTAB + LC_DYSYMTAB
+    if has_data != 0 { hdr_size = 288 + 80 }
     uint64 text_off = hdr_size
-    uint64 text_end = text_off + section_size
+    uint64 text_end = text_off + section_size + data_len
     // Align to 8
     uint64 pad_text = (8 - (text_end & 7)) & 7
     uint64 reloc_off = text_end + pad_text
-    uint64 nreloc = extern_call_count
+    uint64 n_srel = n_sfix
+    if arch == 1 { n_srel = (n_sfix + n_pc) * 4 }
+    uint64 nreloc = extern_call_count + n_srel
     uint64 reloc_end = reloc_off + nreloc * 8
     uint64 sym_count = 0
     if main_fn_idx != 0xFFFFFFFF { sym_count = 1 }
@@ -20801,14 +20870,19 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Add local (non-main) functions as N_SECT (not strictly needed but keeps parity)
     uint64 local_sym_count = fn_count - sym_count + extern_fn_count
     // Actually, we emit: locals first (non-main fns), then extdef (main), then undef (externs).
-    uint64 nlocal = 0
-    if main_fn_idx != 0xFFFFFFFF {
-        nlocal = fn_count - 1
-    } else {
-        nlocal = fn_count
-    }
+    // #296 (Mach-O side): main and every @export function are external.
     uint64 nextdef = 0
-    if main_fn_idx != 0xFFFFFFFF { nextdef = 1 }
+    uint64 xfi = 0
+    while xfi < fn_count {
+        uint64 xfe = fn_table + xfi * 8
+        uint32 xft = 0
+        unsafe { *(xfe as uint32) -> xft }
+        uint64 wxft = xft
+        if xfi == main_fn_idx || export_fn_is_exported(wxft) != 0 { nextdef = nextdef + 1 }
+        xfi = xfi + 1
+    }
+    uint64 nlocal = fn_count - nextdef + n_ltmp
+    uint64 ltmp_base = fn_count - nextdef
     uint64 nundef = extern_fn_count
     uint64 total_syms = nlocal + nextdef + nundef
     uint64 symtab_off = reloc_end
@@ -20826,23 +20900,23 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     emit_u32_le(1)                   // MH_OBJECT
     emit_u32_le(3)                   // ncmds
-    emit_u32_le(152 + 24 + 80)       // sizeofcmds = 256
+    emit_u32_le(152 + 80 * has_data + 24 + 80)   // sizeofcmds
     emit_u32_le(0x2000)              // MH_SUBSECTIONS_VIA_SYMBOLS
     emit_u32_le(0)                   // reserved
 
     // --- LC_SEGMENT_64 (72 header + 80 section = 152) ---
     emit_u32_le(0x19)                // LC_SEGMENT_64
-    emit_u32_le(152)                 // cmdsize
+    emit_u32_le(152 + 80 * has_data) // cmdsize
     // segname: empty (16 bytes of zero)
     uint64 pi = 0
     while pi < 16 { emit_byte(0); pi = pi + 1 }
     emit_u64_le(0)                   // vmaddr
-    emit_u64_le(section_size)        // vmsize
+    emit_u64_le(section_size + data_len)  // vmsize
     emit_u64_le(text_off)            // fileoff
-    emit_u64_le(section_size)        // filesize
+    emit_u64_le(section_size + data_len)  // filesize
     emit_u32_le(7)                   // maxprot
     emit_u32_le(7)                   // initprot
-    emit_u32_le(1)                   // nsects
+    emit_u32_le(1 + has_data)        // nsects
     emit_u32_le(0)                   // flags
 
     // Section: __text,__TEXT
@@ -20864,6 +20938,23 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_u32_le(nreloc)              // nreloc
     emit_u32_le(0x80000400)          // S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
     emit_u32_le(0); emit_u32_le(0); emit_u32_le(0)  // reserved
+    if has_data != 0 {
+        // Section: __data,__DATA
+        emit_byte(95); emit_byte(95); emit_byte(100); emit_byte(97)
+        emit_byte(116); emit_byte(97); emit_byte(0); emit_byte(0)
+        emit_u64_le(0)
+        emit_byte(95); emit_byte(95); emit_byte(68); emit_byte(65)
+        emit_byte(84); emit_byte(65); emit_byte(0); emit_byte(0)
+        emit_u64_le(0)
+        emit_u64_le(section_size)        // addr = data_start
+        emit_u64_le(data_len)            // size
+        emit_u32_le(text_off + section_size)  // offset
+        emit_u32_le(3)                   // align = 2^3
+        emit_u32_le(0)                   // reloff
+        emit_u32_le(0)                   // nreloc
+        emit_u32_le(0)                   // S_REGULAR
+        emit_u32_le(0); emit_u32_le(0); emit_u32_le(0)
+    }
 
     // --- LC_SYMTAB (24 bytes) ---
     emit_u32_le(2)                   // LC_SYMTAB
@@ -20891,7 +20982,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // --- Section content ---
     mi = 0
-    while mi < section_size {
+    while mi < section_size + data_len {
         uint64 p = blob + mi
         uint64 bv = 0
         unsafe { *(p as uint8) -> bv }
@@ -20907,7 +20998,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Symbol index for externs starts at nlocal + nextdef.
     uint64 undef_base = nlocal + nextdef
     uint64 ri = 0
-    while ri < nreloc {
+    while ri < extern_call_count {
         uint64 re = extern_call_sites + ri * 16
         uint32 rco = 0
         unsafe { *(re as uint32) -> rco }
@@ -20929,12 +21020,53 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u32_le(info)
         ri = ri + 1
     }
+    uint64 sr = 0
+    while sr < n_sfix + n_pc {
+        uint64 rsite = 0
+        uint64 rtarget = 0
+        uint64 rsec = 1                  // ltmp index: 0 = __text, 1 = __data
+        uint64 rsecond = 4               // ARM64_RELOC_PAGEOFF12
+        if sr < n_sfix {
+            uint64 rfe = static_fixups + sr * 8
+            uint32 rc = 0
+            unsafe { *(rfe as uint32) -> rc }
+            uint64 rfe4 = rfe + 4
+            uint32 rd = 0
+            unsafe { *(rfe4 as uint32) -> rd }
+            rsite = rc
+            rtarget = rd
+        } else {
+            rsite = a64_pc_site(sr - n_sfix)
+            rtarget = a64_pc_target(sr - n_sfix)
+            rsec = 0
+        }
+        if arch == 0 {
+            emit_u32_le(rsite)
+            // symbolnum = section ordinal 2, pcrel, length 2, extern 0, X86_64_RELOC_SIGNED (1)
+            emit_u32_le(2 | (1 << 24) | (2 << 25) | (1 << 28))
+        } else {
+            uint64 lsym = ltmp_base + rsec
+            emit_u32_le(rsite)
+            emit_u32_le((rtarget & 0xFFFFFF) | (2 << 25) | (10 << 28))     // ARM64_RELOC_ADDEND
+            emit_u32_le(rsite)
+            emit_u32_le(lsym | (1 << 24) | (2 << 25) | (1 << 27) | (3 << 28))  // ARM64_RELOC_PAGE21
+            emit_u32_le(rsite + 4)
+            emit_u32_le((rtarget & 0xFFFFFF) | (2 << 25) | (10 << 28))     // ARM64_RELOC_ADDEND
+            emit_u32_le(rsite + 4)
+            emit_u32_le(lsym | (2 << 25) | (1 << 27) | (rsecond << 28))      // ARM64_RELOC_PAGEOFF12
+        }
+        sr = sr + 1
+    }
 
     // --- nlist_64 symbol table ---
     // 1) Locals: all non-main functions (N_SECT | external=0)
     uint64 sfi = 0
     while sfi < fn_count {
-        if sfi != main_fn_idx {
+        uint64 sfe0 = fn_table + sfi * 8
+        uint32 sft0 = 0
+        unsafe { *(sfe0 as uint32) -> sft0 }
+        uint64 wsft0 = sft0
+        if sfi != main_fn_idx && export_fn_is_exported(wsft0) == 0 {
             uint64 fop2 = fn_str_offs + sfi * 8
             uint64 so = 0
             unsafe { *(fop2 as uint64) -> so }
@@ -20951,7 +21083,38 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         }
         sfi = sfi + 1
     }
-    // 2) Extdef: main
+    // ltmp0 (__text start), ltmp1 (__data start): relocation targets
+    uint64 ltn = 0
+    while ltn < n_ltmp {
+        emit_u32_le(ltmp0_str + ltn * 6)
+        emit_byte(0x0E)
+        emit_byte(1 + ltn)
+        emit_u16_le(0)
+        if ltn == 0 { emit_u64_le(0) } else { emit_u64_le(section_size) }
+        ltn = ltn + 1
+    }
+    // 2) Extdef: every @export function, then main
+    uint64 efi = 0
+    while efi < fn_count {
+        uint64 efe = fn_table + efi * 8
+        uint32 eft = 0
+        unsafe { *(efe as uint32) -> eft }
+        uint64 weft = eft
+        if efi != main_fn_idx && export_fn_is_exported(weft) != 0 {
+            uint64 efo = fn_str_offs + efi * 8
+            uint64 eso = 0
+            unsafe { *(efo as uint64) -> eso }
+            emit_u32_le(eso)
+            emit_byte(0x0F)
+            emit_byte(1)
+            emit_u16_le(0)
+            uint64 efe4 = efe + 4
+            uint32 ecoff = 0
+            unsafe { *(efe4 as uint32) -> ecoff }
+            emit_u64_le(ecoff)
+        }
+        efi = efi + 1
+    }
     if main_fn_idx != 0xFFFFFFFF {
         uint64 fop3 = fn_str_offs + main_fn_idx * 8
         uint64 so2 = 0
