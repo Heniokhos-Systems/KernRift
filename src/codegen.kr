@@ -12637,7 +12637,9 @@ fn asm_a64_reg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
         if a64_np_regish != 0 { asm_a64_name_fatal(sptr, slen, off, e - off) }
         return 0xFF
     }
-    if a64_np_kind != 1 && a64_np_kind != 3 && a64_np_kind != 5 { return 0xFF }   // w, wsp, wzr, fp, lr
+    if a64_np_kind == 2 || a64_np_kind == 4 || a64_np_kind == 6 { asm_unsupported(sptr, slen, "a 32-bit register ('w0')", 0) }
+    if a64_np_kind == 7 { asm_unsupported(sptr, slen, "the alias 'fp'", "  write x29\n") }
+    if a64_np_kind == 8 { asm_unsupported(sptr, slen, "the alias 'lr'", "  write x30\n") }
     a64_tok_len = e - off
     if a64_np_kind == 3 { a64_reg_sp = 1 }
     return r
@@ -12914,7 +12916,7 @@ fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rba
     if rm != 0xFF {
         // shifted-register form: 31 is xzr in every field (#276); sp needs the
         // extended-register form, which is not accepted
-        if rd_sp != 0 || rn_sp != 0 || a64_reg_sp != 0 { asm_a64_operr(sptr, slen) }
+        if rd_sp != 0 || rn_sp != 0 || a64_reg_sp != 0 { asm_unsupported(sptr, slen, "the extended-register form of add/sub (sp with a register operand)", 0) }
         asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(rbase | (rm << 16) | (rn << 5) | rd)
         return
@@ -12945,8 +12947,14 @@ fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
     if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt: 31 is xzr (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
-    o = asm_a64_want(sptr, o, slen, 91)
-    if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+    uint64 ob = asm_a64_want(sptr, o, slen, 91)
+    if ob == 0xFFFFFFFF {
+        // `ldr xT, =imm` / `ldr xT, label`: the literal (PC-relative) form
+        uint64 lc = load8(sptr + asm_a64_ws(sptr, o, slen))
+        if is_load != 0 && (lc == 61 || (lc >= 97 && lc <= 122)) { asm_unsupported(sptr, slen, "a literal (pc-relative) load", 0) }
+        asm_a64_operr(sptr, slen)
+    }
+    o = ob
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
     if rn == 31 && a64_reg_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // base: 31 is sp
@@ -12956,6 +12964,7 @@ fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
     uint64 has_imm = 0
     if o < slen && load8(sptr + o) == 44 {
         o = asm_a64_ws(sptr, o + 1, slen)
+        if asm_a64_reg(sptr, o, slen) != 0xFF { asm_unsupported(sptr, slen, "a register offset", 0) }
         iv = asm_a64_imm(sptr, o, slen)
         if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
         neg = a64_imm_neg
@@ -12973,6 +12982,7 @@ fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
             o = o + 1
         } else if c == 44 && has_imm == 0 {
             o = asm_a64_ws(sptr, o + 1, slen)
+            if asm_a64_reg(sptr, o, slen) != 0xFF { asm_unsupported(sptr, slen, "a register offset", 0) }
             iv = asm_a64_imm(sptr, o, slen)
             if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
             neg = a64_imm_neg
@@ -12986,7 +12996,7 @@ fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
         // negative or unaligned displacement is not representable (LDUR/STUR
         // can; it is a different instruction and is not spelled `ldr`), and
         // dividing it silently would address a different word.
-        if neg != 0 || (iv & 7) != 0 { asm_a64_operr(sptr, slen) }
+        if neg != 0 || (iv & 7) != 0 { asm_unsupported(sptr, slen, "an unscaled offset (ldur/stur)", "  use a multiple of 8 from 0 to 32760, or a pre/post-index form\n") }
         if iv > 32760 { asm_a64_operr(sptr, slen) }
         emit_a64(base | ((iv / 8) << 10) | (rn << 5) | rt)
         return
@@ -13568,6 +13578,7 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "str ", 4) != 0 { asm_a64_ldst(sptr, slen, 4, 0xF9000000)  return }
     if asm_match(sptr, 0, "stp ", 4) != 0 { asm_a64_pair(sptr, slen, 4, 0)  return }
     if asm_match(sptr, 0, "ldp ", 4) != 0 { asm_a64_pair(sptr, slen, 4, 1)  return }
+    asm_a64_fallthrough(sptr, slen)      // A1: a known form it does not encode, located (#245)
     // Unrecognized mnemonic — hard error.
     uint64 wmsg_9167 = "error: unrecognized asm instruction '"
     write(2, wmsg_9167, str_len(wmsg_9167))
@@ -21709,6 +21720,12 @@ fn asm_a64_end(uint64 sptr, uint64 slen, uint64 o) {
     uint64 i = o
     while i < slen && asm_blank(load8(sptr + i)) != 0 { i = i + 1 }
     if i >= slen { return }
+    if load8(sptr + i) == 44 {
+        uint64 j = asm_a64_ws(sptr, i + 1, slen)
+        if asm_match(sptr, j, "lsl", 3) != 0 || asm_match(sptr, j, "lsr", 3) != 0 || asm_match(sptr, j, "asr", 3) != 0 || asm_match(sptr, j, "ror", 3) != 0 || asm_match(sptr, j, "msl", 3) != 0 || asm_match(sptr, j, "uxt", 3) != 0 || asm_match(sptr, j, "sxt", 3) != 0 {
+            asm_unsupported(sptr, slen, "a shifted or extended operand", 0)
+        }
+    }
     asm_trailing_fatal(sptr, slen, i)
 }
 
@@ -21744,4 +21761,99 @@ fn asm_a64_sp_fatal(uint64 sptr, uint64 slen) {
 }
 fn asm_a64_zr_fatal(uint64 sptr, uint64 slen) {
     asm_a64_form_fatal(sptr, slen, "register 31 here is the zero register; 'sp' cannot be encoded (#276)")
+}
+
+// ---------------------------------------------------------------------------
+// A1 (Q2, #245): refuse, don't extend. A form the arm64 inline assembler does
+// not encode is a located "not supported" error naming it; hint 0 = the
+// raw-hex hint.
+fn asm_unsupported(uint64 sptr, uint64 slen, uint64 what, uint64 hint) {
+    diag_loc_head(asm_cur_tok, 0)
+    uint64 m1 = "arm64 asm '"
+    write(2, m1, str_len(m1))
+    write(2, sptr, slen)
+    write(2, "': ", 3)
+    write(2, what, str_len(what))
+    uint64 m2 = " is not supported by the inline assembler (#245)\n"
+    write(2, m2, str_len(m2))
+    diag_span_of(asm_cur_tok)
+    if hint == 0 { hint = "  use a raw hex word for it, e.g. asm { \"0xD503201F\" }\n" }
+    write(2, hint, str_len(hint))
+    fatal_exit()
+}
+
+// The mnemonics asm_emit_a64 accepts -- the asm_match(sptr, 0, ...) keywords
+// of that function; tests/helpers/asm_write_class_cover.py fails when the two
+// differ. Used only to word the refusal of an accepted mnemonic's unsupported
+// operation or option.
+fn asm_a64_accepted() -> uint64 { return "|nop|wfi|wfe|sev|isb|dsb|dmb|dc|ic|tlbi|msr|smc|hvc|brk|ret|eret|svc|mrs|mov|movz|movk|and|orr|eor|bic|orn|add|sub|br|blr|ldr|str|stp|ldp|" }
+
+// Reached only when no accepted form matched (asm_emit_a64, just before its
+// `unrecognized` error): an accepted mnemonic with an unsupported operation or
+// barrier option, or followed by text it does not take, and a known A64
+// mnemonic (M3's write-classification lists and the conditional branches) the
+// assembler does not encode, are refused located. Anything else returns, and
+// the caller prints `unrecognized asm instruction`.
+fn asm_a64_fallthrough(uint64 sptr, uint64 slen) {
+    uint64 e = 0
+    while e < slen && win_asm_is_word_char(load8(sptr + e)) != 0 { e = e + 1 }
+    uint64 mlen = e
+    if mlen == 0 { return }
+    uint64 o = asm_a64_ws(sptr, e, slen)
+    uint64 oe = o
+    while oe < slen && win_asm_is_word_char(load8(sptr + oe)) != 0 { oe = oe + 1 }
+    if asm_wc_in(asm_a64_accepted(), sptr, 0, mlen, 0) != 0 {
+        uint64 dmb = 0
+        if mlen == 3 && (asm_match(sptr, 0, "dsb", 3) != 0 || asm_match(sptr, 0, "dmb", 3) != 0) { dmb = 1 }
+        uint64 sysop = 0
+        if (mlen == 2 && (asm_match(sptr, 0, "dc", 2) != 0 || asm_match(sptr, 0, "ic", 2) != 0)) || (mlen == 4 && asm_match(sptr, 0, "tlbi", 4) != 0) { sysop = 1 }
+        // a supported option / operation followed by more text is trailing text
+        uint64 okops = "|sy|ish|"
+        if sysop != 0 { okops = "|cvac|cvau|civac|cvap|ivac|isw|csw|cisw|ivau|iallu|ialluis|vmalle1is|vmalle1|alle1|alle2|alle3|" }
+        if (dmb != 0 || sysop != 0) && oe > o && asm_wc_in(okops, sptr, o, oe - o, 0) != 0 {
+            uint64 after = oe
+            if sysop != 0 && oe < slen && load8(sptr + oe) == 44 { after = slen }
+            if after < slen { asm_trailing_fatal(sptr, slen, asm_a64_ws(sptr, after, slen)) }
+            return
+        }
+        if (dmb != 0 || sysop != 0) && oe > o {
+            uint64 tmp = cg_alloc(96)
+            uint64 p = 0
+            uint64 pre = "the barrier option '"
+            if sysop != 0 {
+                pre = "the dc operation '"
+                if load8(sptr) == 105 { pre = "the ic operation '" }
+                if load8(sptr) == 116 { pre = "the tlbi operation '" }
+            }
+            uint64 pl = str_len(pre)
+            uint64 q = 0
+            while q < pl { store8(tmp + p, load8(pre + q))  p = p + 1  q = q + 1 }
+            q = o
+            while q < oe && p < 90 { store8(tmp + p, load8(sptr + q))  p = p + 1  q = q + 1 }
+            store8(tmp + p, 39)  store8(tmp + p + 1, 0)
+            asm_unsupported(sptr, slen, tmp, 0)
+        }
+        // an accepted no-operand word with something after it: `nop x`, `ret x1`
+        if o < slen { asm_trailing_fatal(sptr, slen, o) }
+        return
+    }
+    uint64 known = 0
+    if asm_wc_in(asm_wc_none(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_first(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_both(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_status(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_second_fam(), sptr, 0, mlen, 1) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_both_fam(), sptr, 0, mlen, 1) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_none_fam(), sptr, 0, mlen, 1) != 0 { known = 1 }
+    if asm_wc_cond_branch(sptr, 0, mlen) != 0 { known = 1 }
+    if known == 0 { return }
+    uint64 tm = cg_alloc(64)
+    uint64 pp = 0
+    uint64 pr = "the mnemonic '"
+    uint64 k = 0
+    while k < 14 { store8(tm + pp, load8(pr + k))  pp = pp + 1  k = k + 1 }
+    k = 0
+    while k < mlen && pp < 60 { store8(tm + pp, load8(sptr + k))  pp = pp + 1  k = k + 1 }
+    store8(tm + pp, 39)  store8(tm + pp + 1, 0)
+    asm_unsupported(sptr, slen, tm, 0)
 }
