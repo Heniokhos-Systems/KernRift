@@ -862,7 +862,7 @@ fn rv_emit_pcrel_pair(uint64 rd, uint64 table_sel, uint64 payload) {
 // ---------------------------------------------------------------------------
 // Inline assembly (IR_ASM_BLOCK, op 96)
 //
-// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:13238). Like it,
+// asm_emit_rv is the riscv twin of asm_emit_a64 (codegen.kr:13340). Like it,
 // this is NOT a general assembler — it is a raw-hex-word passthrough plus a
 // small fixed intrinsic/CSR table. Accepted forms:
 //   1. "0xXXXXXXXX"       -> one 32-bit word, emitted verbatim (escape hatch).
@@ -991,18 +991,6 @@ fn rv_asm_field(uint64 sptr, uint64 from, uint64 slen) -> uint64 {
     return (o << 16) | (e - o)
 }
 
-// Offset of the byte after the next ',' at or after `from` (or slen if none).
-fn rv_asm_after_comma(uint64 sptr, uint64 from, uint64 slen) -> uint64 {
-    uint64 o = from
-    while o < slen {
-        uint64 c = 0
-        uint64 p = sptr + o
-        unsafe { *(p as uint8) -> c }
-        if c == 44 { return o + 1 }
-        o = o + 1
-    }
-    return slen
-}
 
 fn asm_emit_rv(uint64 str_tok) {
     uint64 tstart = tok_text_start(str_tok)
@@ -1010,9 +998,11 @@ fn asm_emit_rv(uint64 str_tok) {
     uint64 sptr = cg_source + tstart + 1     // skip opening quote
     uint64 slen = tlen - 2                    // drop both quotes
     if slen == 0 { return }
+    asm_one_insn(str_tok, sptr, slen, 2)    // A1 (#245): the text rules
+    slen = asm_cur_sl                        // trailing blanks trimmed once
 
     // ----- Raw hex word: "0xXXXXXXXX" -> one 32-bit word (LE). Primary
-    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:13245). -----
+    //       escape hatch; identical scan to asm_emit_a64 (codegen.kr:13349). -----
     uint64 fc = 0
     unsafe { *(sptr as uint8) -> fc }
     if fc == 48 && slen >= 4 {
@@ -1022,11 +1012,13 @@ fn asm_emit_rv(uint64 str_tok) {
         if sc == 120 {
             uint64 val = 0
             uint64 hi = 2
+            // A1 (#283): exactly eight hex digits, one word, as asm_emit_a64
+            if slen != 10 { rv_hexerr(sptr, slen) }
             while hi < slen {
                 uint64 haddr = sptr + hi
                 uint64 hc = 0
                 unsafe { *(haddr as uint8) -> hc }
-                if hc == 32 { hi = hi + 1; continue }
+                if asm_is_hex(sptr, hi) == 0 { rv_hexerr(sptr, slen) }
                 uint64 d = 0
                 if hc >= 48 && hc <= 57 { d = hc - 48 }
                 if hc >= 97 && hc <= 102 { d = hc - 87 }
@@ -1056,12 +1048,13 @@ fn asm_emit_rv(uint64 str_tok) {
     if asm_match(sptr, 0, "csrrw ", 6) != 0 {
         uint64 f1 = rv_asm_field(sptr, 6, slen)
         uint64 rd = rv_asm_regnum(sptr, f1 >> 16, f1 & 0xFFFF)
-        uint64 a2 = rv_asm_after_comma(sptr, 6, slen)
+        uint64 a2 = rv_asm_next_field(sptr, f1, slen, 0)
         uint64 f2 = rv_asm_field(sptr, a2, slen)
         uint64 csr = rv_asm_csr(sptr, f2 >> 16, f2 & 0xFFFF)
-        uint64 a3 = rv_asm_after_comma(sptr, a2, slen)
+        uint64 a3 = rv_asm_next_field(sptr, f2, slen, 0)
         uint64 f3 = rv_asm_field(sptr, a3, slen)
         uint64 rs = rv_asm_regnum(sptr, f3 >> 16, f3 & 0xFFFF)
+        rv_asm_next_field(sptr, f3, slen, 1)
         rv_i(csr, rs, 1, rd, 0x73)                // csrrw rd, csr, rs
         return
     }
@@ -1069,9 +1062,10 @@ fn asm_emit_rv(uint64 str_tok) {
     if asm_match(sptr, 0, "csrr ", 5) != 0 {
         uint64 f1 = rv_asm_field(sptr, 5, slen)
         uint64 rd = rv_asm_regnum(sptr, f1 >> 16, f1 & 0xFFFF)
-        uint64 a2 = rv_asm_after_comma(sptr, 5, slen)
+        uint64 a2 = rv_asm_next_field(sptr, f1, slen, 0)
         uint64 f2 = rv_asm_field(sptr, a2, slen)
         uint64 csr = rv_asm_csr(sptr, f2 >> 16, f2 & 0xFFFF)
+        rv_asm_next_field(sptr, f2, slen, 1)
         rv_i(csr, 0, 2, rd, 0x73)                 // csrrs rd, csr, x0
         return
     }
@@ -2290,7 +2284,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
             //
             // The code is NOT in `imm` — `imm` is 231, the exit_group syscall
             // number (ir.kr:2284). The code arrives in a0 via IR_ARG (op 51,
-            // ir_riscv.kr:1549 places arg i at RV_A0 + i), so the magic word
+            // ir_riscv.kr:1543 places arg i at RV_A0 + i), so the magic word
             // must be built at RUNTIME from a0.
             //
             // Only the fail encoding is used: 0x3333 | (0 << 16) exits qemu
@@ -2520,7 +2514,7 @@ fn ir_riscv_gen(uint64 fn_node) {
         // [sp+4]=&argv[0] (ILP32, 4-byte slots). The prologue already lowered sp
         // by total_frame, so argc/argv live at sp+total_frame+{0,4}. Stores go to
         // the data-segment statics via the pcrel pair (table_sel 1 = statics),
-        // exactly like IR_STATIC_STORE (ir_riscv.kr:1700-1705) — NOT sp-relative.
+        // exactly like IR_STATIC_STORE (ir_riscv.kr:1694-1699) — NOT sp-relative.
         // Mirror of codegen_aarch64.kr:6476-6529 (Linux branch), 4-byte words.
         uint32 fn_name_tok_tr = ast_data1(fn_node)
         uint64 wnt_tr = fn_name_tok_tr
@@ -2832,7 +2826,7 @@ fn resolve_fixups_riscv() {
 //     addi  rd, rd, %lo(disp)  @ site + 4
 // with disp = (str_start + str_offset) - site, pc-relative from the auipc.
 // The +0x800 hi-rounding compensates addi's sign-extension exactly as the
-// call resolver's jalr does (ir_riscv.kr:2795-2800). Pure file-offset math —
+// call resolver's jalr does (ir_riscv.kr:2789-2794). Pure file-offset math —
 // the flat raw image maps file offset 0 to VA 0x8000_0000, so no VA needed.
 // rd is recovered from the placeholder auipc word (the resolver is handed the
 // site, not rd). Both words are fully re-encoded, never read-modify-OR.
@@ -2934,7 +2928,7 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
 // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7047-7146), identical to
-// the x86 resolver (codegen.kr:16092-16156).
+// the x86 resolver (codegen.kr:16187-16251).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
     while i < fnaddr_fixup_count {
@@ -3000,7 +2994,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:16151-16152, codegen_aarch64.kr:7141-7142): without
+            // (codegen.kr:16246-16247, codegen_aarch64.kr:7141-7142): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)
@@ -3010,4 +3004,29 @@ fn resolve_fnaddr_fixups_riscv() {
         }
         i = i + 1
     }
+}
+
+// A1 (#283, #288): after field f (as rv_asm_field returns it) only blanks,
+// then a comma (last == 0: returns the offset after it) or the end (last != 0).
+// Anything else is text after the instruction -- the comma scan this replaces
+// skipped to the next comma, so `csrr a0 junk, mstatus` built.
+fn rv_asm_next_field(uint64 sptr, uint64 f, uint64 slen, uint64 last) -> uint64 {
+    uint64 i = (f >> 16) + (f & 0xFFFF)
+    while i < slen && asm_blank(load8(sptr + i)) != 0 { i = i + 1 }
+    if last != 0 {
+        if i < slen { asm_trailing_fatal(sptr, slen, i) }
+        return slen
+    }
+    if i >= slen || load8(sptr + i) != 44 { asm_trailing_fatal(sptr, slen, i) }
+    return i + 1
+}
+
+fn rv_hexerr(uint64 sptr, uint64 slen) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "riscv32 asm '", 13)
+    write(2, sptr, slen)
+    uint64 m = "': raw hex is exactly eight hex digits after 0x, one word per string (#283)\n"
+    write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
 }

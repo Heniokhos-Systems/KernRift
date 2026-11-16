@@ -126,8 +126,8 @@ nothing, i.e. that mode was already using the legacy backend.
 | **`--emit=obj` / `-c`** | **legacy** | byte-identical with and without `--legacy` (160 B both) |
 | **`--emit=lkm`** | **legacy** | byte-identical with and without `--legacy` |
 | `--emit=image`, `--emit=uefi` | **IR** | the gate excludes only modes 3 and 7; the usual "differs from `--legacy`" evidence is *unavailable* here — both require `--target=none`, and `--legacy` is refused under it (`t6_legacy_tnone_*`), so there is no legacy build to diff against |
-| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:11151`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
-| `--emit=fatimage` (mode 11) | **IR**, per slice | never reaches the gate as 11: `compile_fatimage` (`src/main.kr:9806`) calls `compile()` per slice as mode 9 (x86_64 UEFI) and mode 8 (x86_64 and arm64 image), both IR. Requires `--target=none` and `--arch=x86_64,arm64`, so `--legacy` is refused; `--O0` changes the bytes |
+| `--emit=arx`, `--emit=arxmod` (mode 10) | **IR** | the gate excludes only modes 3 and 7. Mode 10 forces `--target=none` (`src/main.kr:11177`) and refuses any other target, so `--legacy` is refused and there is no legacy build to diff; instead `--O0` (IR-only) changes the bytes on x86_64 and arm64, for both spellings. riscv32 and xtensa are refused (no ARX form) |
+| `--emit=fatimage` (mode 11) | **IR**, per slice | never reaches the gate as 11: `compile_fatimage` (`src/main.kr:9832`) calls `compile()` per slice as mode 9 (x86_64 UEFI) and mode 8 (x86_64 and arm64 image), both IR. Requires `--target=none` and `--arch=x86_64,arm64`, so `--legacy` is refused; `--O0` changes the bytes |
 | `--arch=riscv32`, `--arch=xtensa` (any emit mode) | **IR** | no legacy backend exists for these arches; `--legacy` is a silent no-op |
 | `--emit=ir` | neither — lowering only | the `if emit_mode == 6` block in `compile()`, `src/main.kr` — exits before codegen |
 
@@ -214,8 +214,8 @@ $ krc --emit=ir prog.kr     # prog.kr does `println(some_f64)`
 
 ## 3. The per-OS dispatch shape, and where a new case goes
 
-`target_os` values (parsed at `src/main.kr:10763`, derived from `--emit` at
-`src/main.kr:11121`–`11123`, reset per slice by `compile_fat` at `src/main.kr:7365` and `src/main.kr:8193`):
+`target_os` values (parsed at `src/main.kr:10789`, derived from `--emit` at
+`src/main.kr:11147`–`11149`, reset per slice by `compile_fat` at `src/main.kr:7391` and `src/main.kr:8219`):
 
 <!-- The previous version of this line read "assigned in 9011-5258, defaults at
      3631/3859/4113/4361/4486/4618". The range ran backwards and every one of
@@ -276,7 +276,7 @@ by the command above).
   guard cannot see it, because no trap instruction is emitted. Three such
   sites shipped in this compiler; see §9.
 - **A new arch × OS pair is validated by an allow-list**, not a blacklist:
-  `arch_os_pair_supported()` (`src/main.kr:8840`) is per-row
+  `arch_os_pair_supported()` (`src/main.kr:8866`) is per-row
   `if os == n { return 1 }` with a `return 0` fall-through, checked on the
   resolved pair before every compile entry. Adding an arch without adding its
   row is a hard error at the first build. Before it existed,
@@ -585,7 +585,7 @@ The old text called all six "riscv32-only". **That is wrong for 143**, which
 is created by the pow2-`MUL`→`SHL` strength reduction for *every* arch
 (`src/ir.kr:13783`) and has handlers on all four backends. 140–142 and
 144–145 are created only under `target_arch == 2` (`src/ir.kr:14020`), even
-though xtensa carries handlers for them (`src/ir_xtensa.kr:1957`, `1978`) —
+though xtensa carries handlers for them (`src/ir_xtensa.kr:1959`, `1980`) —
 those xtensa arms are dead code today.
 
 Shift-amount width is enforced in the *producer*, not the consumer:
@@ -603,8 +603,8 @@ Four emitters, one dispatch function each:
 |---|---|---|---|
 | x86_64 | `ir_emit_x86_insn` | `src/ir.kr:9752` | `x86_nyi_op`, `src/ir.kr:9352` |
 | AArch64 | `ir_emit_arm64_insn` | `src/ir_aarch64.kr:1270` | `a64_nyi_op`, `src/ir_aarch64.kr:906` |
-| RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1113` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
-| Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1713` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
+| RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1107` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
+| Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1715` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
 
 All four NYI helpers write `error: <arch>: IR op <N> not yet implemented\n`
 to fd 2 and `exit(1)`. **There is never a silent fallback.** RISC-V has a
@@ -663,7 +663,7 @@ Consequences worth stating plainly:
 - **`IR_NEG` (12) and `IR_NOT` (13) are unimplemented on riscv32 and
   xtensa**, and both *are* emitted by ordinary lowering, so `-x` and `~x` on
   a non-constant operand are hard build failures on those targets.
-- **`IR_ALLOC` (70) is hosted-only on riscv32** (`src/ir_riscv.kr:2070`
+- **`IR_ALLOC` (70) is hosted-only on riscv32** (`src/ir_riscv.kr:2064`
   opens `if freestanding != 0 { rv_nyi_op(op); return }`) **and absent on
   xtensa entirely.** Since structs and local arrays over the stack threshold
   lower to `IR_ALLOC`, they are unavailable on freestanding riscv32 and on
@@ -705,7 +705,7 @@ internal `fixup_table`; it never calls `extern_fn_lookup`. Extern symbols are
 the reason `--emit=obj` and `--emit=lkm` are routed to the legacy backend
 (§2).
 
-**One exception, and it is real:** `src/ir_riscv.kr:1587`–`1608` *does* emit
+**One exception, and it is real:** `src/ir_riscv.kr:1581`–`1602` *does* emit
 `R_RISCV_CALL_PLT` for an extern callee when `cg_emit_mode == 3`. riscv32 has
 no legacy backend, so `--emit=obj` there necessarily goes through the IR, and
 the relocation had to be implemented in it. Verified:
@@ -749,7 +749,7 @@ therefore cannot add an anonymous `IR_SYSCALL` by accident.
 
 Readers: `ir_insn_origin_at()` (`src/ir.kr:544`), called from the op-52
 handler on all three IR backends that have one (`src/ir.kr:11441`,
-`src/ir_aarch64.kr:2078`, `src/ir_riscv.kr:2352`). Each falls back to
+`src/ir_aarch64.kr:2078`, `src/ir_riscv.kr:2346`). Each falls back to
 `"an unnamed syscall lowering"` when the slot is 0 — never a guessed name.
 The table is also read by **codegen**: on Windows the op-52 dispatch copies the
 origin into `ir_win_sc_origin`, and the x86_64 and arm64 write arms read it
@@ -881,15 +881,15 @@ DCE-able: it reads the image's own data by name and cannot fault.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:16724`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:16819`). `_start` is not a seed, so freestanding riscv32 and
   xtensa (and `--emit=image`) entry points had to be added explicitly
-  (`src/main.kr:4590`–`4605`).
+  (`src/main.kr:4616`–`4631`).
 - **A provider reached only through override resolution gets pruned.** Under
   `--target=none`, `println` reroutes to the `@builtin_override fn write`
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:16554`–`16574`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:16649`–`16669`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.
@@ -903,9 +903,9 @@ The driver is `ir_optimize()` (`src/ir.kr:14746`). **There is no
 document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:13490`, written only at
-`src/main.kr:10938`) and each backend skips the whole call
-(`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2418`,
-`src/ir_xtensa.kr:2832`). Note the spelling: **`--O0`**, two dashes. There is
+`src/main.kr:10964`) and each backend skips the whole call
+(`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2412`,
+`src/ir_xtensa.kr:2834`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
 **What `--O0` does *not* disable**, because these live outside
@@ -1664,7 +1664,7 @@ removed; do not re-add them without re-verifying.
     stack pointer (#218); the source comment above the first site
     (`src/ir.kr:5496`) says so.
 12. **Dead handler arms.** Xtensa's `IR_AND_IMM`/`OR_IMM`/`XOR_IMM`/
-    `SHR_IMM`/`SAR_IMM` cases (`src/ir_xtensa.kr:1957`, `1978`) are
+    `SHR_IMM`/`SAR_IMM` cases (`src/ir_xtensa.kr:1959`, `1980`) are
     unreachable — their only producer (`src/ir.kr:14020`) is gated to
     `target_arch == 2` and xtensa is arch 3. Harmless, but do not mistake
     their presence for coverage. Relatedly, 140–145 are absent from **both**
@@ -1855,7 +1855,7 @@ opcodes that were never emitted.
 | cmp-with-immediate fusion | arch 0 **and** 1 (`src/ir.kr:13765`, arm64 capped at imm12 4095) | arch 0 only (`ir.mlr:11590`) |
 | pow2 `MUL` → `SHL_IMM` | ungated, with a shamt guard for arch 2/3 | present, gated to arch 0/1 — *not* absent, contrary to an older project note |
 | `--emit=lkm` | yes; the IR gate is `emit_mode != 3 && emit_mode != 7` | no; the gate is `emit_mode != 3` alone |
-| `arch_os_pair_supported()` | yes (`src/main.kr:8840`) | **absent** — no arch × OS allow-list |
+| `arch_os_pair_supported()` | yes (`src/main.kr:8866`) | **absent** — no arch × OS allow-list |
 | `--target=amdgpu-native` | no | yes |
 | var map | FNV-1a open-addressed 4096-slot hash (`src/ir.kr:1014`) | linear scan (`ir.mlr:1013`) |
 | per-BB instruction lists for colouring | flat lists via `ir_build_bb_lists` (`src/ir.kr:14502`) | a 65536-entry walk stack |

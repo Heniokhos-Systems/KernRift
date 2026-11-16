@@ -11654,6 +11654,9 @@ fn asm_parse_num(uint64 src, uint64 off, uint64 n) -> uint64 {
             if c >= 65 && c <= 70 { d = c - 55 }
         }
         if d >= base { return 0xFFFFFFFFFFFFFFFF }
+        // A1 (#289): refuse the digit that would wrap past 2^64
+        if base == 10 && (v > 1844674407370955161 || (v == 1844674407370955161 && d > 5)) { asm_x86_num_fatal() }
+        if base == 16 && v > 0x0FFFFFFFFFFFFFFF { asm_x86_num_fatal() }
         v = v * base + d
         digits = digits + 1
         i = i + 1
@@ -11914,11 +11917,12 @@ fn win_asm_is_frame_reg(uint64 src, uint64 off, uint64 n) -> uint64 {
         if n == 2 && asm_match(src, off, "bp", 2) != 0 { return 1 }
         return 0
     }
-    if n == 3 && asm_match(src, off, "x29", 3) != 0 { return 1 }
-    if n == 3 && asm_match(src, off, "w29", 3) != 0 { return 1 }
-    if n == 2 && asm_match(src, off, "fp", 2) != 0 { return 1 }
-    if n == 3 && asm_match(src, off, "x18", 3) != 0 { return 1 }
-    if n == 3 && asm_match(src, off, "w18", 3) != 0 { return 1 }
+    // arm64: the assembler's own register-name parser (#280, #287), lower-case
+    // spellings only (upper case is the x18/x29 checker's, M3 3.8 (c))
+    uint64 r = a64_name_parse(src, off, n)
+    if r == 0xFF || a64_np_upper != 0 { return 0 }
+    if r == 29 && (a64_np_kind == 1 || a64_np_kind == 2 || a64_np_kind == 7) { return 1 }
+    if r == 18 && (a64_np_kind == 1 || a64_np_kind == 2) { return 1 }
     return 0
 }
 
@@ -12065,6 +12069,8 @@ fn asm_emit_x86(uint64 str_tok) {
     uint64 sptr = cg_source + tstart + 1
     uint64 slen = tlen - 2
     if slen == 0 { return }
+    asm_one_insn(str_tok, sptr, slen, 0)    // A1 (#245): the text rules
+    slen = asm_cur_sl                        // trailing blanks trimmed once
 
     // Check for raw hex bytes: "0x0F 0x01 ..."
     uint64 fc = 0
@@ -12260,6 +12266,7 @@ fn asm_emit_x86(uint64 str_tok) {
                     uint64 numoff = m_s + 5
                     uint64 numlen = (slen - 1) - numoff
                     uint64 disp = asm_parse_num(sptr, numoff, numlen)
+                    if disp != 0xFFFFFFFFFFFFFFFF && disp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }   // a disp32 (#282)
                     uint64 m_d = asm_x86_reg(sptr, 4, m_c - 4)
                     if disp != 0xFFFFFFFFFFFFFFFF && m_d != 0xFFFF {
                         uint64 mrex = 0x48
@@ -12423,12 +12430,12 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "cld", 3) != 0 && slen == 3 { emit_byte(0xFC); return }
     if asm_match(sptr, 0, "std", 3) != 0 && slen == 3 { emit_byte(0xFD); return }
     // I/O instructions
-    if asm_match(sptr, 0, "in al, dx", 9) != 0 { emit_byte(0xEC); return }
-    if asm_match(sptr, 0, "in ax, dx", 9) != 0 { emit_byte(0x66); emit_byte(0xED); return }
-    if asm_match(sptr, 0, "in eax, dx", 10) != 0 { emit_byte(0xED); return }
-    if asm_match(sptr, 0, "out dx, al", 10) != 0 { emit_byte(0xEE); return }
-    if asm_match(sptr, 0, "out dx, ax", 10) != 0 { emit_byte(0x66); emit_byte(0xEF); return }
-    if asm_match(sptr, 0, "out dx, eax", 11) != 0 { emit_byte(0xEF); return }
+    if asm_match(sptr, 0, "in al, dx", 9) != 0 && asm_rest_blank(sptr, slen, 9) != 0 { emit_byte(0xEC); return }
+    if asm_match(sptr, 0, "in ax, dx", 9) != 0 && asm_rest_blank(sptr, slen, 9) != 0 { emit_byte(0x66); emit_byte(0xED); return }
+    if asm_match(sptr, 0, "in eax, dx", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0xED); return }
+    if asm_match(sptr, 0, "out dx, al", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0xEE); return }
+    if asm_match(sptr, 0, "out dx, ax", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x66); emit_byte(0xEF); return }
+    if asm_match(sptr, 0, "out dx, eax", 11) != 0 && asm_rest_blank(sptr, slen, 11) != 0 { emit_byte(0xEF); return }
     if asm_match(sptr, 0, "inb", 3) != 0 && slen == 3 { emit_byte(0xEC); return }
     if asm_match(sptr, 0, "outb", 4) != 0 && slen == 4 { emit_byte(0xEE); return }
     if asm_match(sptr, 0, "inw", 3) != 0 && slen == 3 { emit_byte(0x66); emit_byte(0xED); return }
@@ -12446,23 +12453,23 @@ fn asm_emit_x86(uint64 str_tok) {
     // handler: the place in a kernel where a reader can least afford to have
     // to decode them. ModRM 11 010 000 selects cr2 in the reg field and rax in
     // the rm field, which is the same shape as the cr3/cr4 rows above.
-    if asm_match(sptr, 0, "mov cr0, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xC0); return }
-    if asm_match(sptr, 0, "mov cr2, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD0); return }
-    if asm_match(sptr, 0, "mov cr3, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD8); return }
-    if asm_match(sptr, 0, "mov cr4, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xE0); return }
-    if asm_match(sptr, 0, "mov rax, cr0", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xC0); return }
-    if asm_match(sptr, 0, "mov rax, cr2", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD0); return }
-    if asm_match(sptr, 0, "mov rax, cr3", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD8); return }
-    if asm_match(sptr, 0, "mov rax, cr4", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xE0); return }
+    if asm_match(sptr, 0, "mov cr0, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xC0); return }
+    if asm_match(sptr, 0, "mov cr2, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD0); return }
+    if asm_match(sptr, 0, "mov cr3, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD8); return }
+    if asm_match(sptr, 0, "mov cr4, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xE0); return }
+    if asm_match(sptr, 0, "mov rax, cr0", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xC0); return }
+    if asm_match(sptr, 0, "mov rax, cr2", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD0); return }
+    if asm_match(sptr, 0, "mov rax, cr3", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD8); return }
+    if asm_match(sptr, 0, "mov rax, cr4", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xE0); return }
     // Privileged instructions
-    if asm_match(sptr, 0, "lgdt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x10); return }
-    if asm_match(sptr, 0, "lidt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x18); return }
+    if asm_match(sptr, 0, "lgdt [rax]", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x10); return }
+    if asm_match(sptr, 0, "lidt [rax]", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x18); return }
     // SIDT, lidt's counterpart: reads the IDTR back. Needed to verify that a
     // table was actually loaded -- without it a test can only check the value
     // the program THINKS it wrote, which a missing lidt would not disturb.
-    if asm_match(sptr, 0, "sidt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x08); return }
-    if asm_match(sptr, 0, "invlpg [rax]", 12) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x38); return }
-    if asm_match(sptr, 0, "ltr ax", 6) != 0 { emit_byte(0x0F); emit_byte(0x00); emit_byte(0xD8); return }
+    if asm_match(sptr, 0, "sidt [rax]", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x08); return }
+    if asm_match(sptr, 0, "invlpg [rax]", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x38); return }
+    if asm_match(sptr, 0, "ltr ax", 6) != 0 && asm_rest_blank(sptr, slen, 6) != 0 { emit_byte(0x0F); emit_byte(0x00); emit_byte(0xD8); return }
     // --- GS-relative absolute moves, the per-CPU slot a SYSCALL entry needs ---
     //
     // `mov gs:[<disp>], <reg64>` and `mov <reg64>, gs:[<disp>]`.
@@ -12498,6 +12505,7 @@ fn asm_emit_x86(uint64 str_tok) {
     // the moves above use, with no REX because PUSH defaults to 64-bit operand
     // size in long mode. Taken from GNU as, not the manual.
     if asm_match(sptr, 0, "push gs:[", 9) != 0 {
+        if asm_match(sptr, 9, "-", 1) != 0 { asm_x86_unsupported(sptr, slen, "a negative gs: displacement") }
         uint64 pclose = 9
         while pclose < slen {
             uint64 pc = 0
@@ -12505,8 +12513,9 @@ fn asm_emit_x86(uint64 str_tok) {
             if pc == 93 { break }
             pclose = pclose + 1
         }
-        if pclose < slen {
+        if pclose < slen && asm_rest_blank(sptr, slen, pclose + 1) != 0 {
             uint64 pdisp = asm_parse_num(sptr, 9, pclose - 9)
+            if pdisp != 0xFFFFFFFFFFFFFFFF && pdisp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }
             if pdisp != 0xFFFFFFFFFFFFFFFF {
                 emit_byte(0x65)
                 emit_byte(0xFF)
@@ -12518,6 +12527,7 @@ fn asm_emit_x86(uint64 str_tok) {
         }
     }
     if asm_match(sptr, 0, "mov gs:[", 8) != 0 {
+        if asm_match(sptr, 8, "-", 1) != 0 { asm_x86_unsupported(sptr, slen, "a negative gs: displacement") }
         uint64 gclose = 8
         while gclose < slen {
             uint64 gc = 0
@@ -12527,6 +12537,7 @@ fn asm_emit_x86(uint64 str_tok) {
         }
         if gclose < slen {
             uint64 gdisp = asm_parse_num(sptr, 8, gclose - 8)
+            if gdisp != 0xFFFFFFFFFFFFFFFF && gdisp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }
             // `], ` then the register.
             uint64 gr = asm_x86_reg(sptr, gclose + 3, slen - gclose - 3)
             if gdisp != 0xFFFFFFFFFFFFFFFF && gr != 0xFFFF {
@@ -12554,6 +12565,7 @@ fn asm_emit_x86(uint64 str_tok) {
             uint64 lr = asm_x86_reg(sptr, 4, lcomma - 4)
             // ", gs:[" is six characters, then the displacement to the "]".
             uint64 lopen = lcomma + 6
+            if lopen < slen && load8(sptr + lopen) == 45 { asm_x86_unsupported(sptr, slen, "a negative gs: displacement") }
             uint64 lclose = lopen
             while lclose < slen {
                 uint64 lc2 = 0
@@ -12562,7 +12574,8 @@ fn asm_emit_x86(uint64 str_tok) {
                 lclose = lclose + 1
             }
             uint64 ldisp = asm_parse_num(sptr, lopen, lclose - lopen)
-            if lr != 0xFFFF && lclose < slen && ldisp != 0xFFFFFFFFFFFFFFFF {
+            if ldisp != 0xFFFFFFFFFFFFFFFF && ldisp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }
+            if lr != 0xFFFF && lclose < slen && ldisp != 0xFFFFFFFFFFFFFFFF && asm_rest_blank(sptr, slen, lclose + 1) != 0 {
                 uint64 lrex = 0x48
                 if lr >= 8 { lrex = lrex | 0x04 }
                 emit_byte(0x65)
@@ -12624,31 +12637,24 @@ fn asm_a64_reg(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
     a64_tok_len = 0
     a64_reg_sp = 0
     if off >= slen { return 0xFF }
-    if asm_match(sptr, off, "xzr", 3) != 0 { a64_tok_len = 3  return 31 }
-    if asm_match(sptr, off, "sp", 2) != 0 { a64_tok_len = 2  a64_reg_sp = 1  return 31 }
-    uint64 c0 = 0
-    uint64 a0 = sptr + off
-    unsafe { *(a0 as uint8) -> c0 }
-    if c0 != 120 { return 0xFF }
-    uint64 i = off + 1
-    uint64 n = 0
-    uint64 digits = 0
-    while i < slen {
-        uint64 c = 0
-        uint64 a = sptr + i
-        unsafe { *(a as uint8) -> c }
-        if c < 48 { break }
-        if c > 57 { break }
-        n = n * 10 + c - 48
-        digits = digits + 1
-        i = i + 1
+    // the operand is one token of letters and digits; a64_name_parse decides
+    // what it names (A1, #280, #287) -- the same answer the checkers get
+    uint64 e = off
+    while e < slen && asm_a64_namech(load8(sptr + e)) != 0 { e = e + 1 }
+    if e == off { return 0xFF }
+    uint64 r = a64_name_parse(sptr, off, e - off)
+    if r == 0xFF {
+        // x/w + digits that name no register (x31, x018, x18446744073709551634)
+        // is located: the checkers read it as no register either
+        if a64_np_regish != 0 { asm_a64_name_fatal(sptr, slen, off, e - off) }
+        return 0xFF
     }
-    if digits == 0 { return 0xFF }
-    // x31 IS NOT A REGISTER NAME. Accepting it would silently mean sp or xzr
-    // depending on the instruction, which is exactly the ambiguity above.
-    if n > 30 { return 0xFF }
-    a64_tok_len = 1 + digits
-    return n
+    if a64_np_kind == 2 || a64_np_kind == 4 || a64_np_kind == 6 { asm_unsupported(sptr, slen, "a 32-bit register ('w0')", 0) }
+    if a64_np_kind == 7 { asm_unsupported(sptr, slen, "the alias 'fp'", "  write x29\n") }
+    if a64_np_kind == 8 { asm_unsupported(sptr, slen, "the alias 'lr'", "  write x30\n") }
+    a64_tok_len = e - off
+    if a64_np_kind == 3 { a64_reg_sp = 1 }
+    return r
 }
 
 // `#123`, `#-4`, `#0x1F`. Returns the magnitude; the sign is in a64_imm_neg.
@@ -12695,6 +12701,11 @@ fn asm_a64_imm(uint64 sptr, uint64 off, uint64 slen) -> uint64 {
             if c >= 65 { if c <= 70 { d = c - 55 } }
         }
         if d >= base { break }
+        // A1 (#279): refuse the digit that would carry the value past 2^64,
+        // before the multiply (it wrapped). The range is each field's business:
+        // a logical immediate is a 64-bit value.
+        if base == 10 && (v > 1844674407370955161 || (v == 1844674407370955161 && d > 5)) { asm_a64_form_fatal(sptr, slen, "the immediate does not fit in 64 bits (#279)") }
+        if base == 16 && v > 0x0FFFFFFFFFFFFFFF { asm_a64_form_fatal(sptr, slen, "the immediate does not fit in 64 bits (#279)") }
         v = v * base + d
         digits = digits + 1
         i = i + 1
@@ -12738,6 +12749,7 @@ fn asm_a64_movwide(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
     if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }    // MOVZ/MOVK Rd: 31 is xzr
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 iv = asm_a64_imm(sptr, o, slen)
@@ -12765,8 +12777,10 @@ fn asm_a64_movwide(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
             if sh == 32 { hw = 2 }
             if sh == 48 { hw = 3 }
             if sh != 0 { if sh != 16 { if sh != 32 { if sh != 48 { asm_a64_operr(sptr, slen) } } } }
+            c = c + a64_tok_len
         }
     }
+    asm_a64_end(sptr, slen, c)
     emit_a64(base | (hw << 21) | (iv << 5) | rd)
 }
 
@@ -12871,14 +12885,22 @@ fn asm_a64_logical(uint64 sptr, uint64 slen, uint64 off, uint64 rbase, uint64 ib
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
     if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    uint64 rd_sp = a64_reg_sp
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rn: 31 is xzr in both forms (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rm = asm_a64_reg(sptr, o, slen)
-    if rm != 0xFF { emit_a64(rbase | (rm << 16) | (rn << 5) | rd)  return }
+    if rm != 0xFF {
+        if a64_reg_sp != 0 || rd_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // register form: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
+        emit_a64(rbase | (rm << 16) | (rn << 5) | rd)
+        return
+    }
+    if rd == 31 && rd_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // immediate form: Rd 31 is SP
     if ibase == 0 { asm_a64_operr(sptr, slen) }
     uint64 iv = asm_a64_imm(sptr, o, slen)
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
@@ -12886,6 +12908,7 @@ fn asm_a64_logical(uint64 sptr, uint64 slen, uint64 off, uint64 rbase, uint64 ib
     uint64 want = iv
     if inv != 0 { want = ~iv }
     if a64_bitmask_encode(want) == 0 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, o + a64_tok_len)
     emit_a64(ibase | (a64_bm_n << 22) | (a64_bm_immr << 16) | (a64_bm_imms << 10) | (rn << 5) | rd)
 }
 
@@ -12893,14 +12916,26 @@ fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rba
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rd = asm_a64_reg(sptr, o, slen)
     if rd == 0xFF { asm_a64_operr(sptr, slen) }
+    uint64 rd_sp = a64_reg_sp
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    uint64 rn_sp = a64_reg_sp
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rm = asm_a64_reg(sptr, o, slen)
-    if rm != 0xFF { emit_a64(rbase | (rm << 16) | (rn << 5) | rd)  return }
+    if rm != 0xFF {
+        // shifted-register form: 31 is xzr in every field (#276); sp needs the
+        // extended-register form, which is not accepted
+        if rd_sp != 0 || rn_sp != 0 || a64_reg_sp != 0 { asm_unsupported(sptr, slen, "the extended-register form of add/sub (sp with a register operand)", 0) }
+        asm_a64_end(sptr, slen, o + a64_tok_len)
+        emit_a64(rbase | (rm << 16) | (rn << 5) | rd)
+        return
+    }
+    // immediate form: 31 is SP for Rd and Rn; `xzr` has no encoding there
+    if rd == 31 && rd_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
+    if rn == 31 && rn_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
     uint64 iv = asm_a64_imm(sptr, o, slen)
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
     if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
@@ -12908,43 +12943,91 @@ fn asm_a64_addsub(uint64 sptr, uint64 slen, uint64 off, uint64 ibase, uint64 rba
     // accepted here because a value above 4095 silently truncating into it is
     // precisely the class of bug this whole change is about.
     if iv > 4095 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, o + a64_tok_len)
     emit_a64(ibase | (iv << 10) | (rn << 5) | rd)
 }
 
-// LDR / STR, 64-bit unsigned-offset form: `ldr xT, [xN]` / `ldr xT, [xN, #imm]`.
+// LDR / STR, 64-bit: unsigned offset `[xN{, #imm}]`, pre-index `[xN, #imm]!`,
+// post-index `[xN], #imm` (A1, #245: the last two used to drop the writeback,
+// and post-index the offset too). ARM ARM C6.2 LDR/STR (immediate), size 11.
 fn asm_a64_ldst(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
+    uint64 is_load = 0
+    if base == 0xF9400000 { is_load = 1 }
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, o, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt: 31 is xzr (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
-    o = asm_a64_want(sptr, o, slen, 91)
-    if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+    uint64 ob = asm_a64_want(sptr, o, slen, 91)
+    if ob == 0xFFFFFFFF {
+        // `ldr xT, =imm` / `ldr xT, label`: the literal (PC-relative) form
+        uint64 lc = load8(sptr + asm_a64_ws(sptr, o, slen))
+        if is_load != 0 && (lc == 61 || (lc >= 97 && lc <= 122)) { asm_unsupported(sptr, slen, "a literal (pc-relative) load", 0) }
+        asm_a64_operr(sptr, slen)
+    }
+    o = ob
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    if rn == 31 && a64_reg_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // base: 31 is sp
     o = asm_a64_ws(sptr, o + a64_tok_len, slen)
     uint64 iv = 0
+    uint64 neg = 0
+    uint64 has_imm = 0
+    if o < slen && load8(sptr + o) == 44 {
+        o = asm_a64_ws(sptr, o + 1, slen)
+        if asm_a64_reg(sptr, o, slen) != 0xFF { asm_unsupported(sptr, slen, "a register offset", 0) }
+        iv = asm_a64_imm(sptr, o, slen)
+        if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
+        neg = a64_imm_neg
+        has_imm = 1
+        o = asm_a64_ws(sptr, o + a64_tok_len, slen)
+    }
+    o = asm_a64_want(sptr, o, slen, 93)
+    if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+    uint64 mode = 0            // 0 = unsigned offset, 1 = pre-index, 2 = post-index
     if o < slen {
-        uint64 cc = 0
-        uint64 ca = sptr + o
-        unsafe { *(ca as uint8) -> cc }
-        if cc == 44 {
+        uint64 c = load8(sptr + o)
+        if c == 33 {
+            if has_imm == 0 { asm_a64_form_fatal(sptr, slen, "a pre-index needs an offset: write [xN, #imm]! (#278)") }
+            mode = 1
+            o = o + 1
+        } else if c == 44 && has_imm == 0 {
             o = asm_a64_ws(sptr, o + 1, slen)
+            if asm_a64_reg(sptr, o, slen) != 0xFF { asm_unsupported(sptr, slen, "a register offset", 0) }
             iv = asm_a64_imm(sptr, o, slen)
             if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
-            // The unsigned-offset form cannot encode a negative displacement.
-            // LDUR can; it is a different instruction and is not spelled `ldr`.
-            if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
-            o = asm_a64_ws(sptr, o + a64_tok_len, slen)
+            neg = a64_imm_neg
+            mode = 2
+            o = o + a64_tok_len
         }
     }
-    if asm_a64_want(sptr, o, slen, 93) == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
-    // The field is a SCALED offset: the encoded value is bytes/8. An unaligned
-    // displacement is not representable, and dividing it silently would address
-    // a different word.
-    if (iv & 7) != 0 { asm_a64_operr(sptr, slen) }
-    if iv > 32760 { asm_a64_operr(sptr, slen) }
-    emit_a64(base | ((iv / 8) << 10) | (rn << 5) | rt)
+    asm_a64_end(sptr, slen, o)
+    if mode == 0 {
+        // The field is a SCALED offset: the encoded value is bytes/8. A
+        // negative or unaligned displacement is not representable (LDUR/STUR
+        // can; it is a different instruction and is not spelled `ldr`), and
+        // dividing it silently would address a different word.
+        if neg != 0 || (iv & 7) != 0 { asm_unsupported(sptr, slen, "an unscaled offset (ldur/stur)", "  use a multiple of 8 from 0 to 32760, or a pre/post-index form\n") }
+        if iv > 32760 { asm_a64_operr(sptr, slen) }
+        emit_a64(base | ((iv / 8) << 10) | (rn << 5) | rt)
+        return
+    }
+    // pre/post-index: imm9, signed, UNSCALED (bytes), -256..255
+    if neg == 0 && iv > 255 { asm_a64_form_fatal(sptr, slen, "a pre- or post-index offset is a signed byte count from -256 to 255 (#245)") }
+    if neg != 0 && iv > 256 { asm_a64_form_fatal(sptr, slen, "a pre- or post-index offset is a signed byte count from -256 to 255 (#245)") }
+    // writeback into the register being transferred is CONSTRAINED
+    // UNPREDICTABLE (ARM ARM LDR/STR (immediate): wback && n == t && n != 31)
+    if rn == rt && rn != 31 {
+        if is_load != 0 { asm_a64_form_fatal(sptr, slen, "the base register is also the register loaded; with writeback the architecture leaves the result UNPREDICTABLE (#278)") }
+        asm_a64_form_fatal(sptr, slen, "the base register is also the register stored; with writeback the architecture leaves the stored value UNPREDICTABLE (#278)")
+    }
+    uint64 imm9 = iv
+    if neg != 0 { imm9 = (512 - iv) & 511 }
+    uint64 w = 0xF8000400                     // STR (immediate) post-index
+    if is_load != 0 { w = 0xF8400400 }        // LDR (immediate) post-index
+    if mode == 1 { w = w | 0x800 }            // pre-index: bits 11:10 = 11
+    emit_a64(w | (imm9 << 12) | (rn << 5) | rt)
 }
 
 // STP / LDP in all three addressing modes:
@@ -12955,16 +13038,19 @@ fn asm_a64_pair(uint64 sptr, uint64 slen, uint64 off, uint64 is_load) {
     uint64 o = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, o, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt: 31 is xzr (#276)
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rt2 = asm_a64_reg(sptr, o, slen)
     if rt2 == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Rt2: 31 is xzr
     o = asm_a64_want(sptr, o + a64_tok_len, slen, 44)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     o = asm_a64_want(sptr, o, slen, 91)
     if o == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
     uint64 rn = asm_a64_reg(sptr, o, slen)
     if rn == 0xFF { asm_a64_operr(sptr, slen) }
+    if rn == 31 && a64_reg_sp == 0 { asm_a64_sp_fatal(sptr, slen) }   // base: 31 is sp
     o = asm_a64_ws(sptr, o + a64_tok_len, slen)
 
     uint64 iv = 0
@@ -12987,7 +13073,7 @@ fn asm_a64_pair(uint64 sptr, uint64 slen, uint64 off, uint64 is_load) {
             uint64 bc = 0
             uint64 ba = sptr + o
             unsafe { *(ba as uint8) -> bc }
-            if bc == 33 { mode = 1 }
+            if bc == 33 { mode = 1  o = o + 1 }
         }
     } else {
         // `[xN]` or `[xN], #imm`
@@ -12997,14 +13083,24 @@ fn asm_a64_pair(uint64 sptr, uint64 slen, uint64 off, uint64 is_load) {
             uint64 pc2 = 0
             uint64 pa = sptr + o
             unsafe { *(pa as uint8) -> pc2 }
+            if pc2 == 33 { asm_a64_form_fatal(sptr, slen, "a pre-index needs an offset: write [xN, #imm]! (#278)") }
             if pc2 == 44 {
                 o = asm_a64_ws(sptr, o + 1, slen)
                 iv = asm_a64_imm(sptr, o, slen)
                 if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
                 neg = a64_imm_neg
                 mode = 2
+                o = o + a64_tok_len
             }
         }
+    }
+    asm_a64_end(sptr, slen, o)
+    // CONSTRAINED UNPREDICTABLE (ARM ARM LDP/STP): a load pair into one
+    // register twice (every mode, Unpredictable_LDPOVERLAP -- llvm-mc accepts
+    // the writeback forms), and writeback into a transfer register
+    if is_load != 0 && rt == rt2 { asm_a64_form_fatal(sptr, slen, "a load pair names the same register twice; the architecture leaves the result UNPREDICTABLE (#278)") }
+    if mode != 0 && rn != 31 && (rn == rt || rn == rt2) {
+        asm_a64_form_fatal(sptr, slen, "the base register is also a transfer register; with writeback the architecture leaves the result UNPREDICTABLE (#278)")
     }
 
     if (iv & 7) != 0 { asm_a64_operr(sptr, slen) }
@@ -13212,6 +13308,8 @@ fn asm_a64_sys(uint64 sptr, uint64 slen, uint64 off, uint64 op1, uint64 crn, uin
     uint64 c = asm_a64_ws(sptr, off, slen)
     uint64 rt = asm_a64_reg(sptr, c, slen)
     if rt == 0xFF { asm_a64_operr(sptr, slen) }
+    if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }       // Xt: 31 is xzr (#276)
+    asm_a64_end(sptr, slen, c + a64_tok_len)
     emit_a64(0xD5080000 | (op1 << 16) | (crn << 12) | (crm << 8) | (op2 << 5) | rt)
 }
 
@@ -13223,15 +13321,19 @@ fn asm_a64_pstate(uint64 sptr, uint64 slen, uint64 off, uint64 op2) {
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
     if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
     if iv > 15 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, off + a64_tok_len)
     emit_a64(0xD500401F | (3 << 16) | (iv << 8) | (op2 << 5))
 }
 
-// imm16 at bit 5, for `smc` and `brk`. Same refusal rule and the same reason.
+// imm16 at bit 5, for `svc`, `smc`, `hvc` and `brk`. Same refusal rule and the
+// same reason.
 fn asm_a64_imm16(uint64 sptr, uint64 slen, uint64 off, uint64 base) {
+    off = asm_a64_ws(sptr, off, slen)
     uint64 iv = asm_a64_imm(sptr, off, slen)
     if a64_tok_len == 0 { asm_a64_operr(sptr, slen) }
     if a64_imm_neg != 0 { asm_a64_operr(sptr, slen) }
     if iv > 65535 { asm_a64_operr(sptr, slen) }
+    asm_a64_end(sptr, slen, off + a64_tok_len)
     emit_a64(base | (iv << 5))
 }
 
@@ -13241,6 +13343,8 @@ fn asm_emit_a64(uint64 str_tok) {
     uint64 sptr = cg_source + tstart + 1
     uint64 slen = tlen - 2
     if slen == 0 { return }
+    asm_one_insn(str_tok, sptr, slen, 1)    // A1 (#245): the text rules
+    slen = asm_cur_sl                        // trailing blanks trimmed once
 
     // Check for raw hex word: "0xXXXXXXXX"
     uint64 fc = 0
@@ -13292,10 +13396,10 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "wfe", 3) != 0 && slen == 3 { emit_a64(0xD503205F); return }
     if asm_match(sptr, 0, "sev", 3) != 0 && slen == 3 { emit_a64(0xD503209F); return }
     if asm_match(sptr, 0, "isb", 3) != 0 && slen == 3 { emit_a64(0xD5033FDF); return }
-    if asm_match(sptr, 0, "dsb sy", 6) != 0 { emit_a64(0xD5033F9F); return }
-    if asm_match(sptr, 0, "dmb sy", 6) != 0 { emit_a64(0xD5033FBF); return }
-    if asm_match(sptr, 0, "dsb ish", 7) != 0 { emit_a64(0xD5033B9F); return }
-    if asm_match(sptr, 0, "dmb ish", 7) != 0 { emit_a64(0xD5033BBF); return }
+    if asm_match(sptr, 0, "dsb sy", 6) != 0 && asm_rest_blank(sptr, slen, 6) != 0 { emit_a64(0xD5033F9F); return }
+    if asm_match(sptr, 0, "dmb sy", 6) != 0 && asm_rest_blank(sptr, slen, 6) != 0 { emit_a64(0xD5033FBF); return }
+    if asm_match(sptr, 0, "dsb ish", 7) != 0 && asm_rest_blank(sptr, slen, 7) != 0 { emit_a64(0xD5033B9F); return }
+    if asm_match(sptr, 0, "dmb ish", 7) != 0 && asm_rest_blank(sptr, slen, 7) != 0 { emit_a64(0xD5033BBF); return }
     // --- cache, TLB and system instructions -----------------------------------
     //
     // DC, IC, TLBI and AT ARE ALL ONE ENCODING. They are aliases of
@@ -13353,20 +13457,9 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "brk ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4200000)  return }
     if asm_match(sptr, 0, "ret", 3) != 0 && slen == 3 { emit_a64(0xD65F03C0); return }
     if asm_match(sptr, 0, "eret", 4) != 0 && slen == 4 { emit_a64(0xD69F03E0); return }
-    // Supervisor call: svc #N (16-bit imm)
-    if asm_match(sptr, 0, "svc #", 5) != 0 {
-        uint64 imm = 0
-        uint64 si = 5
-        while si < slen {
-            uint64 saddr = sptr + si
-            uint64 sch = 0
-            unsafe { *(saddr as uint8) -> sch }
-            if sch >= 48 && sch <= 57 { imm = imm * 10 + sch - 48 }
-            si = si + 1
-        }
-        emit_a64(0xD4000001 | (imm << 5))
-        return
-    }
+    // Supervisor call: svc #N (imm16). It used to add up every decimal digit of
+    // the rest of the string (`svc #0x80` was svc #80, #273).
+    if asm_match(sptr, 0, "svc ", 4) != 0 { asm_a64_imm16(sptr, slen, 4, 0xD4000001)  return }
     // MSR sysreg, xN
     if asm_match(sptr, 0, "msr ", 4) != 0 {
         uint64 sreg = 0
@@ -13380,26 +13473,21 @@ fn asm_emit_a64(uint64 str_tok) {
             if cc == 44 { break }
             ci = ci + 1
         }
-        // Parse sysreg name (offset 4 to ci)
-        sreg = asm_a64_sysreg(sptr, 4, ci)
+        // The name is one token [4, e), then only blanks up to the comma, then
+        // Xt (#274: one character used to be skipped after the comma and every
+        // digit to the end added up, so `msr tpidr_el0, xzr` used x0).
+        uint64 e = 4
+        while e < ci && load8(sptr + e) != 32 { e = e + 1 }
+        uint64 bi = e
+        while bi < ci { if asm_blank(load8(sptr + bi)) == 0 { asm_a64_operr(sptr, slen) }  bi = bi + 1 }
+        sreg = asm_a64_sysreg(sptr, 4, e)
         if sreg == 0xFFFFFFFF { asm_a64_sysreg_err(sptr, slen) }
-        // Parse xN after comma+space
-        uint64 ri = ci + 1
-        uint64 ra = sptr + ri
-        uint64 rc = 0
-        unsafe { *(ra as uint8) -> rc }
-        if rc == 32 { ri = ri + 1 }
-        // Skip 'x'
-        ri = ri + 1
-        uint64 rnum = 0
-        while ri < slen {
-            uint64 rra = sptr + ri
-            uint64 rrc = 0
-            unsafe { *(rra as uint8) -> rrc }
-            if rrc >= 48 && rrc <= 57 { rnum = rnum * 10 + rrc - 48 }
-            ri = ri + 1
-        }
-        rt = rnum
+        if ci >= slen { asm_a64_operr(sptr, slen) }
+        uint64 ro = asm_a64_ws(sptr, ci + 1, slen)
+        rt = asm_a64_reg(sptr, ro, slen)
+        if rt == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Xt: 31 is xzr
+        asm_a64_end(sptr, slen, ro + a64_tok_len)
         emit_a64(0xD5100000 | sreg | rt)
         return
     }
@@ -13407,26 +13495,19 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "mrs ", 4) != 0 {
         uint64 sreg = 0
         uint64 rt = 0
-        // Parse xN (starts at offset 4, skip 'x')
-        uint64 ri = 5
-        uint64 rnum = 0
-        while ri < slen {
-            uint64 rra = sptr + ri
-            uint64 rrc = 0
-            unsafe { *(rra as uint8) -> rrc }
-            if rrc == 44 { break }
-            if rrc >= 48 && rrc <= 57 { rnum = rnum * 10 + rrc - 48 }
-            ri = ri + 1
-        }
-        rt = rnum
-        // Parse sysreg name after ", "
-        uint64 si = ri + 1
-        uint64 sa = sptr + si
-        uint64 sc = 0
-        unsafe { *(sa as uint8) -> sc }
-        if sc == 32 { si = si + 1 }
-        sreg = asm_a64_sysreg(sptr, si, slen)
+        // Xt, a comma, then the name as one token (#274: the register used to
+        // be every digit before the comma, and text after the name was ignored).
+        uint64 ro = asm_a64_ws(sptr, 4, slen)
+        rt = asm_a64_reg(sptr, ro, slen)
+        if rt == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Xt: 31 is xzr
+        uint64 si = asm_a64_want(sptr, ro + a64_tok_len, slen, 44)
+        if si == 0xFFFFFFFF { asm_a64_operr(sptr, slen) }
+        uint64 se = si
+        while se < slen && load8(sptr + se) != 32 && load8(sptr + se) != 44 { se = se + 1 }
+        sreg = asm_a64_sysreg(sptr, si, se)
         if sreg == 0xFFFFFFFF { asm_a64_sysreg_err(sptr, slen) }
+        asm_a64_end(sptr, slen, se)
         emit_a64(0xD5300000 | sreg | rt)
         return
     }
@@ -13451,8 +13532,15 @@ fn asm_emit_a64(uint64 str_tok) {
             // `mov` involving SP is an ADD #0, not an ORR with XZR: register 31
             // reads as XZR in the ORR encoding, so the ORR form would move zero
             // and look right. This is the distinction a64_reg_sp exists for.
-            if rd_sp != 0 { emit_a64(0x91000000 | (rm << 5) | rd)  return }
-            if rm_sp != 0 { emit_a64(0x91000000 | (rm << 5) | rd)  return }
+            asm_a64_end(sptr, slen, o + a64_tok_len)
+            // ADD #0 reads and writes 31 as SP, so `mov sp, xzr` / `mov xzr, sp`
+            // have no encoding (they assembled as `mov sp, sp`, #276)
+            if rd_sp != 0 || rm_sp != 0 {
+                if rd == 31 && rd_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
+                if rm == 31 && rm_sp == 0 { asm_a64_sp_fatal(sptr, slen) }
+                emit_a64(0x91000000 | (rm << 5) | rd)
+                return
+            }
             emit_a64(0xAA0003E0 | (rm << 16) | rd)
             return
         }
@@ -13463,6 +13551,8 @@ fn asm_emit_a64(uint64 str_tok) {
         // assembler will not silently emit two instructions for one written
         // line: the caller writes both, and sees both.
         if iv > 65535 { asm_a64_operr(sptr, slen) }
+        if rd_sp != 0 { asm_a64_zr_fatal(sptr, slen) }      // MOVZ Rd: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(0xD2800000 | (iv << 5) | rd)
         return
     }
@@ -13482,6 +13572,8 @@ fn asm_emit_a64(uint64 str_tok) {
         uint64 o = asm_a64_ws(sptr, 3, slen)
         uint64 rn = asm_a64_reg(sptr, o, slen)
         if rn == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Rn: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(0xD61F0000 | (rn << 5))
         return
     }
@@ -13489,6 +13581,8 @@ fn asm_emit_a64(uint64 str_tok) {
         uint64 o = asm_a64_ws(sptr, 4, slen)
         uint64 rn = asm_a64_reg(sptr, o, slen)
         if rn == 0xFF { asm_a64_operr(sptr, slen) }
+        if a64_reg_sp != 0 { asm_a64_zr_fatal(sptr, slen) }   // Rn: 31 is xzr
+        asm_a64_end(sptr, slen, o + a64_tok_len)
         emit_a64(0xD63F0000 | (rn << 5))
         return
     }
@@ -13496,6 +13590,7 @@ fn asm_emit_a64(uint64 str_tok) {
     if asm_match(sptr, 0, "str ", 4) != 0 { asm_a64_ldst(sptr, slen, 4, 0xF9000000)  return }
     if asm_match(sptr, 0, "stp ", 4) != 0 { asm_a64_pair(sptr, slen, 4, 0)  return }
     if asm_match(sptr, 0, "ldp ", 4) != 0 { asm_a64_pair(sptr, slen, 4, 1)  return }
+    asm_a64_fallthrough(sptr, slen)      // A1: a known form it does not encode, located (#245)
     // Unrecognized mnemonic — hard error.
     uint64 wmsg_9167 = "error: unrecognized asm instruction '"
     write(2, wmsg_9167, str_len(wmsg_9167))
@@ -20851,7 +20946,7 @@ static uint64 import_failed = 0
 // created yet therefore got a green build and no artifact.
 //
 // Checked HERE, not in codegen_write_output: main.kr:1967 (asm listing) and
-// main.kr:5671 (esp32 image) call this directly and bypass
+// main.kr:5697 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {
@@ -21269,10 +21364,11 @@ fn asm_x18_active() -> uint64 {
 
 // 1 = x18/w18; 2 = x29/w29/fp (Windows only); 0 = neither.
 fn asm_guard_reg(uint64 sp, uint64 o, uint64 n) -> uint64 {
-    if n == 3 && (asm_lc(win_asm_byte(sp + o)) == 120 || asm_lc(win_asm_byte(sp + o)) == 119) && win_asm_byte(sp + o + 1) == 49 && win_asm_byte(sp + o + 2) == 56 { return 1 }
+    uint64 r = a64_name_parse(sp, o, n)          // the assembler's parser (#280, #287); case-blind
+    if r == 0xFF { return 0 }
+    if r == 18 && (a64_np_kind == 1 || a64_np_kind == 2) { return 1 }
     if target_os != 2 { return 0 }
-    if n == 3 && (asm_lc(win_asm_byte(sp + o)) == 120 || asm_lc(win_asm_byte(sp + o)) == 119) && win_asm_byte(sp + o + 1) == 50 && win_asm_byte(sp + o + 2) == 57 { return 2 }
-    if n == 2 && asm_lc(win_asm_byte(sp + o)) == 102 && asm_lc(win_asm_byte(sp + o + 1)) == 112 { return 2 }
+    if r == 29 && (a64_np_kind == 1 || a64_np_kind == 2 || a64_np_kind == 7) { return 2 }
     return 0
 }
 
@@ -21416,4 +21512,398 @@ fn asm_x18_refuse(uint64 node, uint64 arch) {
         uint32 nx = ast_next(ws)
         ws = nx
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// A1 (#245, #280, #287): THE arm64 register-name parser. The assembler
+// (asm_a64_reg), the x18/x29 checker (asm_guard_reg) and #143's scanner
+// (win_asm_is_frame_reg) all ask it, so no spelling can mean one register to
+// the assembler and another -- or none -- to a checker. Case-blind recognition
+// of x0-x30 and w0-w30 (one or two digits, no leading zero), sp, wsp, xzr,
+// wzr, fp, lr. The number is read from at most two digit characters, never
+// accumulated, so no spelling can wrap (`x18446744073709551634` was 2^64 + 18
+// = x18 to the assembler and no register to the checkers). Returns the number
+// or 0xFF; a64_np_kind: 1 x, 2 w, 3 sp, 4 wsp, 5 xzr, 6 wzr, 7 fp, 8 lr;
+// a64_np_upper: the token has an upper-case letter; a64_np_regish: the token
+// is x/w followed only by digits but names no register (x31, x018, ...).
+static uint64 a64_np_kind = 0
+static uint64 a64_np_upper = 0
+static uint64 a64_np_regish = 0
+
+fn asm_a64_namech(uint64 c) -> uint64 {
+    if c >= 97 && c <= 122 { return 1 }
+    if c >= 65 && c <= 90 { return 1 }
+    if c >= 48 && c <= 57 { return 1 }
+    return 0
+}
+
+fn a64_name_eq(uint64 sp, uint64 o, uint64 n, uint64 kw, uint64 kwlen) -> uint64 {
+    if n != kwlen { return 0 }
+    uint64 i = 0
+    while i < n {
+        if asm_lc(load8(sp + o + i)) != load8(kw + i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+fn a64_name_parse(uint64 sp, uint64 o, uint64 n) -> uint64 {
+    a64_np_kind = 0
+    a64_np_upper = 0
+    a64_np_regish = 0
+    if n == 0 { return 0xFF }
+    uint64 i = 0
+    while i < n {
+        uint64 c = load8(sp + o + i)
+        if c >= 65 && c <= 90 { a64_np_upper = 1 }
+        i = i + 1
+    }
+    if a64_name_eq(sp, o, n, "sp", 2) != 0 { a64_np_kind = 3  return 31 }
+    if a64_name_eq(sp, o, n, "fp", 2) != 0 { a64_np_kind = 7  return 29 }
+    if a64_name_eq(sp, o, n, "lr", 2) != 0 { a64_np_kind = 8  return 30 }
+    if a64_name_eq(sp, o, n, "wsp", 3) != 0 { a64_np_kind = 4  return 31 }
+    if a64_name_eq(sp, o, n, "xzr", 3) != 0 { a64_np_kind = 5  return 31 }
+    if a64_name_eq(sp, o, n, "wzr", 3) != 0 { a64_np_kind = 6  return 31 }
+    uint64 c0 = asm_lc(load8(sp + o))
+    if c0 != 120 && c0 != 119 { return 0xFF }
+    if n < 2 { return 0xFF }
+    uint64 j = 1
+    while j < n {
+        uint64 d = load8(sp + o + j)
+        if d < 48 || d > 57 { return 0xFF }
+        j = j + 1
+    }
+    a64_np_regish = 1
+    // at most two digits, no leading zero, 0-30
+    if n > 3 { return 0xFF }
+    if n == 3 && load8(sp + o + 1) == 48 { return 0xFF }
+    uint64 num = load8(sp + o + 1) - 48
+    if n == 3 { num = num * 10 + load8(sp + o + 2) - 48 }
+    if num > 30 { return 0xFF }
+    a64_np_regish = 0
+    a64_np_kind = 2
+    if c0 == 120 { a64_np_kind = 1 }
+    return num
+}
+
+// ---------------------------------------------------------------------------
+// A1 (#245): the text rules, run first on every asm string by all four
+// assemblers (x86_64, arm64, riscv32, xtensa). An asm string is exactly one
+// instruction: `;`, LF, CR and the two-character escapes \n / \r (asm text is
+// not escape-processed) are refused -- the string is never split. It is lower
+// case (hex digits of a 0x number may be either case), has no tab inside the
+// instruction and no comment (`//`, `/*`, `@`; `#` too except an arm64
+// immediate `#5`, `#-8`, `#0x10`). Each rule is a located error at the string.
+// Trailing blanks (space, tab) are allowed: they are trimmed once, into
+// asm_cur_sl, and every parser uses the trimmed length. asm_cur_tok is the
+// string token every later located asm error points at.
+static uint64 asm_cur_tok = 0
+static uint64 asm_cur_sp = 0
+static uint64 asm_cur_sl = 0
+
+// Text [from, slen) is blank (spaces and tabs only).
+fn asm_rest_blank(uint64 sptr, uint64 slen, uint64 from) -> uint64 {
+    uint64 i = from
+    while i < slen { if asm_blank(load8(sptr + i)) == 0 { return 0 }  i = i + 1 }
+    return 1
+}
+
+fn asm_arch_name(uint64 arch) -> uint64 {
+    if arch == 0 { return "x86_64" }
+    if arch == 1 { return "arm64" }
+    if arch == 2 { return "riscv32" }
+    return "xtensa"
+}
+
+// arch: 0 x86_64, 1 arm64, 2 riscv32, 3 xtensa.
+fn asm_one_insn(uint64 str_tok, uint64 sp, uint64 sl, uint64 arch) {
+    asm_cur_tok = str_tok
+    asm_cur_sp = sp
+    asm_cur_sl = sl
+    uint64 i = 0
+    while i < sl {
+        uint64 c = load8(sp + i)
+        // a hex number 0x...: its digits may be upper case (R2)
+        if c == 48 && i + 1 < sl && load8(sp + i + 1) == 120 {
+            i = i + 2
+            while i < sl && asm_is_hex(sp, i) != 0 { i = i + 1 }
+            continue
+        }
+        // R1: one instruction
+        uint64 what = 0
+        if c == 59 { what = "a ';'" }
+        if c == 10 { what = "a newline" }
+        if c == 13 { what = "a carriage return" }
+        if c == 92 && i + 1 < sl {
+            uint64 c2 = load8(sp + i + 1)
+            if c2 == 110 { what = "'\\n' (asm text is not escape-processed)" }
+            if c2 == 114 { what = "'\\r' (asm text is not escape-processed)" }
+        }
+        if what != 0 {
+            diag_loc_head(str_tok, 0)
+            uint64 s1 = "an asm string holds exactly one instruction; this one goes on after "
+            write(2, s1, str_len(s1))
+            write(2, what, str_len(what))
+            write(2, " (#245)\n", 8)
+            diag_span_of(str_tok)
+            uint64 s2 = "  write one string per instruction, e.g. asm { \"nop\"; \"nop\" }\n"
+            write(2, s2, str_len(s2))
+            fatal_exit()
+        }
+        // R2: lower case
+        if c >= 65 && c <= 90 {
+            diag_loc_head(str_tok, 0)
+            uint64 an = asm_arch_name(arch)
+            write(2, an, str_len(an))
+            uint64 u1 = " inline asm is written in lower case -- mnemonics, registers and system registers; this one has '"
+            write(2, u1, str_len(u1))
+            write(2, sp + i, 1)
+            write(2, "' (#245)\n", 9)
+            diag_span_of(str_tok)
+            uint64 u2 = "  write e.g. \"ldr x0, [x9]\", \"msr sctlr_el1, x0\"; hex digits may be either case (0x3C5)\n"
+            write(2, u2, str_len(u2))
+            fatal_exit()
+        }
+        // R3: no tab inside the instruction (a trailing one is trimmed below)
+        if c == 9 && asm_rest_blank(sp, sl, i) == 0 {
+            diag_loc_head(str_tok, 0)
+            uint64 an2 = asm_arch_name(arch)
+            write(2, an2, str_len(an2))
+            uint64 t1 = " inline asm separates operands with spaces; this instruction has a tab (#245)\n"
+            write(2, t1, str_len(t1))
+            diag_span_of(str_tok)
+            fatal_exit()
+        }
+        // R4: no comment; on arm64 `#` starts an immediate (#5, #-8, #0x10)
+        uint64 cm = 0
+        if c == 47 && i + 1 < sl && (load8(sp + i + 1) == 47 || load8(sp + i + 1) == 42) { cm = 2 }
+        if c == 64 { cm = 1 }
+        if c == 35 {
+            if arch != 1 { cm = 1 }
+            else if i + 1 < sl && load8(sp + i + 1) == 43 {
+                diag_loc_head(str_tok, 0)
+                uint64 p1 = "an arm64 immediate is written without '+'; write #8, not #+8 (#245)\n"
+                write(2, p1, str_len(p1))
+                diag_span_of(str_tok)
+                fatal_exit()
+            } else if i + 1 >= sl || (load8(sp + i + 1) != 45 && (load8(sp + i + 1) < 48 || load8(sp + i + 1) > 57)) { cm = 1 }
+        }
+        if cm != 0 {
+            diag_loc_head(str_tok, 0)
+            uint64 c1 = "an asm string cannot hold a comment; '"
+            write(2, c1, str_len(c1))
+            write(2, sp + i, cm)
+            uint64 c3 = "' starts one here -- put the comment outside the string (#245)\n"
+            write(2, c3, str_len(c3))
+            diag_span_of(str_tok)
+            fatal_exit()
+        }
+        i = i + 1
+    }
+    // Trailing blanks are trimmed once, so every parser on every architecture
+    // sees the same instruction. A string of blanks only is left alone (the
+    // tables reject it, as before).
+    uint64 t = sl
+    while t > 0 && asm_blank(load8(sp + t - 1)) != 0 { t = t - 1 }
+    if t > 0 { asm_cur_sl = t }
+}
+
+// `x018`, `x31`, `x18446744073709551634`: x/w and digits that name no
+// register (#280, #287).
+fn asm_a64_name_fatal(uint64 sptr, uint64 slen, uint64 o, uint64 n) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "arm64 asm '", 11)
+    write(2, sptr, slen)
+    write(2, "': '", 4)
+    write(2, sptr + o, n)
+    uint64 m = "' is not an arm64 register name -- x0 to x30 with no leading zero, sp or xzr (#280, #287)\n"
+    write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+// ---------------------------------------------------------------------------
+// A1 (#245): the end of an arm64 instruction. Every parser that consumed a
+// complete instruction calls asm_a64_end with the offset after its last
+// operand: only blanks may follow -- the assembler used to ignore everything
+// after the operands it read (`ldr x0, [x9], #8` was `ldr x0, [x9]`).
+fn asm_a64_end(uint64 sptr, uint64 slen, uint64 o) {
+    uint64 i = o
+    while i < slen && asm_blank(load8(sptr + i)) != 0 { i = i + 1 }
+    if i >= slen { return }
+    if load8(sptr + i) == 44 {
+        uint64 j = asm_a64_ws(sptr, i + 1, slen)
+        if asm_match(sptr, j, "lsl", 3) != 0 || asm_match(sptr, j, "lsr", 3) != 0 || asm_match(sptr, j, "asr", 3) != 0 || asm_match(sptr, j, "ror", 3) != 0 || asm_match(sptr, j, "msl", 3) != 0 || asm_match(sptr, j, "uxt", 3) != 0 || asm_match(sptr, j, "sxt", 3) != 0 {
+            asm_unsupported(sptr, slen, "a shifted or extended operand", 0)
+        }
+    }
+    asm_trailing_fatal(sptr, slen, i)
+}
+
+// Text after a complete instruction, located at the string (every assembler).
+fn asm_trailing_fatal(uint64 sptr, uint64 slen, uint64 i) {
+    diag_loc_head(asm_cur_tok, 0)
+    uint64 m1 = "unexpected text after the instruction in asm '"
+    write(2, m1, str_len(m1))
+    write(2, sptr, slen)
+    write(2, "': '", 4)
+    write(2, sptr + i, slen - i)
+    uint64 m2 = "' (#245)\n"
+    write(2, m2, str_len(m2))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+// A located refusal of an arm64 form: `arm64 asm '<text>': <why>`.
+fn asm_a64_form_fatal(uint64 sptr, uint64 slen, uint64 why) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "arm64 asm '", 11)
+    write(2, sptr, slen)
+    write(2, "': ", 3)
+    write(2, why, str_len(why))
+    write(2, "\n", 1)
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+// A1 (#276): register 31 spelled as the register the field does not mean.
+fn asm_a64_sp_fatal(uint64 sptr, uint64 slen) {
+    asm_a64_form_fatal(sptr, slen, "register 31 here is the stack pointer; 'xzr' cannot be encoded (#276)")
+}
+fn asm_a64_zr_fatal(uint64 sptr, uint64 slen) {
+    asm_a64_form_fatal(sptr, slen, "register 31 here is the zero register; 'sp' cannot be encoded (#276)")
+}
+
+// ---------------------------------------------------------------------------
+// A1 (Q2, #245): refuse, don't extend. A form the arm64 inline assembler does
+// not encode is a located "not supported" error naming it; hint 0 = the
+// raw-hex hint.
+fn asm_unsupported(uint64 sptr, uint64 slen, uint64 what, uint64 hint) {
+    diag_loc_head(asm_cur_tok, 0)
+    uint64 m1 = "arm64 asm '"
+    write(2, m1, str_len(m1))
+    write(2, sptr, slen)
+    write(2, "': ", 3)
+    write(2, what, str_len(what))
+    uint64 m2 = " is not supported by the inline assembler (#245)\n"
+    write(2, m2, str_len(m2))
+    diag_span_of(asm_cur_tok)
+    if hint == 0 { hint = "  use a raw hex word for it, e.g. asm { \"0xD503201F\" }\n" }
+    write(2, hint, str_len(hint))
+    fatal_exit()
+}
+
+// The mnemonics asm_emit_a64 accepts -- the asm_match(sptr, 0, ...) keywords
+// of that function; tests/helpers/asm_write_class_cover.py fails when the two
+// differ. Used only to word the refusal of an accepted mnemonic's unsupported
+// operation or option.
+fn asm_a64_accepted() -> uint64 { return "|nop|wfi|wfe|sev|isb|dsb|dmb|dc|ic|tlbi|msr|smc|hvc|brk|ret|eret|svc|mrs|mov|movz|movk|and|orr|eor|bic|orn|add|sub|br|blr|ldr|str|stp|ldp|" }
+
+// Reached only when no accepted form matched (asm_emit_a64, just before its
+// `unrecognized` error): an accepted mnemonic with an unsupported operation or
+// barrier option, or followed by text it does not take, and a known A64
+// mnemonic (M3's write-classification lists and the conditional branches) the
+// assembler does not encode, are refused located. Anything else returns, and
+// the caller prints `unrecognized asm instruction`.
+fn asm_a64_fallthrough(uint64 sptr, uint64 slen) {
+    uint64 e = 0
+    while e < slen && win_asm_is_word_char(load8(sptr + e)) != 0 { e = e + 1 }
+    uint64 mlen = e
+    if mlen == 0 { return }
+    uint64 o = asm_a64_ws(sptr, e, slen)
+    uint64 oe = o
+    while oe < slen && win_asm_is_word_char(load8(sptr + oe)) != 0 { oe = oe + 1 }
+    if asm_wc_in(asm_a64_accepted(), sptr, 0, mlen, 0) != 0 {
+        uint64 dmb = 0
+        if mlen == 3 && (asm_match(sptr, 0, "dsb", 3) != 0 || asm_match(sptr, 0, "dmb", 3) != 0) { dmb = 1 }
+        uint64 sysop = 0
+        if (mlen == 2 && (asm_match(sptr, 0, "dc", 2) != 0 || asm_match(sptr, 0, "ic", 2) != 0)) || (mlen == 4 && asm_match(sptr, 0, "tlbi", 4) != 0) { sysop = 1 }
+        // a supported option / operation followed by more text is trailing text
+        uint64 okops = "|sy|ish|"
+        if sysop != 0 { okops = "|cvac|cvau|civac|cvap|ivac|isw|csw|cisw|ivau|iallu|ialluis|vmalle1is|vmalle1|alle1|alle2|alle3|" }
+        if (dmb != 0 || sysop != 0) && oe > o && asm_wc_in(okops, sptr, o, oe - o, 0) != 0 {
+            uint64 after = oe
+            if sysop != 0 && oe < slen && load8(sptr + oe) == 44 { after = slen }
+            if after < slen { asm_trailing_fatal(sptr, slen, asm_a64_ws(sptr, after, slen)) }
+            return
+        }
+        if (dmb != 0 || sysop != 0) && oe > o {
+            uint64 tmp = cg_alloc(96)
+            uint64 p = 0
+            uint64 pre = "the barrier option '"
+            if sysop != 0 {
+                pre = "the dc operation '"
+                if load8(sptr) == 105 { pre = "the ic operation '" }
+                if load8(sptr) == 116 { pre = "the tlbi operation '" }
+            }
+            uint64 pl = str_len(pre)
+            uint64 q = 0
+            while q < pl { store8(tmp + p, load8(pre + q))  p = p + 1  q = q + 1 }
+            q = o
+            while q < oe && p < 90 { store8(tmp + p, load8(sptr + q))  p = p + 1  q = q + 1 }
+            store8(tmp + p, 39)  store8(tmp + p + 1, 0)
+            asm_unsupported(sptr, slen, tmp, 0)
+        }
+        // an accepted no-operand word with something after it: `nop x`, `ret x1`
+        if o < slen { asm_trailing_fatal(sptr, slen, o) }
+        return
+    }
+    uint64 known = 0
+    if asm_wc_in(asm_wc_none(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_first(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_both(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_status(), sptr, 0, mlen, 0) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_second_fam(), sptr, 0, mlen, 1) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_both_fam(), sptr, 0, mlen, 1) != 0 { known = 1 }
+    if asm_wc_in(asm_wc_none_fam(), sptr, 0, mlen, 1) != 0 { known = 1 }
+    if asm_wc_cond_branch(sptr, 0, mlen) != 0 { known = 1 }
+    if known == 0 { return }
+    uint64 tm = cg_alloc(64)
+    uint64 pp = 0
+    uint64 pr = "the mnemonic '"
+    uint64 k = 0
+    while k < 14 { store8(tm + pp, load8(pr + k))  pp = pp + 1  k = k + 1 }
+    k = 0
+    while k < mlen && pp < 60 { store8(tm + pp, load8(sptr + k))  pp = pp + 1  k = k + 1 }
+    store8(tm + pp, 39)  store8(tm + pp + 1, 0)
+    asm_unsupported(sptr, slen, tm, 0)
+}
+
+// ---------------------------------------------------------------------------
+// A1 (#282, #289): the x86_64 located errors. A displacement fed to a disp32
+// is 0..0x7FFFFFFF (the CPU sign-extends it; it used to be truncated to 32
+// bits), and a number that does not fit in 64 bits is refused (it wrapped).
+fn asm_x86_disp_fatal(uint64 sptr, uint64 slen) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "x86_64 asm '", 12)
+    write(2, sptr, slen)
+    uint64 m = "': a displacement is a signed 32-bit value; it must be 0 to 0x7FFFFFFF here (#282)\n"
+    write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+fn asm_x86_num_fatal() {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "x86_64 asm '", 12)
+    write(2, asm_cur_sp, asm_cur_sl)
+    uint64 m = "': the number does not fit in 64 bits (#289)\n"
+    write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+fn asm_x86_unsupported(uint64 sptr, uint64 slen, uint64 what) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "x86_64 asm '", 12)
+    write(2, sptr, slen)
+    write(2, "': ", 3)
+    write(2, what, str_len(what))
+    uint64 m2 = " is not supported by the inline assembler (#245)\n"
+    write(2, m2, str_len(m2))
+    diag_span_of(asm_cur_tok)
+    uint64 h = "  use raw hex bytes for it, e.g. asm { \"0x0F 0x01 0xD0\" }\n"
+    write(2, h, str_len(h))
+    fatal_exit()
 }

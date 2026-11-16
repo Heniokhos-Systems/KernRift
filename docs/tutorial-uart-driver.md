@@ -243,7 +243,7 @@ In `kmain`, install the vector:
 
 ```kernrift
 fn install_vectors(u64 vbar_addr) {
-    asm("msr VBAR_EL1, x0") in(vbar_addr -> x0)
+    asm("msr vbar_el1, x0") in(vbar_addr -> x0)
     asm("isb")                // make the write visible before IRQs
 }
 ```
@@ -387,7 +387,7 @@ fn main() {
     uart_init()
 
     // Unmask IRQs (DAIF.I = 0).
-    asm("msr DAIFClr, #0xF")
+    asm("msr daifclr, #0xF")
 
     uart_puts("kr-uart echo ready\n\0")
 
@@ -454,7 +454,7 @@ bytes if you hold a key down, the interrupt-driven one won't.
 ## Further reading
 
 - ARM PL011 Technical Reference Manual, r2p0.
-- ARMv8-A Architecture Reference Manual, sections on VBAR_EL1 / DAIF.
+- ARMv8-A Architecture Reference Manual, sections on VBAR_EL1 / DAIF (written in lower case in asm: `vbar_el1`, `daifclr`).
 - `docs/ERROR_HANDLING.md` for the sentinel / out-param patterns used
   above.
 - `docs/IR_REFERENCE.md` — opcodes `vloadN` / `vstoreN` and their

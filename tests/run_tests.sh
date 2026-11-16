@@ -33933,8 +33933,10 @@ fi
 
 # A known mnemonic with operands that do not parse must say THAT, not "unknown
 # instruction" -- which would send the reader looking for a missing `mov`.
+# (`x99` was the operand here; since A1 an x/w-and-digits token that names no
+# register has its own located error, #280/#287, so a non-register word is used.)
 TOTAL=$((TOTAL + 1))
-printf 'fn main() -> uint64 { asm { "mov x0, x99" }  return 0 }\n' > "$A64A_D/op.kr"
+printf 'fn main() -> uint64 { asm { "mov x0, v99" }  return 0 }\n' > "$A64A_D/op.kr"
 op_err=$($KRC --arch=arm64 --emit=arx "$A64A_D/op.kr" -o "$A64A_D/op.arx" 2>&1)
 if printf '%s' "$op_err" | grep -q "bad operands in arm64 asm"; then
     PASS=$((PASS + 1)); echo "  a64_bad_operands_name_the_mnemonic: PASS"
@@ -37729,7 +37731,8 @@ x18_flags() {
 }
 # x18_one WANT FILE FLAGS...: build $X18_D/FILE; a mismatch is appended to
 # X18_BAD. WANT: "ok" (builds; no #143/#242/#246/#249 diagnostic), "asm" (the
-# inline assembler's own error, no register refusal), "warn:LINE" (builds,
+# inline assembler's own error -- since A1 also its located "is not supported
+# by the inline assembler" -- and no register refusal), "warn:LINE" (builds,
 # stderr has the line LINE), or the exact error line (exit 1, no output).
 x18_one() {
     local want=$1 f=$2 rc; shift 2
@@ -37741,7 +37744,7 @@ x18_one() {
                 X18_BAD="$X18_BAD $f[$*]: want a build, got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
             fi ;;
         asm)
-            if [ $rc != 1 ] || ! grep -qE 'unrecognized asm instruction|bad operands' $X18_D/o.se || grep -qE '#143|#242|#246|#249' $X18_D/o.se; then
+            if [ $rc != 1 ] || ! grep -qE 'unrecognized asm instruction|bad operands|is not supported by the inline assembler' $X18_D/o.se || grep -qE '#143|#242|#246|#249' $X18_D/o.se; then
                 X18_BAD="$X18_BAD $f[$*]: want the assembler's error, got rc=$rc $(grep -m1 -E 'error|warning' $X18_D/o.se | cut -c1-150);"
             fi ;;
         warn:*)
@@ -37945,15 +37948,16 @@ for X18_R in x18 x29 fp; do
 done
 # asm_ldop_first_read_not_refused_windows_arm64 (#252): ldadd's first
 # register is its source; #143 refused it as a write. Now it reaches the
-# assembler (which does not accept ldadd yet).
+# assembler, which refuses it as not supported (A1, #245).
 x18_src 'ldadd x18, x0, [x9]' > $X18_D/f.kr
 for X18_M in ir legacy; do x18_flags windows $X18_M; x18_one asm f.kr $X18_F; done
 x18_row asm_ldop_first_read_not_refused_windows_arm64 "ldadd x18, x0, [x9] on Windows IR/legacy: not refused as a write"
 # asm_x18_case_read_not_refused_arm64 (control): STR X18, [X9] reads x18 --
-# the classification is case-blind (an earlier prototype refused it).
+# the classification is case-blind (an earlier prototype refused it). Since
+# A1 (#245) the assembler's error is its lower-case rule.
 x18_src 'STR X18, [X9]' > $X18_D/f.kr
-x18_flags macos ir; x18_one asm f.kr $X18_F
-x18_row asm_x18_case_read_not_refused_arm64 "STR X18, [X9] on macOS: the assembler's error, not a write refusal"
+x18_flags macos ir; x18_one "f.kr:3:11: error: arm64 inline asm is written in lower case -- mnemonics, registers and system registers; this one has 'S' (#245)" f.kr $X18_F
+x18_row asm_x18_case_read_not_refused_arm64 "STR X18, [X9] on macOS: the assembler's lower-case error, not a write refusal"
 # asm_x18_case_write_refused_arm64: BIC X18, X9, X10 writes x18. Red: the
 # assembler's error.
 x18_src 'BIC X18, X9, X10' > $X18_D/f.kr
@@ -37973,7 +37977,10 @@ x18_row asm_x29_text_refused_multi_windows_arm64 "'mov x1, x9; mov x29, x9' on W
 # asm_write_class_covers_assembler: every mnemonic asm_emit_a64 accepts is in
 # exactly one write-classification list (tests/helpers/asm_write_class_cover.py),
 # so a mnemonic added to the assembler cannot be exempted from the x18/x29
-# checks by default. The _mutation row is the row's own control: the same
+# checks by default. Since A1 (#286) the script also refuses a mnemonic
+# hidden from its extraction and a drift of asm_a64_accepted(), and the row
+# wants at least the 34 mnemonics of A1 (the A1 block's cover rows are the
+# script's controls). The _mutation row is the row's own control: the same
 # check over a copy with bic removed from the first-register list must FAIL
 # naming bic.
 TOTAL=$((TOTAL + 1))
@@ -37981,8 +37988,10 @@ if ! command -v python3 > /dev/null 2>&1; then
     skip_row asm_write_class_covers_assembler "needs python3"
 else
     X18_O=$(python3 -B "$DIR/helpers/asm_write_class_cover.py" "$DIR/../src/codegen.kr" 2>&1); X18_RC=$?
-    if [ $X18_RC = 0 ]; then PASS=$((PASS + 1)); echo "  asm_write_class_covers_assembler: PASS ($(head -1 <<< "$X18_O"))"
-    else echo "FAIL: asm_write_class_covers_assembler (rc=$X18_RC: $(tr '\n' ' ' <<< "$X18_O" | cut -c1-300))"; FAIL=$((FAIL + 1)); fi
+    # A1 (#286): the extracted set cannot shrink silently -- 34 mnemonics at A1
+    X18_N=$(sed -n 's/^asm_write_class_cover: \([0-9]*\) assembler mnemonics.*/\1/p' <<< "$X18_O")
+    if [ $X18_RC = 0 ] && [ "${X18_N:-0}" -ge 34 ]; then PASS=$((PASS + 1)); echo "  asm_write_class_covers_assembler: PASS ($(head -1 <<< "$X18_O"))"
+    else echo "FAIL: asm_write_class_covers_assembler (rc=$X18_RC, ${X18_N:-no} mnemonics, want rc 0 and >= 34: $(tr '\n' ' ' <<< "$X18_O" | cut -c1-300))"; FAIL=$((FAIL + 1)); fi
 fi
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then
@@ -38001,7 +38010,8 @@ fi
 # asm_readonly_unaccepted_reaches_assembler_<fam>_arm64: read-only forms the
 # assembler does not accept yet (store atomics, unprivileged/release stores,
 # pointer-auth branches, setf) are classified as writing nothing, so they get
-# the assembler's error, not a false write refusal (macOS and Windows PE).
+# the assembler's error (since A1 its located "is not supported"), not a false
+# write refusal (macOS and Windows PE).
 for X18_P in "stop|stadd x18, [x9]|staddlh w18, [x9]" "sttr|sttr x18, [x9]|sttrb w18, [x9]" "stlur|stlur x18, [x9]" \
              "stllr|stllrb w18, [x9]" "pac|braa x18, x9|blraaz x18" "setf|setf8 w18"; do
     X18_N=${X18_P%%|*}; X18_R=${X18_P#*|}
@@ -38042,17 +38052,18 @@ for X18_OS in macos windows; do
     x18_flags $X18_OS ir; x18_one "$X18_WB$X18_Y" f.kr $X18_F
     x18_row asm_x18_text_tab_refused_${X18_OS}_arm64 "ldr x0, [<tab>x18], #8 on ${X18_OS}: the writeback error"
 done
-# asm_x18_newline_tab_linux_accepted_arm64 (control): on Linux the same
-# strings behave as before (the assembler drops what follows a separator,
-# #245; the tab form is its own error).
-for X18_T in 'mov x1, x9\nmov x18, x9' 'mov x1, x9\rmov x18, x9' 'mov x1, x9
-mov x18, x9'; do
-    x18_src "$X18_T" > $X18_D/f.kr
-    x18_flags linux ir; x18_one ok f.kr $X18_F
-done
+# asm_x18_newline_tab_linux_refused_arm64: on Linux (no x18/x29 check) the
+# same strings reach the assembler, which since A1 (#245) refuses a second
+# instruction and an inner tab at the string (it used to drop what followed
+# a separator; the row was _accepted_ then).
+A1SEP="f.kr:3:11: error: an asm string holds exactly one instruction; this one goes on after"
+x18_src 'mov x1, x9\nmov x18, x9' > $X18_D/f.kr; x18_flags linux ir; x18_one "$A1SEP '\\n' (asm text is not escape-processed) (#245)" f.kr $X18_F
+x18_src 'mov x1, x9\rmov x18, x9' > $X18_D/f.kr; x18_flags linux ir; x18_one "$A1SEP '\\r' (asm text is not escape-processed) (#245)" f.kr $X18_F
+x18_src 'mov x1, x9
+mov x18, x9' > $X18_D/f.kr; x18_flags linux ir; x18_one "$A1SEP a newline (#245)" f.kr $X18_F
 x18_src "ldr x0, [$(printf '\t')x18], #8" > $X18_D/f.kr
-x18_flags linux ir; x18_one asm f.kr $X18_F
-x18_row asm_x18_newline_tab_linux_accepted_arm64 "on Linux: newline-separated strings build, the tab form is the assembler's error"
+x18_flags linux ir; x18_one "f.kr:3:11: error: arm64 inline asm separates operands with spaces; this instruction has a tab (#245)" f.kr $X18_F
+x18_row asm_x18_newline_tab_linux_refused_arm64 "on Linux: the newline-separated strings and the tab form get the assembler's one-instruction / tab errors"
 # asm_x18_fat_targets_refused_arm64: a fat build of a block naming x18 for
 # mac-arm64 + android-arm64 stops at the register, and the note names the
 # slice. asm_x18_fat_targets_linux_ok_arm64 (control): linux-arm64 builds.
@@ -38071,6 +38082,698 @@ if [ $X18_RC != 0 ] || [ ! -f $X18_D/o.out ] || grep -qE ': error:|#242' $X18_D/
 fi
 x18_row asm_x18_fat_targets_linux_ok_arm64 "--targets=linux-arm64 of the same program builds"
 rm -rf $X18_D
+
+# --- A1: the inline assemblers are exact (#245, #273-#283, #286-#290) ---------
+#
+# An asm string is exactly one instruction, in lower case (hex digits may be
+# either case), with no tab inside it, no comment and nothing after it; the
+# arm64 pre/post-index ldr/str forms write back; every form the assembler
+# does not encode is refused at the string ("is not supported by the inline
+# assembler") instead of being assembled as a different instruction. Before
+# A1 the arm64 assembler parsed an instruction's leading operands and dropped
+# the rest (`ldr x0, [x9], #8` was `ldr x0, [x9]`, `mov x0, #5; mov x0, #9`
+# was `mov x0, #5`), and several spellings meant another register or number
+# (`x018` = x18, `x18446744073709551634` = x18, `svc #0x80` = svc #80, `dsb
+# ishst` = dsb ish, `add x0, xzr, #1` read SP). One register-name parser
+# (a64_name_parse in codegen.kr) is shared by the assembler, M3's x18/x29
+# checker and #143's scanner. Every refusal row is build-side; f's asm string
+# is at 3:11 (a1_src), as in the x18 block above.
+A1_D=$SUITE_TMP/a1rows; rm -rf $A1_D; mkdir -p $A1_D
+# a1_src TEXT [CLAUSES [TYPE]] > FILE: f with the asm string TEXT (printf %s:
+# a backslash stays a backslash) at 3:11. CLAUSES default to the arm64 ones;
+# pass "" for none. TYPE is uint64 (uint32 for riscv32 and xtensa).
+a1_src() {
+    local t=${3:-uint64}
+    printf 'fn f(%s a) -> %s {\n    %s v = a\n    asm { "%s" } %s\n    return v\n}\nfn main() { exit(f(7)) }\n' "$t" "$t" "$t" "$1" "${2-in(v -> x9) clobbers(x0, x1)}"
+}
+# a1_flags TARGET MODE -> A1_F. TARGET: linux macos android windows (arm64),
+# x86_64, x86_64_windows, riscv32, xtensa. MODE: ir legacy obj o0.
+a1_flags() {
+    case $1 in
+        linux|macos|android) A1_F="--arch=arm64 --target=$1" ;;
+        windows) A1_F="--arch=arm64 --target=windows --emit=pe" ;;
+        x86_64) A1_F="--arch=x86_64 --target=linux" ;;
+        x86_64_windows) A1_F="--arch=x86_64 --target=windows --emit=pe" ;;
+        riscv32) A1_F="--arch=riscv32" ;;
+        xtensa) A1_F="--arch=xtensa --freestanding" ;;
+    esac
+    case $2 in
+        legacy) A1_F="$A1_F --legacy" ;;
+        o0) A1_F="$A1_F --O0" ;;
+        obj) case $1 in
+                 linux) A1_F="--arch=arm64 -c" ;;
+                 x86_64) A1_F="--arch=x86_64 -c" ;;
+                 *) A1_F="--arch=arm64 --target=$1 --emit=obj" ;;
+             esac ;;
+    esac
+}
+# a1_one WANT FILE FLAGS...: build $A1_D/FILE; a mismatch is appended to
+# A1_BAD. WANT: "ok" (builds, no error line), "asm" (an existing UNLOCATED
+# assembler error: unrecognized / bad operands / unknown system register /
+# malformed raw hex, and none of the x18/x29 refusals), or the exact FIRST
+# stderr line (exit 1, no output file).
+a1_one() {
+    local want=$1 f=$2 rc first; shift 2
+    rm -f $A1_D/o.out
+    ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC "$@" $f -o o.out > o.so 2> o.se ); rc=$?
+    first=$(head -1 $A1_D/o.se)
+    case $want in
+        ok)
+            if [ $rc != 0 ] || [ ! -f $A1_D/o.out ] || grep -q 'error:' $A1_D/o.se; then
+                A1_BAD="$A1_BAD [$(sed -n 3p $A1_D/$f | cut -c5-80)] $*: want a build, got rc=$rc $(cut -c1-160 <<< "$first");"
+            fi ;;
+        asm)
+            if [ $rc != 1 ] || [ -e $A1_D/o.out ] || ! grep -qE '^error: (unrecognized asm instruction|bad operands|unknown arm64 system register|malformed raw hex|riscv32: unrecognized|xtensa: unrecognized)' <<< "$first" \
+               || grep -qE '#143|#242|#246|#249' $A1_D/o.se; then
+                A1_BAD="$A1_BAD [$(sed -n 3p $A1_D/$f | cut -c5-80)] $*: want the assembler's unlocated error, got rc=$rc $(cut -c1-160 <<< "$first");"
+            fi ;;
+        *)
+            if [ $rc != 1 ] || [ -e $A1_D/o.out ] || [ "$first" != "$want" ]; then
+                A1_BAD="$A1_BAD [$(sed -n 3p $A1_D/$f | cut -c5-80)] $*: want '$want', got rc=$rc '$(cut -c1-200 <<< "$first")';"
+            fi ;;
+    esac
+}
+# a1_try TARGET "MODES" TEXT WANT [CLAUSES]: a1_src + a1_one for each mode.
+# Default clauses per TARGET: arm64 in(v -> x9) clobbers(x0, x1); x86_64
+# clobbers(rax); riscv32 and xtensa none (and a uint32 f).
+a1_try() {
+    local tg=$1 modes=$2 text=$3 want=$4 m ty=uint64 cl='in(v -> x9) clobbers(x0, x1)'
+    case $tg in
+        x86_64*) cl='clobbers(rax)' ;;
+        riscv32|xtensa) cl=''; ty=uint32 ;;
+    esac
+    [ $# -ge 5 ] && cl=$5
+    a1_src "$text" "$cl" $ty > $A1_D/f.kr
+    for m in $modes; do a1_flags $tg $m; a1_one "$want" f.kr $A1_F; done
+}
+# a1_row ROW WHAT: the verdict of the a1_one calls since A1_BAD="".
+a1_row() {
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$A1_BAD" ]; then PASS=$((PASS + 1)); echo "  $1: PASS ($2)"
+    else echo "FAIL: $1 ($2:$A1_BAD)"; FAIL=$((FAIL + 1)); fi
+    A1_BAD=""
+}
+A1_BAD=""
+# The located lines (f.kr:3:11, the string).
+A1_L="f.kr:3:11: error: "
+A1_SEP="${A1_L}an asm string holds exactly one instruction; this one goes on after"
+a1_form() { echo "${A1_L}arm64 asm '$1': $2"; }
+a1_unsup() { echo "${A1_L}arm64 asm '$1': $2 is not supported by the inline assembler (#245)"; }
+a1_trail() { echo "${A1_L}unexpected text after the instruction in asm '$1': '$2' (#245)"; }
+a1_name() { echo "${A1_L}arm64 asm '$1': '$2' is not an arm64 register name -- x0 to x30 with no leading zero, sp or xzr (#280, #287)"; }
+a1_case() { echo "${A1_L}$1 inline asm is written in lower case -- mnemonics, registers and system registers; this one has '$2' (#245)"; }
+a1_tab() { echo "${A1_L}$1 inline asm separates operands with spaces; this instruction has a tab (#245)"; }
+a1_comment() { echo "${A1_L}an asm string cannot hold a comment; '$1' starts one here -- put the comment outside the string (#245)"; }
+A1_RANGE="a pre- or post-index offset is a signed byte count from -256 to 255 (#245)"
+A1_SPF="register 31 here is the stack pointer; 'xzr' cannot be encoded (#276)"
+A1_ZRF="register 31 here is the zero register; 'sp' cannot be encoded (#276)"
+A1_TAB=$(printf '\t')
+A1_CR=$(printf '\r')
+
+# asm_a64_wb_run_<form>_<mode> (#245): a pre/post-index ldr/str writes back,
+# checked at run time -- the value transferred AND the updated base. Linux
+# arm64, IR / --O0 / --legacy, natively on an arm64 host, else qemu. Red: the
+# writeback was dropped (base 110: "base not updated") or, for negative
+# offsets and the sp round trip, refused.
+# asm_a64_wb_run_pair_<mode> (control): ldp/stp post and pre were already
+# right; asm_a64_wb_run_pair_mutation shows the check bites (the stp
+# post-index word patched to its offset form must not exit 42).
+a1_rt_prog() {
+    case $1 in
+        ldr_post) A1_BODY='store64(a, 3)  store64(a + 8, 11)
+    uint64 q = a  uint64 v = 0
+    asm { "ldr x0, [x9], #8" } in(q -> x9) out(x0 -> v, x9 -> q)
+    if q != a + 8 { return 110 }
+    if v != 3 { return 111 }' ;;
+        ldr_pre) A1_BODY='store64(a, 3)  store64(a + 8, 11)
+    uint64 q = a  uint64 v = 0
+    asm { "ldr x0, [x9, #8]!" } in(q -> x9) out(x0 -> v, x9 -> q)
+    if q != a + 8 { return 110 }
+    if v != 11 { return 111 }' ;;
+        str_post) A1_BODY='store64(a + 8, 5)
+    uint64 q = a + 8  uint64 w = 77
+    asm { "str x1, [x9], #-8" } in(q -> x9, w -> x1) out(x9 -> q)
+    if q != a { return 110 }
+    if load64(a + 8) != 77 { return 111 }' ;;
+        str_pre) A1_BODY='store64(a + 16, 5)
+    uint64 q = a  uint64 w = 66
+    asm { "str x1, [x9, #16]!" } in(q -> x9, w -> x1) out(x9 -> q)
+    if q != a + 16 { return 110 }
+    if load64(a + 16) != 66 { return 111 }' ;;
+        edges) A1_BODY='store64(a + 256, 9)  store64(a + 264, 4)
+    uint64 q = a + 256  uint64 v = 0
+    asm { "ldr x0, [x9], #-256" } in(q -> x9) out(x0 -> v, x9 -> q)
+    if q != a { return 110 }
+    if v != 9 { return 111 }
+    q = a + 9
+    asm { "ldr x0, [x9, #255]!" } in(q -> x9) out(x0 -> v, x9 -> q)
+    if q != a + 264 { return 112 }
+    if v != 4 { return 113 }
+    q = a + 32  uint64 w = 55
+    asm { "str x1, [x9], #3" } in(q -> x9, w -> x1) out(x9 -> q)
+    if q != a + 35 { return 114 }
+    if load64(a + 32) != 55 { return 115 }' ;;
+        sp_roundtrip) A1_BODY='uint64 v = 42  uint64 r = 0  uint64 s0 = 0  uint64 s1 = 0  uint64 s2 = 0
+    asm { "mov x2, sp"; "str x9, [sp, #-16]!"; "mov x3, sp"; "ldr x0, [sp], #16"; "mov x4, sp" } in(v -> x9) out(x0 -> r, x2 -> s0, x3 -> s1, x4 -> s2)
+    if s1 != s0 - 16 { return 110 }
+    if s2 != s0 { return 111 }
+    if r != 42 { return 112 }' ;;
+        pair) A1_BODY='uint64 q = a  uint64 x = 21  uint64 y = 34  uint64 c = 0  uint64 d = 0
+    asm { "stp x0, x1, [x9], #16" } in(q -> x9, x -> x0, y -> x1) out(x9 -> q)
+    if q != a + 16 { return 110 }
+    asm { "ldp x2, x3, [x9, #-16]!" } in(q -> x9) out(x9 -> q, x2 -> c, x3 -> d)
+    if q != a { return 111 }
+    if c != 21 { return 112 }
+    if d != 34 { return 113 }' ;;
+    esac
+    printf 'fn t(uint64 a) -> uint64 {\n    %s\n    return 42\n}\nfn main() {\n    uint64[48] buf\n    exit(t(buf))\n}\n' "$A1_BODY"
+}
+for A1_N in ldr_post ldr_pre str_post str_pre edges sp_roundtrip pair; do
+    a1_rt_prog $A1_N > $A1_D/rt_$A1_N.kr
+    for A1_M in ir o0 legacy; do
+        TOTAL=$((TOTAL + 1))
+        if ! arch_runner arm64; then skip_row asm_a64_wb_run_${A1_N}_$A1_M "$ARCH_NORUN"; continue; fi
+        a1_flags linux $A1_M; rm -f $A1_D/rt.out
+        if ! ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC $A1_F rt_$A1_N.kr -o rt.out > rt.so 2> rt.se ); then
+            echo "FAIL: asm_a64_wb_run_${A1_N}_$A1_M (build: $(head -1 $A1_D/rt.se | cut -c1-200))"; FAIL=$((FAIL + 1)); continue
+        fi
+        A1_RC=$( ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER ./rt.out > /dev/null 2>&1; echo $? ) 2> /dev/null )
+        if [ "$A1_RC" = 42 ]; then PASS=$((PASS + 1)); echo "  asm_a64_wb_run_${A1_N}_$A1_M: PASS (value and base register checked; exit 42${ARCH_RUNNER:+ under $ARCH_RUNNER})"
+        else echo "FAIL: asm_a64_wb_run_${A1_N}_$A1_M (exit $A1_RC, want 42; 110+ = which check failed)"; FAIL=$((FAIL + 1)); fi
+    done
+done
+TOTAL=$((TOTAL + 1))
+if ! arch_runner arm64; then skip_row asm_a64_wb_run_pair_mutation "$ARCH_NORUN"
+elif ! command -v python3 > /dev/null 2>&1; then skip_row asm_a64_wb_run_pair_mutation "needs python3"
+else
+    a1_flags linux ir; rm -f $A1_D/rt.out $A1_D/rtm.out
+    ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC $A1_F rt_pair.kr -o rt.out > /dev/null 2>&1 )
+    # stp x0, x1, [x9], #16 (A8810520) -> stp x0, x1, [x9] (A9000520): no writeback
+    A1_O=$(python3 -B - $A1_D/rt.out $A1_D/rtm.out <<'A1PY' 2>&1
+import sys
+b = open(sys.argv[1], 'rb').read()
+w, m = (0xA8810520).to_bytes(4, 'little'), (0xA9000520).to_bytes(4, 'little')
+if b.count(w) != 1: print('stp post-index word found %d times, want 1' % b.count(w)); sys.exit(1)
+open(sys.argv[2], 'wb').write(b.replace(w, m)); print('patched')
+A1PY
+)
+    chmod +x $A1_D/rtm.out 2> /dev/null
+    A1_RC=$( ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER ./rtm.out > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if [ "$A1_O" = patched ] && [ "$A1_RC" = 110 ]; then PASS=$((PASS + 1)); echo "  asm_a64_wb_run_pair_mutation: PASS (stp post-index patched to the offset form: exit 110, the base check bites)"
+    else echo "FAIL: asm_a64_wb_run_pair_mutation (want 'patched' and exit 110, got '$A1_O' exit $A1_RC)"; FAIL=$((FAIL + 1)); fi
+fi
+# asm_one_insn_multi_string_run_arm64 / _ok_x86_64 (control, a declared
+# guard): one string per instruction is the migration form; the ';' BETWEEN
+# strings is a token, outside every string, so the one-instruction rule must
+# not see it. Both strings run: exit 5 + 9.
+printf 'fn f() -> uint64 {\n    uint64 a = 0\n    uint64 b = 0\n    asm { "mov x0, #5"; "mov x1, #9" } out(x0 -> a, x1 -> b)\n    return a + b\n}\nfn main() { exit(f()) }\n' > $A1_D/ms_a64.kr
+printf 'fn f() -> uint64 {\n    uint64 x = 5\n    uint64 y = 9\n    uint64 a = 0\n    uint64 b = 0\n    asm { "mov rax, rbx"; "mov rcx, rdx" } in(x -> rbx, y -> rdx) out(rax -> a, rcx -> b)\n    return a + b\n}\nfn main() { exit(f()) }\n' > $A1_D/ms_x86.kr
+for A1_P in "asm_one_insn_multi_string_run_arm64|arm64|ms_a64.kr" "asm_one_insn_multi_string_ok_x86_64|x86_64|ms_x86.kr"; do
+    IFS='|' read A1_N A1_A A1_S <<< "$A1_P"
+    TOTAL=$((TOTAL + 1))
+    if ! arch_runner $A1_A; then skip_row $A1_N "$ARCH_NORUN"; continue; fi
+    rm -f $A1_D/ms.out
+    ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$A1_A $A1_S -o ms.out > /dev/null 2> ms.se )
+    A1_RC=$( ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $ARCH_RUNNER ./ms.out > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if [ "$A1_RC" = 14 ]; then PASS=$((PASS + 1)); echo "  $A1_N: PASS (two strings, two instructions: exit 14)"
+    else echo "FAIL: $A1_N (exit $A1_RC, want 14; $(head -1 $A1_D/ms.se | cut -c1-160))"; FAIL=$((FAIL + 1)); fi
+done
+
+# asm_a64_wb_encoding_llvm / asm_a64_fixed_encoding_llvm: every accepted
+# ldr/str/ldp/stp form, and the fixed forms A1 corrected (svc hex, msr/mrs
+# xzr, sp/xzr fields, upper-case hex digits) plus the six 64-bit bitmask
+# immediates (a control: a 32-bit cap on immediates refused them), assembled
+# by the compiler (IR and --legacy, --emit=asm listing word) and by llvm-mc
+# (tests/helpers/a64_asm_reference.py). No llvm-mc: a skip naming it.
+cat > $A1_D/wb_enc.txt <<'A1ENC'
+ldr x0, [x9], #8
+ldr x0, [x9], #-8
+ldr x0, [x9], #255
+ldr x0, [x9], #-256
+ldr x0, [x9], #3
+ldr x0, [x9], #0
+ldr x0, [sp], #16
+ldr xzr, [sp], #8
+str x0, [x9], #8
+str x0, [x9], #-16
+ldr x0, [x18, #8]!
+ldr x0, [x9, #8]!
+ldr x0, [x9, #8] !
+ldr x0, [x9, #-8]!
+ldr x0, [x9, #255]!
+ldr x0, [x9, #-256]!
+ldr x0, [x9, #0]!
+str x0, [x9, #8]!
+str x0, [sp, #-16]!
+ldr x0, [x9]
+ldr x0, [x9, #8]
+ldr x0, [x9, #32760]
+ldr x0, [x9, #0x10]
+ldr x0, [sp, #16]
+ldr xzr, [x9]
+str xzr, [x9]
+stp x0, x1, [x9]
+stp x0, x1, [x9, #16]
+ldp x0, x1, [x9, #-512]
+ldp x0, x1, [x9, #504]
+stp x0, x1, [x9, #16]!
+ldp x0, x1, [x9, #-16]!
+stp x0, x1, [x9], #16
+ldp x0, x1, [x9], #-16
+ldp x0, x1, [sp], #16
+stp x29, x30, [sp, #-16]!
+ldp xzr, x1, [x9]
+ldp x0, x1, [x9, #-0]
+ldp x0, x1, [x9], #0
+ldp x9, x1, [x9]
+stp x9, x9, [x9]
+stp x0, x0, [sp, #-16]!
+A1ENC
+cat > $A1_D/fx_enc.txt <<'A1ENC'
+svc #0x80
+svc #65535
+svc #0
+msr tpidr_el0, xzr
+mrs xzr, tpidr_el0
+msr tpidr_el0,x1
+mov x29, sp
+and sp, x0, #0xff
+sub sp, sp, #16
+add x0, sp, #8
+mov sp, x9
+ldr xzr, [x9]
+stp xzr, xzr, [sp, #-16]!
+movz x0, #0x3C5
+dsb ish
+dmb ish
+and x0, x1, #0xffff0000ffff0000
+orr x0, xzr, #0x5555555555555555
+and x0, x1, #0xffffffff00000000
+eor x0, x1, #0x8000000000000000
+and x0, x1, #0xfffffffffffffffe
+and x0, x1, #0x100000000
+A1ENC
+for A1_P in "asm_a64_wb_encoding_llvm|wb_enc.txt" "asm_a64_fixed_encoding_llvm|fx_enc.txt"; do
+    A1_N=${A1_P%%|*}
+    TOTAL=$((TOTAL + 1))
+    if ! command -v python3 > /dev/null 2>&1 || ! command -v llvm-mc > /dev/null 2>&1; then
+        skip_row $A1_N "needs python3 and llvm-mc (the independent encoder)"; continue
+    fi
+    A1_O=$(timeout 900 python3 -B "$DIR/helpers/a64_asm_reference.py" $A1_D/${A1_P#*|} $A1_D/ref "$KRC" 2>&1); A1_RC=$?
+    if [ $A1_RC = 0 ]; then PASS=$((PASS + 1)); echo "  $A1_N: PASS ($(tail -1 <<< "$A1_O"))"
+    else echo "FAIL: $A1_N (rc=$A1_RC: $(grep -v '^ok ' <<< "$A1_O" | tr '\n' ' ' | cut -c1-400))"; FAIL=$((FAIL + 1)); fi
+done
+# asm_a64_wb_listing_text (#281): the --emit=asm listing prints what was
+# written -- post-index pairs as `[xN], #imm` (they were listed as the offset
+# form, which also mislisted the compiler's own epilogues), the new pre/post
+# ldr/str, and register 31 as xzr in transfer and data fields.
+cat > $A1_D/lst.txt <<'A1ENC'
+ldr x0, [x9], #8
+ldr x0, [x9, #-8]!
+str xzr, [sp, #-16]!
+ldp x0, x1, [x9], #16
+stp x0, x1, [x9], #-16
+ldp x0, x1, [x9], #0
+ldr xzr, [x9]
+ldp x0, xzr, [x9], #8
+stp xzr, xzr, [sp, #-16]!
+msr tpidr_el0, xzr
+mrs xzr, tpidr_el0
+dc civac, xzr
+ic ivau, xzr
+movz xzr, #1
+A1ENC
+{ printf 'fn f() {\n    asm { "movz x17, #0xbeef"'; while IFS= read -r A1_T; do printf '; "%s"' "$A1_T"; done < $A1_D/lst.txt
+  printf '; "movz x17, #0xfeed" } clobbers(x0, x1, x17)\n}\nfn main() { f()  exit(0) }\n'; } > $A1_D/lst.kr
+for A1_M in ir legacy; do
+    a1_flags linux $A1_M; rm -f $A1_D/lst.s
+    ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC $A1_F --emit=asm lst.kr -o lst.s > /dev/null 2> lst.se )
+    awk '/: d297ddf1/ {on=1; next} /: d29fddb1/ {on=0} on { sub(/^[ \t]*[0-9a-f]+: [0-9a-f]+[ \t]*/, ""); print }' $A1_D/lst.s > $A1_D/lst.got 2> /dev/null
+    cmp -s $A1_D/lst.txt $A1_D/lst.got || A1_BAD="$A1_BAD $A1_M: $(diff $A1_D/lst.txt $A1_D/lst.got 2>&1 | grep '^[<>]' | tr '\n' ' ' | cut -c1-300)$(head -1 $A1_D/lst.se | cut -c1-120);"
+done
+a1_row asm_a64_wb_listing_text "14 instructions listed as written, IR and --legacy"
+
+# asm_a64_wb_range_refused (#245): a pre/post-index offset is imm9, -256..255.
+# Red: assembled with the offset dropped, or as the unsigned-offset form.
+for A1_T in 'ldr x0, [x9], #256' 'ldr x0, [x9], #-257' 'ldr x0, [x9, #256]!' 'str x0, [x9, #-257]!'; do
+    a1_try linux "ir legacy obj" "$A1_T" "$(a1_form "$A1_T" "$A1_RANGE")"
+done
+a1_row asm_a64_wb_range_refused "four out-of-range pre/post-index offsets, IR/--legacy/-c: the located range error"
+# asm_a64_wb_unpredictable_refused (#278): writeback into a transfer
+# register, ldp naming one register twice (any mode: Unpredictable_LDPOVERLAP,
+# also the writeback forms llvm-mc accepts) and `[xN]!` (no offset). Red:
+# all assembled.
+A1_LD="the base register is also the register loaded; with writeback the architecture leaves the result UNPREDICTABLE (#278)"
+A1_ST="the base register is also the register stored; with writeback the architecture leaves the stored value UNPREDICTABLE (#278)"
+A1_TR="the base register is also a transfer register; with writeback the architecture leaves the result UNPREDICTABLE (#278)"
+A1_TW="a load pair names the same register twice; the architecture leaves the result UNPREDICTABLE (#278)"
+A1_PO="a pre-index needs an offset: write [xN, #imm]! (#278)"
+for A1_P in "ldr x9, [x9], #8|$A1_LD" "ldr x9, [x9, #8]!|$A1_LD" "str x9, [x9], #8|$A1_ST" "ldp x9, x1, [x9], #16|$A1_TR" \
+            "ldp x0, x9, [x9, #16]!|$A1_TR" "stp x9, x1, [x9], #16|$A1_TR" "stp x0, x9, [x9, #-16]!|$A1_TR" "ldp x0, x0, [x9]|$A1_TW" \
+            "ldp x0, x0, [x9], #16|$A1_TW" "ldp xzr, xzr, [x9]|$A1_TW" "ldr x0, [x9]!|$A1_PO" "ldp x0, x1, [x9]!|$A1_PO"; do
+    a1_try linux "ir legacy obj" "${A1_P%%|*}" "$(a1_form "${A1_P%%|*}" "${A1_P#*|}")"
+done
+a1_row asm_a64_wb_unpredictable_refused "12 UNPREDICTABLE / offset-less writeback forms, IR/--legacy/-c: the located error"
+# asm_a64_sp_xzr_refused (#276): register 31 is SP in some fields and XZR in
+# others; the name written must be the one the field means. Red: assembled as
+# the other register (`add x0, xzr, #1` read SP, `and xzr, x0, #1` wrote SP).
+for A1_P in "ldr x0, [xzr]|S" "ldp x0, x1, [xzr]|S" "add x0, xzr, #1|S" "add xzr, x1, #1|S" "and xzr, x0, #1|S" "orr xzr, x0, #1|S" \
+            "mov sp, xzr|S" "mov xzr, sp|S" "ldr sp, [x9]|Z" "str sp, [x9]|Z" "ldp sp, x1, [x9]|Z" "stp x0, sp, [x9]|Z" \
+            "and x0, sp, x1|Z" "and x0, sp, #1|Z" "movz sp, #1|Z" "mov sp, #5|Z" "br sp|Z" "blr sp|Z" "dc civac, sp|Z" \
+            "msr tpidr_el0, sp|Z" "mrs sp, tpidr_el0|Z"; do
+    A1_T=${A1_P%%|*}; A1_W=$A1_SPF; [ ${A1_P#*|} = Z ] && A1_W=$A1_ZRF
+    a1_try linux "ir legacy obj" "$A1_T" "$(a1_form "$A1_T" "$A1_W")"
+done
+a1_try linux "ir legacy obj" 'add x0, sp, x1' "$(a1_unsup 'add x0, sp, x1' 'the extended-register form of add/sub (sp with a register operand)')"
+a1_row asm_a64_sp_xzr_refused "22 strings naming sp or xzr where the field means the other register, IR/--legacy/-c"
+# asm_a64_sp_xzr_ok (control): the fields that mean SP take sp, the ones that
+# mean XZR take xzr (mutation: the XZR-field test applied to an SP field
+# refuses `sub sp, sp, #16`).
+for A1_T in 'sub sp, sp, #16' 'and sp, x0, #0xff' 'mov x29, sp' 'mov sp, x9' 'add x0, sp, #8' 'ldr xzr, [x9]' 'msr tpidr_el0, xzr'; do
+    a1_try linux "ir legacy obj" "$A1_T" ok 'in(v -> x9) clobbers(x0, x1, x29)'
+done
+a1_row asm_a64_sp_xzr_ok "sp and xzr where the encoding means them: builds"
+# asm_a64_imm_overflow_refused (#279): an immediate past 2^64 wrapped. A value
+# that fits 64 bits but not the field keeps the field's (unlocated) error.
+for A1_T in 'ldr x0, [x9, #18446744073709551624]' 'mov x0, #18446744073709551616' 'and x0, x1, #0x10000000000000000'; do
+    a1_try linux "ir legacy obj" "$A1_T" "$(a1_form "$A1_T" "the immediate does not fit in 64 bits (#279)")"
+done
+a1_try linux "ir legacy obj" 'mov x0, #4294967296' asm
+a1_row asm_a64_imm_overflow_refused "three immediates past 2^64: the located #279 error; #4294967296 in mov keeps bad operands"
+# asm_a64_reg_name_agree_<os> (#280, #287; SECURITY): a register name is x/w,
+# one or two digits, no leading zero, 0-30 -- the assembler, M3's x18/x29
+# checker and #143's scanner read it with ONE parser. x018 / x0018 were x18,
+# x029 was x29, and x18446744073709551634 (2^64 + 18) wrapped to x18: they
+# passed the checks and wrote the register. Every OS, IR and --legacy. Red:
+# they build (on macOS and Windows too). The agreement legs: spellings that DO
+# name a register keep the checkers' messages.
+for A1_OS in linux macos android windows; do
+    for A1_P in "mov x018, x9|x018" "mov x0018, x9|x0018" "mov x029, x9|x029" "mov x00, x9|x00" "mov x31, x9|x31" \
+                "mov x18446744073709551634, x9|x18446744073709551634" "mov x18446744073709551645, x9|x18446744073709551645" \
+                "ldr x0, [x18446744073709551645], #8|x18446744073709551645" "ldr x0, [x018], #8|x018"; do
+        a1_try $A1_OS "ir legacy" "${A1_P%%|*}" "$(a1_name "${A1_P%%|*}" "${A1_P#*|}")"
+    done
+    case $A1_OS in
+        macos)
+            a1_try macos "ir legacy" 'mov X18, x9' "${A1_L}this asm instruction writes its first register -- here x18, which on macOS is the platform register the system may change at any time (#242); use another register"
+            a1_try macos "ir legacy" 'mov w18, x9' "${A1_L}this asm instruction writes its first register -- here x18, which on macOS is the platform register the system may change at any time (#242); use another register"
+            a1_try macos "ir legacy" 'str w18, [x9]' "$(a1_unsup 'str w18, [x9]' "a 32-bit register ('w0')")" ;;
+        windows)
+            a1_try windows "ir legacy" 'mov w18, x9' "${A1_L}this asm instruction writes x29/x18 -- on Windows x29 is the frame pointer every unwind record relies on and x18 is the TEB (#143); use another register"
+            a1_try windows "ir legacy" 'mov X29, x9' "${A1_L}this asm instruction writes its first register -- here the frame pointer x29, which every Windows unwind record relies on (#249); use another register" ;;
+    esac
+    a1_row asm_a64_reg_name_agree_$A1_OS "nine over-long / leading-zero / out-of-range names on $A1_OS, IR and --legacy: the #280/#287 line"
+done
+# asm_a64_svc_msr_mrs_refused (#273, #274): svc read every decimal digit of
+# the string (`svc #0x80` was svc #80, `svc #1 2` svc #12); msr/mrs skipped a
+# character and summed digits (`msr tpidr_el0, xzr` used x0, `w1` was x1).
+for A1_T in 'svc #' 'svc #N'; do a1_try linux "ir legacy obj" "$A1_T" "$(a1_comment '#')"; done
+for A1_T in 'svc #70000' 'msr tpidr_el0 junk, x1'; do a1_try linux "ir legacy obj" "$A1_T" asm; done
+a1_try linux "ir legacy obj" 'msr tpidr_el0, x40' "$(a1_name 'msr tpidr_el0, x40' x40)"
+a1_try linux "ir legacy obj" 'mrs x40, tpidr_el0' "$(a1_name 'mrs x40, tpidr_el0' x40)"
+a1_try linux "ir legacy obj" 'svc #1 2' "$(a1_trail 'svc #1 2' 2)"
+a1_try linux "ir legacy obj" 'mrs x1, tpidr_el0, x5' "$(a1_trail 'mrs x1, tpidr_el0, x5' ', x5')"
+a1_try linux "ir legacy obj" 'msr tpidr_el0, w1' "$(a1_unsup 'msr tpidr_el0, w1' "a 32-bit register ('w0')")"
+a1_try linux "ir legacy obj" 'mrs w1, tpidr_el0' "$(a1_unsup 'mrs w1, tpidr_el0' "a 32-bit register ('w0')")"
+a1_row asm_a64_svc_msr_mrs_refused "svc / msr / mrs operand spellings that were misread: refused, IR/--legacy/-c"
+# asm_a64_unsupported_refused (Q2): a form the assembler does not encode is
+# refused at the string, naming what is not supported; a word in no list
+# keeps `unrecognized asm instruction`. Red: unlocated errors, or assembled
+# as another instruction (dsb ishst = dsb ish, add ..., #1, lsl #12 = add #1).
+for A1_P in "ldr x0, [x9, #4]|an unscaled offset (ldur/stur)" "ldr x0, [x9, #-8]|an unscaled offset (ldur/stur)" \
+            "ldr x0, [x9, x1]|a register offset" "ldr x0, [x9], x1|a register offset" "ldr x0, =0x1234|a literal (pc-relative) load" \
+            "ldr x0, label|a literal (pc-relative) load" "ldr w0, [x9]|a 32-bit register ('w0')" "mov x0, fp|the alias 'fp'" "mov x0, lr|the alias 'lr'" \
+            "add x0, x1, x2, lsl #2|a shifted or extended operand" "add x0, x1, #1, lsl #12|a shifted or extended operand" \
+            "mov x0, #5, lsl #16|a shifted or extended operand" "add sp, sp, x1|the extended-register form of add/sub (sp with a register operand)" \
+            "dsb ishst|the barrier option 'ishst'" "dmb ishld|the barrier option 'ishld'" "dsb sys|the barrier option 'sys'" \
+            "dc zva, x0|the dc operation 'zva'" "ic iallis|the ic operation 'iallis'" "tlbi vae1, x0|the tlbi operation 'vae1'" \
+            "ldadd x0, x1, [x9]|the mnemonic 'ldadd'" "swp x0, x1, [x9]|the mnemonic 'swp'" "cmp x0, x1|the mnemonic 'cmp'" \
+            "ldur x0, [x9, #-8]|the mnemonic 'ldur'" "b.eq #8|the mnemonic 'b.eq'"; do
+    a1_try linux "ir legacy obj" "${A1_P%%|*}" "$(a1_unsup "${A1_P%%|*}" "${A1_P#*|}")"
+done
+a1_try linux "ir legacy obj" 'frob x0' asm
+a1_row asm_a64_unsupported_refused "24 forms the assembler does not encode: located 'is not supported'; frob x0 keeps unrecognized"
+
+# asm_one_insn_refused_<sep>_arm64 (#245): a second instruction after `;`, the
+# escapes \n / \r (asm text is not escape-processed), a newline or a CR byte
+# is refused at the string -- never split, never dropped. IR / --legacy / obj
+# on Linux, macOS, Android and Windows PE. Red: built with the first
+# instruction only.
+for A1_P in "semicolon|;|a ';'" "esc_n|\\n|'\\n' (asm text is not escape-processed)" "esc_r|\\r|'\\r' (asm text is not escape-processed)" \
+            "lf|
+|a newline" "cr|$A1_CR|a carriage return"; do
+    IFS='|' read -r A1_N A1_S A1_W <<< "$A1_P"
+    [ $A1_N = lf ] && { A1_S='
+'; A1_W="a newline"; }
+    for A1_OS in linux macos android windows; do
+        a1_try $A1_OS "ir legacy obj" "mov x0, #5${A1_S}mov x0, #9" "$A1_SEP $A1_W (#245)"
+    done
+    [ $A1_N = semicolon ] && a1_try linux "ir legacy obj" '0xD503201F;0xD503201F' "$A1_SEP a ';' (#245)"
+    a1_row asm_one_insn_refused_${A1_N}_arm64 "mov x0, #5<$A1_N>mov x0, #9 on Linux/macOS/Android/Windows, IR/--legacy/obj"
+    # x86_64 (IR and --legacy, Linux and Windows PE), riscv32, xtensa
+    for A1_OS in x86_64 x86_64_windows; do
+        a1_try $A1_OS "ir legacy" "nop${A1_S}nop" "$A1_SEP $A1_W (#245)"
+        a1_try $A1_OS "ir legacy" "mov cr3, rax${A1_S}nop" "$A1_SEP $A1_W (#245)"
+    done
+    a1_row asm_one_insn_refused_${A1_N}_x86_64 "nop<$A1_N>nop and mov cr3, rax<$A1_N>nop, Linux and Windows PE, IR and --legacy"
+    a1_try riscv32 ir "nop${A1_S}nop" "$A1_SEP $A1_W (#245)"
+    a1_row asm_one_insn_refused_${A1_N}_riscv32 "nop<$A1_N>nop on riscv32"
+    a1_try xtensa ir "nop${A1_S}nop" "$A1_SEP $A1_W (#245)"
+    a1_row asm_one_insn_refused_${A1_N}_xtensa "nop<$A1_N>nop on xtensa"
+done
+# asm_case_refused_<arch> (Q3): asm is lower case; only the hex digits of a
+# 0x number may be upper case (the controls inside the row build). Red: an
+# unlocated error.
+for A1_T in 'LDR x0, [x9]|L' 'ldr X0, [x9]|X' 'msr SCTLR_EL1, x0|S' 'NOP|N' '0XD503201F|X'; do
+    a1_try linux "ir legacy" "${A1_T%%|*}" "$(a1_case arm64 "${A1_T#*|}")"
+done
+for A1_T in 'movz x0, #0x3C5' '0xD503201F' 'mov x0, #0xFF'; do a1_try linux "ir legacy" "$A1_T" ok; done
+a1_row asm_case_refused_arm64 "LDR / X0 / SCTLR_EL1 / NOP / 0X...: the lower-case line; upper-case hex digits build"
+for A1_T in 'NOP|N' 'mov RAX, rbx|R'; do a1_try x86_64 "ir legacy" "${A1_T%%|*}" "$(a1_case x86_64 "${A1_T#*|}")"; done
+for A1_T in 'int 0xF0' '0x0F 0x01 0xD0'; do a1_try x86_64 "ir legacy" "$A1_T" ok; done
+a1_row asm_case_refused_x86_64 "NOP / RAX: the lower-case line; upper-case hex digits build"
+a1_try riscv32 ir 'NOP' "$(a1_case riscv32 N)"
+a1_try riscv32 ir '0x00150513' ok
+a1_row asm_case_refused_riscv32 "NOP: the lower-case line"
+a1_try xtensa ir 'NOP' "$(a1_case xtensa N)"
+a1_row asm_case_refused_xtensa "NOP: the lower-case line"
+# asm_tab_refused_<arch> (Q4): operands are separated by spaces; a tab
+# followed by more text is refused (trailing blanks are trimmed, below).
+for A1_T in "ldr${A1_TAB}x0, [x9]" "mov x0,${A1_TAB}#5" "${A1_TAB}nop" "ldr${A1_TAB} x0, [x9]"; do a1_try linux "ir legacy" "$A1_T" "$(a1_tab arm64)"; done
+a1_row asm_tab_refused_arm64 "four strings with a tab inside: the tab line"
+a1_try x86_64 "ir legacy" "mov${A1_TAB}rax, rbx" "$(a1_tab x86_64)"
+a1_row asm_tab_refused_x86_64 "mov<tab>rax, rbx: the tab line"
+a1_try riscv32 ir "csrr${A1_TAB}a0, mstatus" "$(a1_tab riscv32)"
+a1_row asm_tab_refused_riscv32 "csrr<tab>a0, mstatus: the tab line"
+a1_try xtensa ir "${A1_TAB}memw" "$(a1_tab xtensa)"
+a1_row asm_tab_refused_xtensa "<tab>memw: the tab line"
+# asm_trailing_blanks_ok_<arch> (A1 note rev 4): spaces and tabs after the
+# instruction are trimmed once, for every parser, so each of these builds to
+# the same bytes as its trimmed spelling. Red: several were refused, or read
+# as an unknown system register / CSR. Control inside: a string of blanks only
+# keeps `unrecognized`.
+a1_blank_same() {   # a1_blank_same TARGET MODE TEXT TRIMMED
+    local ty=uint64 cl='in(v -> x9) clobbers(x0, x1)'
+    case $1 in x86_64*) cl='clobbers(rax, rbx)' ;; riscv32|xtensa) cl=''; ty=uint32 ;; esac
+    a1_flags $1 $2
+    a1_src "$4" "$cl" $ty > $A1_D/t.kr; a1_src "$3" "$cl" $ty > $A1_D/u.kr
+    rm -f $A1_D/t.out $A1_D/u.out
+    ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC $A1_F t.kr -o t.out > /dev/null 2> t.se )
+    ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC $A1_F u.kr -o u.out > /dev/null 2> u.se ); local rc=$?
+    if [ $rc != 0 ] || [ ! -f $A1_D/t.out ] || ! cmp -s $A1_D/t.out $A1_D/u.out; then
+        A1_BAD="$A1_BAD ['$(sed -n 3p $A1_D/u.kr | cut -c12-60 | tr '\t' '>')'] $1 $2: rc=$rc, want the bytes of '$4' $(head -1 $A1_D/u.se | cut -c1-120);"
+    fi
+}
+for A1_P in "nop |nop" "nop$A1_TAB|nop" "nop $A1_TAB|nop" "0xD503201F |0xD503201F" "mrs x1, tpidr_el0$A1_TAB|mrs x1, tpidr_el0" \
+            "tlbi vmalle1 |tlbi vmalle1" "mov x0, #5$A1_TAB|mov x0, #5" "ldr x0, [x9]$A1_TAB|ldr x0, [x9]" "msr tpidr_el0, x1$A1_TAB|msr tpidr_el0, x1"; do
+    for A1_M in ir legacy; do a1_blank_same linux $A1_M "${A1_P%%|*}" "${A1_P#*|}"; done
+done
+a1_try linux "ir legacy" '   ' asm
+a1_row asm_trailing_blanks_ok_arm64 "nine strings with trailing blanks build to the trimmed bytes; blanks only keep unrecognized"
+for A1_P in "nop$A1_TAB|nop" "mov rbx, rax |mov rbx, rax" "nop  |nop"; do
+    for A1_M in ir legacy; do a1_blank_same x86_64 $A1_M "${A1_P%%|*}" "${A1_P#*|}"; done
+done
+a1_row asm_trailing_blanks_ok_x86_64 "three strings with trailing blanks build to the trimmed bytes"
+for A1_P in "nop$A1_TAB|nop" "csrr a0, mstatus$A1_TAB|csrr a0, mstatus" "csrrw a0, mstatus, a1 |csrrw a0, mstatus, a1"; do
+    a1_blank_same riscv32 ir "${A1_P%%|*}" "${A1_P#*|}"
+done
+a1_row asm_trailing_blanks_ok_riscv32 "three strings with trailing blanks build to the trimmed bytes"
+for A1_P in "nop$A1_TAB|nop" "memw |memw"; do a1_blank_same xtensa ir "${A1_P%%|*}" "${A1_P#*|}"; done
+a1_row asm_trailing_blanks_ok_xtensa "two strings with trailing blanks build to the trimmed bytes"
+# asm_comment_refused_<arch> (Q5): a comment goes outside the string. On
+# arm64 `#` is the immediate prefix: `#5`, `#-8`, `#0x10` pass the comment
+# rule (controls inside the row), `#+8` has its own line, any other `#` is a
+# comment. Red: the comment was ignored with the rest of the string.
+for A1_P in "mov x0, #5 // c|//" "nop /* c */|/*" "nop @ c|@" "mov x0, #5 # c|#"; do a1_try linux "ir legacy" "${A1_P%%|*}" "$(a1_comment "${A1_P#*|}")"; done
+a1_try linux "ir legacy" 'mov x0, #+8' "${A1_L}an arm64 immediate is written without '+'; write #8, not #+8 (#245)"
+a1_try linux "ir legacy" 'mov x0, #0x10' ok
+a1_try linux "ir legacy" 'ldr x0, [x9], #-8' ok 'in(v -> x9) clobbers(x0, x9)'
+a1_try linux "ir legacy" 'mov x0, #-8' asm
+a1_row asm_comment_refused_arm64 "//, /*, @ and a bare # refused, #+8 its own line; #0x10 and #-8 pass the rule"
+for A1_P in "nop # c|#" "nop // c|//"; do a1_try x86_64 "ir legacy" "${A1_P%%|*}" "$(a1_comment "${A1_P#*|}")"; done
+a1_row asm_comment_refused_x86_64 "# and // comments: the comment line"
+a1_try riscv32 ir 'nop # c' "$(a1_comment '#')"
+a1_row asm_comment_refused_riscv32 "a # comment: the comment line"
+a1_try xtensa ir 'memw # c' "$(a1_comment '#')"
+a1_row asm_comment_refused_xtensa "a # comment: the comment line"
+# asm_a64_trailing_refused (#245, #277): text after a complete instruction --
+# junk, a second `!`, a second operand list, an extra operand. Red: dropped.
+for A1_P in "ldr x0, [x9] junk|junk" "ldr x0, [x9], #8 junk|junk" "ldr x0, [x9, #8]! junk|junk" "ldr x0, [x9, #8]!!|!" \
+            "ldr x0, [x9, #8], #8|, #8" "ldp x0, x1, [x9], #16, #8|, #8" "ldp x0, x1, [x9, #16], #8|, #8" "mov x0, #5 junk|junk" \
+            "movz x0, #1, lsl #16 junk|junk" "br x1 junk|junk" "smc #0 junk|junk" "brk #0x10 x|x" "msr daifset, #2 x|x" \
+            "msr tpidr_el0, x1 junk|junk" "mrs x1, tpidr_el0 junk|junk" "dc cvac, x0 junk|junk" "ic ivau, x1, x2|, x2" \
+            "dsb ish junk|junk" "nop x|x" "tlbi vmalle1 x|x"; do
+    a1_try linux "ir legacy obj" "${A1_P%%|*}" "$(a1_trail "${A1_P%%|*}" "${A1_P#*|}")"
+done
+a1_try linux "ir legacy obj" 'ldr  x0 ,  [ x9 , #8 ] ' ok
+a1_row asm_a64_trailing_refused "20 instructions with text after them: the located trailing line; extra inner spaces build"
+# asm_x86_exact_refused (#282): the fixed-text x86_64 forms were prefix
+# matches (`mov cr3, rax junk` built as mov cr3, rax) and a gs: displacement
+# was truncated to 32 bits. Text after them is `unrecognized`, as for the
+# register forms; a displacement is 0..0x7FFFFFFF (a disp32 is signed).
+for A1_T in 'mov cr3, rax junk' 'lgdt [rax] junk' 'ltr ax junk' 'in al, dx junk' 'out dx, eax x' 'invlpg [rax] junk' \
+            'push gs:[0x10] junk' 'mov rax, gs:[0x10] junk'; do
+    a1_try x86_64 "ir legacy" "$A1_T" asm
+done
+for A1_T in 'push gs:[0x80000000]' 'mov rax, gs:[0x100000010]' 'mov gs:[0x80000000], rax'; do
+    a1_try x86_64 "ir legacy" "$A1_T" "${A1_L}x86_64 asm '$A1_T': a displacement is a signed 32-bit value; it must be 0 to 0x7FFFFFFF here (#282)"
+done
+for A1_T in 'mov rax, gs:[-8]' 'push gs:[-8]' 'mov gs:[-8], rax'; do
+    a1_try x86_64 "ir legacy" "$A1_T" "${A1_L}x86_64 asm '$A1_T': a negative gs: displacement is not supported by the inline assembler (#245)"
+done
+a1_try x86_64 "ir legacy" 'mov rax, gs:[0x7FFFFFFF]' ok
+a1_row asm_x86_exact_refused "fixed forms with trailing text: unrecognized; gs: displacements outside 0..0x7FFFFFFF: located"
+# asm_x86_number_overflow_refused (#289): asm_parse_num wrapped at 2^64
+# (gs:[18446744073709551632] was gs:[0x10]); [rsp+d] truncated d to 32 bits.
+for A1_T in 'mov rax, gs:[18446744073709551632]' 'push gs:[18446744073709551632]' 'mov rax, [rsp+18446744073709551632]'; do
+    a1_try x86_64 "ir legacy" "$A1_T" "${A1_L}x86_64 asm '$A1_T': the number does not fit in 64 bits (#289)"
+done
+for A1_T in 'mov rax, [rsp+0x80000000]' 'mov rax, [rsp+0x100000010]'; do
+    a1_try x86_64 "ir legacy" "$A1_T" "${A1_L}x86_64 asm '$A1_T': a displacement is a signed 32-bit value; it must be 0 to 0x7FFFFFFF here (#282)"
+done
+a1_try x86_64 "ir legacy" 'mov rax, [rsp+0x10]' ok
+a1_row asm_x86_number_overflow_refused "numbers past 2^64: the #289 line; [rsp+d] past 0x7FFFFFFF: the range line"
+# asm_rv32_exact_refused (#283, #288): csrr/csrrw ignored text after the last
+# field, and rv_asm_after_comma skipped junk INSIDE a field to the next comma.
+for A1_P in "csrr a0, mstatus junk|junk" "csrrw a0, mstatus, a1 junk|junk" "csrrw a0, mstatus, a1, a2|, a2" \
+            "csrr a0 junk, mstatus|junk, mstatus" "csrrw a0 junk, mstatus zz, a1|junk, mstatus zz, a1" "csrrw a0, mstatus zz, a1|zz, a1"; do
+    a1_try riscv32 ir "${A1_P%%|*}" "$(a1_trail "${A1_P%%|*}" "${A1_P#*|}")"
+done
+for A1_T in 'csrr a0, mstatus' 'csrrw a0, mstatus, a1'; do a1_try riscv32 ir "$A1_T" ok; done
+a1_row asm_rv32_exact_refused "six csrr/csrrw strings with junk in or after a field: the trailing line"
+# asm_rv32_raw_hex_refused (#283): raw hex is exactly eight digits, one word
+# (it skipped spaces, read non-hex as 0 and had no width check).
+for A1_T in '0x13' '0x00000013 0x00000513' '0x0000zz13' '0x0000000013'; do
+    a1_try riscv32 ir "$A1_T" "${A1_L}riscv32 asm '$A1_T': raw hex is exactly eight hex digits after 0x, one word per string (#283)"
+done
+a1_try riscv32 ir '0x00150513' ok
+a1_row asm_rv32_raw_hex_refused "four malformed raw-hex words: located; 0x00150513 builds"
+# asm_one_insn_asm_strict_order_arm64 (Q10): under --asm-strict the assembler
+# runs before lowering, so its one-instruction rule comes first; without it
+# M3's checker (run at lowering) names the x18 write.
+a1_src 'mov x1, x9; mov x18, x9' > $A1_D/f.kr
+a1_one "$A1_SEP a ';' (#245)" f.kr --asm-strict --arch=arm64 --target=macos
+a1_one "${A1_L}this asm instruction writes its first register -- here x18, which on macOS is the platform register the system may change at any time (#242); use another register" f.kr --arch=arm64 --target=macos
+a1_row asm_one_insn_asm_strict_order_arm64 "--asm-strict --target=macos: the one-instruction line; without it the #242 line"
+# asm_a64_wb_sp_windows_frame_arm64 (A1 note 2.12): an sp writeback is
+# accepted on Windows; the function is frame-pointer shaped (op 96 / kind 43
+# move SP) and its unwind record passes pe_unwind_check.py. Red: the negative
+# pre-index offset was refused.
+TOTAL=$((TOTAL + 1))
+A1_MISS=$(peu_missing python3 llvm-readobj llvm-objdump)
+if [ -n "$A1_MISS" ]; then skip_row asm_a64_wb_sp_windows_frame_arm64 "needs $A1_MISS"
+else
+    a1_rt_prog sp_roundtrip > $A1_D/spw.kr
+    for A1_M in ir legacy; do
+        a1_flags windows $A1_M; rm -f $A1_D/spw.exe $A1_D/spw.lst
+        if ! ( cd $A1_D && timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC $A1_F spw.kr -o spw.exe --test-listing=spw.lst > /dev/null 2> spw.se ); then
+            A1_BAD="$A1_BAD $A1_M: build failed $(head -1 $A1_D/spw.se | cut -c1-160);"; continue
+        fi
+        A1_O=$(env -u PE_UNWIND_CHECK_DISABLE python3 -B "$DIR/helpers/pe_unwind_check.py" --arch arm64 $A1_D/spw.exe --listing $A1_D/spw.lst 2>&1) \
+            || A1_BAD="$A1_BAD $A1_M: checker $(grep -m1 -v ': PASS' <<< "$A1_O" | cut -c1-160);"
+        awk '/^t:/ {on=1; next} on && /^[A-Za-z_.$][^ ]*:/ {exit} on' $A1_D/spw.lst | grep -qE 'add x29, sp, #[0-9]+' \
+            || A1_BAD="$A1_BAD $A1_M: t's prologue does not set the frame pointer (add x29, sp, #n);"
+    done
+    if [ -z "$A1_BAD" ]; then PASS=$((PASS + 1)); echo "  asm_a64_wb_sp_windows_frame_arm64: PASS (str/ldr sp writeback on Windows PE, IR and --legacy: x29 frame, unwind checker passes)"
+    else echo "FAIL: asm_a64_wb_sp_windows_frame_arm64 ($A1_BAD)"; FAIL=$((FAIL + 1)); fi
+    A1_BAD=""
+fi
+# The cover script's own controls (#286): a mnemonic matched through any
+# other function than asm_match(sptr, 0, ...) would drop out of the set it
+# extracts (rc 2), as would a keyword held in a variable (rc 2); a message
+# literal inside asm_emit_a64 is not a keyword (rc 0); asm_a64_accepted()
+# must equal the extracted set (rc 1 ACCEPTED LIST DRIFT).
+a1_cover_mut() {   # a1_cover_mut ROW WANT_RC WANT_LINE_RE SED_SCRIPT WHAT
+    TOTAL=$((TOTAL + 1))
+    if ! command -v python3 > /dev/null 2>&1; then skip_row $1 "needs python3"; return; fi
+    sed "$4" "$DIR/../src/codegen.kr" > $A1_D/cg_mut.kr
+    if cmp -s "$DIR/../src/codegen.kr" $A1_D/cg_mut.kr; then
+        echo "FAIL: $1 (the mutation did not apply: $5)"; FAIL=$((FAIL + 1)); return
+    fi
+    A1_O=$(python3 -B "$DIR/helpers/asm_write_class_cover.py" $A1_D/cg_mut.kr 2>&1); A1_RC=$?
+    if [ $A1_RC = $2 ] && grep -qE "$3" <<< "$A1_O"; then PASS=$((PASS + 1)); echo "  $1: PASS ($5: rc $A1_RC)"
+    else echo "FAIL: $1 ($5: want rc $2 and /$3/, got rc=$A1_RC: $(tr '\n' ' ' <<< "$A1_O" | cut -c1-200))"; FAIL=$((FAIL + 1)); fi
+}
+a1_cover_mut asm_write_class_cover_matcher_mutation 2 'use asm_match' \
+    's/if asm_match(sptr, 0, "dsb sy", 6) != 0 \&\& asm_rest_blank(sptr, slen, 6) != 0 {/if asm_rest_blank(sptr, slen, 6) != 0 \&\& asm_exact_kw(sptr, slen, "dsb sy", 6) != 0 {/' \
+    "dsb sy matched through another function"
+a1_cover_mut asm_write_class_cover_message_literal_ok 0 'mnemonics' \
+    's/^    asm_a64_fallthrough(sptr, slen) .*/    if slen == 0 { asm_unsupported(sptr, slen, "the barrier option '"'"'ishst'"'"'", 0) }\n&/' \
+    "a message literal inside asm_emit_a64"
+a1_cover_mut asm_write_class_cover_accepted_drift 1 '^ACCEPTED LIST DRIFT: cmp$' \
+    's/^\(fn asm_a64_accepted() -> uint64 { return "|nop|\)/\1cmp|/' \
+    "cmp added to asm_a64_accepted()"
+a1_cover_mut asm_write_class_cover_variable_keyword 2 'must be a string literal' \
+    's/^    if asm_match(sptr, 0, "ret", 3) != 0 \&\& slen == 3 {/    uint64 a1kw = "yield"\n    if asm_match(sptr, 0, a1kw, 5) != 0 \&\& slen == 5 { emit_a64(0xD503203F); return }\n&/' \
+    "a keyword held in a variable"
+# docs_asm_examples_follow_rules (#290): every asm("...") / asm { "..." }
+# literal in the tracked docs/*.md and README.md follows the one-instruction,
+# lower-case, no-tab, no-comment rules (tutorial-uart-driver.md wrote
+# `msr VBAR_EL1, x0` and `msr DAIFClr, #0xF`).
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row docs_asm_examples_follow_rules "needs python3"
+else
+    A1_O=$(cd "$DIR/.." && python3 -B - $(git ls-files 'docs/*.md' README.md) <<'A1PY' 2>&1
+import re, sys
+bad, n = [], 0
+for path in sys.argv[1:]:
+    text = open(path, encoding='utf-8').read()
+    for m in re.finditer(r'\basm\s*([({])', text):
+        close = ')' if m.group(1) == '(' else '}'
+        i, end = m.end(), text.find(close, m.end())
+        if end < 0:
+            continue
+        for s in re.finditer(r'"((?:[^"\\]|\\.)*)"', text[i:end]):
+            lit, n = s.group(1), n + 1
+            line = text.count('\n', 0, i + s.start()) + 1
+            why, k = None, 0
+            while k < len(lit) and why is None:
+                c = lit[k]
+                if lit.startswith('0x', k):          # a hex number: its digits may be upper case
+                    k += 2
+                    while k < len(lit) and lit[k] in '0123456789abcdefABCDEF':
+                        k += 1
+                    continue
+                if c in ';\n\r' or lit.startswith('\\n', k) or lit.startswith('\\r', k):
+                    why = 'more than one instruction'
+                elif 'A' <= c <= 'Z':
+                    why = 'upper case %r' % c
+                elif c == '\t' and lit[k:].strip():
+                    why = 'a tab inside'
+                elif lit.startswith('//', k) or lit.startswith('/*', k) or c == '@':
+                    why = 'a comment'
+                elif c == '#' and (k + 1 >= len(lit) or not (lit[k + 1].isdigit() or lit[k + 1] == '-')):
+                    why = 'a comment, or #+'
+                k += 1
+            if why:
+                bad.append('%s:%d %r: %s' % (path, line, lit, why))
+print('\n'.join(bad) if bad else ('ok %d literals' % n if n else 'no asm literal found -- the scan is broken'))
+A1PY
+)
+    if [ "${A1_O#ok }" != "$A1_O" ]; then PASS=$((PASS + 1)); echo "  docs_asm_examples_follow_rules: PASS (${A1_O#ok })"
+    else echo "FAIL: docs_asm_examples_follow_rules ($(tr '\n' ';' <<< "$A1_O" | cut -c1-400))"; FAIL=$((FAIL + 1)); fi
+fi
+rm -rf $A1_D
 
 # --- #143 A6b-1: x86_64 IR unwind tables ----------------------------------
 # --test-listing=PATH (hidden, review ruling (a)): the listing comes from the
