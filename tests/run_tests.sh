@@ -10801,10 +10801,11 @@ l1_cobj legacy_ret_method_obj_arm64 arm64 3 $L1_D/mo_u64.kr "$L1_FX/c_one_arm64.
 l1_row legacy_ret_method_fat_x86_64 3 $L1_D/m_u64.kr xf:--legacy
 l1_row legacy_ret_method_fat_arm64 3 $L1_D/m_u64.kr af:--legacy
 l1_row legacy_ret_method_windows_x86_64_wine 3 $L1_D/m_u64.kr w:IR w:--legacy
-# Control (green at base; FAILs on a scratch mutation that sets the flag to
-# the receiver's struct after every call): calls that do return a struct stay
-# struct-valued -- P r = p.mk(), fn h() -> P { return p.mk() }, the 24-byte
-# MEMORY class, uint64 v = p.go(), p.go2(3).
+# Control (green at base): calls that do return a struct stay struct-valued
+# -- P r = p.mk(), fn h() -> P { return p.mk() }, the 24-byte MEMORY class,
+# uint64 v = p.go(), p.go2(3). Both rows FAIL on a scratch mutation of the
+# gen_expr / gen_expr_a64 wrappers that clears the flag after every call
+# (ctl_ret --legacy crashes, ctl_big exits 0).
 l1_m248 ctl_var 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; P r = p.mk(); return r.a + 2 }'
 l1_m248 ctl_ret 'fn h() -> P { P p; p.a = 1; p.b = 2; return p.mk() }
 fn f() -> uint64 { P r = h(); return r.a + 2 }'
