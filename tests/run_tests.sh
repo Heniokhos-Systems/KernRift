@@ -40079,8 +40079,9 @@ done
 #    the hidden --test-coff-reloc-limit=N lowers 65535 so pe_unwind_obj_chain
 #    (5 functions: 15 x64 / 10 arm64 relocations) is refused at one below its
 #    count with the error and no output file, and builds at exactly its count;
-#  * a module that defines no function (statics only) stays a one-section
-#    object without .pdata/.xdata, while the fixture gets three sections.
+#  * a module that defines no function (statics only) gets no .pdata/.xdata:
+#    its sections are .text and, since L1 (#149), the writable .data holding
+#    the statics; the fixture (functions, no statics) gets three sections.
 if ! command -v python3 > /dev/null 2>&1; then
     pe_row_skip pe_unwind_obj_reloc_limit "no python3"; pe_row_skip pe_unwind_obj_no_functions "no python3"
 else
@@ -40107,7 +40108,7 @@ else
     PEU_WHY=""
     printf 'static uint64 PEU_K1 = 7\nstatic uint64 PEU_K2 = 0x1234\n' > "$T10_D/peu_consts.kr"
     for PEU_A in x86_64 arm64; do
-        for PEU_SN in peu_consts:1 pe_unwind_obj_chain:3; do
+        for PEU_SN in peu_consts:2 pe_unwind_obj_chain:3; do
             PEU_S=${PEU_SN%%:*}; PEU_WANT=${PEU_SN#*:}
             PEU_SRC="$T10_D/$PEU_S.kr"; [ -e "$PEU_SRC" ] || PEU_SRC="$DIR/fixtures/$PEU_S.kr"
             if ! $T10_KRC --freestanding --arch=$PEU_A --target=windows --emit=obj "$PEU_SRC" -o "$T10_D/peu_nf.obj" > "$T10_D/peu_nf.log" 2>&1; then
@@ -40121,13 +40122,13 @@ print(n, ','.join(b[20 + 40 * i:28 + 40 * i].rstrip(b'\0').decode() for i in ran
 PEUNFEOF
 )
             case "$PEU_WANT" in
-                1) [ "$PEU_O" = "1 .text" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '1 .text';" ;;
+                2) [ "$PEU_O" = "2 .text,.data" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '2 .text,.data';" ;;
                 3) [ "$PEU_O" = "3 .text,.pdata,.xdata" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '3 .text,.pdata,.xdata';" ;;
             esac
         done
     done
     rm -f "$T10_D"/peu_rl.* "$T10_D"/peu_nf.* "$T10_D/peu_consts.kr"
-    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_no_functions "a statics-only module is a one-section object on both arches; a module with functions gets .text/.pdata/.xdata"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_no_functions "a statics-only module gets .text/.data and no unwind sections on both arches; a module with functions gets .text/.pdata/.xdata"
     else pe_row_bad pe_unwind_obj_no_functions "$PEU_WHY"; fi
 fi
 
