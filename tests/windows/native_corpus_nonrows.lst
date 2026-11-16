@@ -120,3 +120,6 @@ asm_x29_writeback_refused_windows_arm64_
 win_coff_asm_cs_codes_
 _windows_arm64_
 X18_WHY_windows
+
+# A1: the a1_flags target name of the x86_64 Windows PE configuration (rows build-side)
+x86_64_windows
