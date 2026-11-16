@@ -66,6 +66,116 @@ of the string (`svc #0x80` was `svc #80`, #273); `msr`/`mrs` with `xzr` used x0 
 the system register (#274); the `--emit=asm` listing printed `ldp`/`stp` post-index as an offset form and register
 31 as `sp` where it is `xzr` (#281). No surveyed program is affected.
 
+**Fixed: whether a `loop { }` ran depended on unrelated code (#247).** The compiler built the `loop`
+condition `1 == 1` with a placeholder where the `==` belongs, and every backend read that placeholder as
+"the 36th token of the file". If that token was `!=`, `<` or `>` — anywhere in the file or an imported one —
+the loop body never ran, on every architecture and backend; under `--legacy`, `-c` and `--emit=lkm` the body
+did not run for almost any file. The same placeholder let a function ending in `while 1 < 1 { }` compile
+without a return value when that `<` happened to be the 36th token (#291). A `loop` is now always infinite
+until `break` or `return`. Rebuild objects, modules and `--legacy` programs that use `loop`. Programs without
+`loop` compile to the same bytes; with the default backend a function using `loop` has a 16-byte smaller
+stack frame.
+
+**Fixed: `--legacy` crashed returning or assigning the result of some calls (#248).** On x86_64 and arm64
+with `--legacy`, `-c` and `--emit=lkm`, a call whose last argument is a struct — `p.go()` on a struct `p`,
+`g(p)`, `self.go()`, `p.mk().go()`, `load64(p)`, `call_ptr(fp, p)` — was treated as returning that struct when
+it returned a scalar: `return …`, `v = …` and passing the result to another call read memory at the returned
+value and crashed. Calls are now struct-valued only when the called function returns a struct.
+
+**Fixed: `call_ptr` passed struct arguments wrongly (#293).** With `--legacy`, `-c` and `--emit=lkm`,
+`call_ptr(fp, s)` with a struct `s` passed the struct's address where the called function expects the struct
+itself (x86_64 and arm64; Windows x64 for structs of up to 8 bytes): the callee read garbage. On arm64 a float
+argument to `call_ptr` was also passed in the wrong register. The default backend passed the caller's own
+struct instead of a copy, so a callee that changed its parameter changed the caller's variable. `call_ptr` now
+passes struct arguments exactly as a direct call does. A `call_ptr` target must still return a scalar
+(LANGUAGE.md).
+
+**Fixed: writing a `static` in a `-c` object crashed (#294).** ELF object files (`-c` / `--emit=obj`, x86_64,
+arm64 and riscv32) placed `static` variables inside the read-only `.text` section, so the first write from a
+linked program faulted. Statics now live in a writable `.data` section and are reached through relocations.
+Rebuild object files that have statics. Objects without statics are unchanged.
+
+**Fixed: object files for Windows and macOS (#149, #301, #296).** COFF (`--target=windows -c`) and Mach-O
+(`--target=macos -c`) objects had the same problem as ELF ones: statics sat in the read-only code section.
+They now get a writable `.data` / `__DATA,__data` section reached through relocations. Both formats also
+exported only `main`: an `@export` function could not be called from C. It is now an external symbol, as in
+ELF objects.
+
+**Fixed: string literals and `fn_addr` in arm64 object files (#298, #299).** An arm64 object (ELF, COFF or
+Mach-O) computed the address of a string literal or of `fn_addr("f")` as if its code would be loaded at a page
+boundary: once linked, `"hello"` read other bytes and `call_ptr(fn_addr("f"), …)` jumped into garbage. These
+references are now relocations. x86_64 objects were correct.
+
+**Fixed: a struct passed after the register arguments (#295).** With `--legacy`, `-c` and `--emit=lkm`, a
+struct argument that no longer fit in the remaining argument registers was passed wrongly on x86_64, Windows
+x64 and arm64 (the callee read garbage or crashed): for example the 7th argument of a 7-argument function, or
+a 16-byte struct after five integers. Such structs now follow the platform ABI (on the stack, whole), on the
+caller and the callee side, also through `call_ptr`. `call_ptr` on x86_64 also passed only six `f64` arguments
+in registers; it now passes eight.
+
+**Fixed: Windows `--legacy` functions read float parameters from the wrong register (#297).** A Windows x64
+function compiled with `--legacy`, `-c` or `--emit=lkm` read its first four `f64`/`f32` parameters from the
+integer registers. KernRift's own direct calls fill both, so only `call_ptr` and C callers of a KernRift object
+were affected: they passed `2.5` and the function saw garbage. The parameters are now read from xmm0–xmm3.
+
+**Fixed: `--legacy` float values (#302).** With `--legacy`, `-c` and `--emit=lkm` (x86_64, arm64, Windows), an
+`f32` variable, static, struct field or pointer store given an `f64` value (every float literal without `f` is
+an `f64`) stored the wrong bits, so `f32 v = 2.5` read back as 0; a float `static` was read as an integer;
+mixing `f32` and `f64` in arithmetic or a comparison used the wrong width; and `-x` on a float did not change
+its sign (`f64` too). `--legacy` now converts at each of these points, as the default backend always did.
+`benchmarks/mandelbrot.kr` built with `--legacy` printed a different image before; it now matches.
+
+**Fixed: `f32` array elements (#305, with #302).** Storing an `f64` value into an element of an `f32` array —
+`f32[4] a; a[1] = 2.5` — wrote the low 32 bits of the double, on every backend and architecture. The value is
+now narrowed, as every other `f32` store already was, and an `f32` stored into an `f64` array is widened.
+
+**Fixed: a large struct passed to a C function could be changed by it (#303).** On Windows x64 and arm64,
+`--legacy`, `-c` and `--emit=lkm` passed the address of the caller's own struct, so a C function that modified
+its parameter modified the caller's variable. The caller now passes a private copy, as both ABIs require — for
+structs whose KernRift layout matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout
+handling is task L1b). This applies on Windows x64 to structs whose size is not 1, 2, 4 or 8 bytes, and on
+arm64 to structs over 16 bytes that are not HFAs.
+
+**Changed: Windows x64 structs of 3, 5, 6 or 7 bytes are passed by reference (#315).** Windows x64 passes a
+struct by value only when it is 1, 2, 4 or 8 bytes. `--legacy`, `-c` and `--emit=lkm` passed 3/5/6/7-byte
+structs by value, which C does not read. The new rule follows both ABIs for structs whose KernRift layout
+matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout handling is task L1b).
+**Rebuild objects built by an older krc that define or call a function taking such a struct.**
+
+**Fixed: calling an `extern fn` that returns a struct crashed (#308).** With `--legacy`, `-c` and
+`--emit=lkm`, on x86_64 and arm64, the struct returned by a C function was treated as a pointer. It is now
+received in the registers (or through the hidden result pointer) as the platform C ABI requires, for structs
+whose KernRift layout matches C's (see LANGUAGE.md §24, "Structs across the C boundary"; full C layout
+handling is task L1b).
+
+**Fixed: a call to a function returning a struct over 16 bytes passed the wrong first argument (#310).** On
+x86_64 with `--legacy`, `-c` and `--emit=lkm`, `fn mk(u64 x) -> Big` received the address of the result in
+place of `x`.
+
+**Changed: Windows x64 struct returns follow the Win64 ABI (#309).** With `--legacy`, `-c` and `--emit=lkm` on
+Windows x64, a returned struct of 1, 2, 4 or 8 bytes now comes back in `rax`. Any other size comes back
+through a result pointer the caller passes as the first argument. Before, 9–16-byte structs came back in a
+register pair, which C does not read, and a call to a function returning a struct over 16 bytes crashed even
+between KernRift functions. **This changes the calling convention of KernRift Windows x64 functions that
+return a struct whose size is not 1, 2, 4 or 8 bytes: rebuild every object built by an older krc that defines
+or calls such a function.** A function returning a struct writes exactly the struct's size through the result
+pointer, never past the end (#315, also on x86_64 Linux/macOS for structs over 16 bytes whose size is not a
+multiple of 8).
+
+**Changed: structs over 16 bytes are passed by value on the stack on x86_64 Linux and macOS (#306).**
+`--legacy`, `-c` and `--emit=lkm` passed such a struct as a pointer, while the System V ABI (and therefore C)
+passes its bytes in the stack argument area. KernRift functions now follow the ABI both as caller and callee,
+so they link correctly with C in both directions for structs whose KernRift layout matches C's (see LANGUAGE.md
+§24, "Structs across the C boundary"; full C layout handling is task L1b). **This changes the calling
+convention of KernRift functions that take a struct over 16 bytes: rebuild every object and module built by an
+older krc that defines or calls such a function; mixing old and new objects passes garbage.**
+
+**Fixed: a struct variable used as an integer (#312, #314).** With `--legacy`, `-c` and `--emit=lkm`, `return s`
+from a function declared `-> u64`, `f(s)` into a `u64` parameter (also of a method), or `p = s` / `o.f = s` /
+`g = s` into an integer, where `s` is a struct variable, returned, passed or stored the struct's contents (or
+crashed) instead of its address, which is what the default backend does. `examples/linked_list.kr --legacy`
+crashed for this reason.
+
 ### Correctness fixes that stop a program from building
 
 Emergency correctness breakage (ABI_POLICY.md), no deprecation period:
@@ -132,6 +242,14 @@ Inline asm (#214, #215, #218, #219), the same policy:
   literal loads, `w` registers, `fp`/`lr`, shifted operands, other barrier options, mnemonics such as
   `ldadd`/`swp`/`cmp`) now say so at the string. Migration: one string per instruction (`asm { "a"; "b" }`), lower
   case, the supported form, or a raw hex word. No surveyed program is affected.
+- **A struct parameter or return type on a routed Windows import, or on an `extern fn` / `@export` fn of a
+  riscv32 object, is an error (#307)** — a routed import (the kernel32/ws2_32/bcrypt names bound through the
+  import table) was passed the struct in a way Windows does not expect, and riscv32 objects do not follow the
+  ILP32 C ABI for struct arguments and returns yet (planned for v2.11.2). Located at the struct type.
+  Migration: pass a pointer to the struct.
+- **Windows arm64 `--legacy`: a by-value struct argument that overflows the argument registers is an error
+  (#293, #295)** — in a `call_ptr` or a direct call; the outgoing argument area was sized for fewer stack
+  arguments. Located at the call. Migration: pass a pointer, or fewer arguments before the struct.
 
 These are emergency correctness breakage under ABI_POLICY.md: an ignored or misread constraint
 register is a silent miscompile. No surveyed program used `clobbers()`, named the stack pointer
