@@ -881,7 +881,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
   diagnostic that lands on line 6. Print the *whole* output before concluding
   the compiler did not diagnose something.)
 - **AST-level DCE seeds only `main` and `@export`** (`dce_scan`,
-  `src/codegen.kr:17387`). `_start` is not a seed, so freestanding riscv32 and
+  `src/codegen.kr:17412`). `_start` is not a seed, so freestanding riscv32 and
   xtensa (and `--emit=image`) entry points had to be added explicitly
   (`src/main.kr:4616`–`4631`).
 - **A provider reached only through override resolution gets pruned.** Under
@@ -889,7 +889,7 @@ DCE-able: it reads the image's own data by name and cannot fault.
   provider, and an f-string's buffer reroutes to the `alloc` provider — but
   neither reroute is a `Call` node in the AST, so the provider is dead to
   `dce_scan` and is pruned. Both needed explicit seeds
-  (`src/codegen.kr:17217`–`17237`). The seeds are deliberately *narrow* —
+  (`src/codegen.kr:17242`–`17262`). The seeds are deliberately *narrow* —
   gated on `target_os == 4`, on the callee really being one of the four print
   builtins, and on that name not itself being overridden — so that the test
   proving the seed is load-bearing cannot pass vacuously.

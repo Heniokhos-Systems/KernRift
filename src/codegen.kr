@@ -3469,7 +3469,7 @@ fn cg_sysv_struct_regs(uint64 si) -> uint64 {
     uint64 sz = struct_total_size(si)
     uint64 ni = 0
     uint64 ns = 0
-    if c0 == 3 { return 1 }
+    if c0 == 3 { return 0x10000 }        // #306: MEMORY class -- on the stack, by value, no register
     if c0 == 1 { ni = 1 }
     if c0 == 2 { ns = 1 }
     if sz > 8 {
@@ -9589,6 +9589,7 @@ fn gen_expr_node(uint64 node) {
                     xn = xn + 1
                     if xsi != 0xFFFFFFFF && target_os != 2 {
                         if struct_abi_class0(xsi) != 3 && struct_total_size(xsi) > 8 { xn = xn + 1 }
+                        if struct_abi_class0(xsi) == 3 { xn = xn + (struct_total_size(xsi) + 7) / 8 - 1 }   // #306
                     }
                     xa = xa + 1
                 }
@@ -9620,7 +9621,9 @@ fn gen_expr_node(uint64 node) {
                     // #295: a struct whose eightbytes do not all fit in the
                     // registers still free goes whole on the stack (SysV).
                     uint64 xforce = 0
-                    if xsi2 != 0xFFFFFFFF && target_os != 2 && struct_abi_class0(xsi2) != 3 {
+                    if xsi2 != 0xFFFFFFFF && target_os != 2 && struct_abi_class0(xsi2) == 3 {
+                        xforce = 1                                     // #306: MEMORY class, by value on the stack
+                    } else if xsi2 != 0xFFFFFFFF && target_os != 2 {
                         uint64 xrr = cg_sysv_struct_regs(xsi2)
                         if cpg + (xrr & 0xFF) > 6 || cpf + (xrr >> 8) > 8 { xforce = 1 } else { cpg = cpg + (xrr & 0xFF); cpf = cpf + (xrr >> 8) }
                     } else if xfk != 0 {
@@ -9643,7 +9646,23 @@ fn gen_expr_node(uint64 node) {
                             by_addr = 1
                             legacy_copy_struct_arg_x86(xsrc, xsi2)    // #303: caller-owned copy
                         }
-                        if target_os != 2 && xc0 == 3 { by_addr = 1 }
+                        if target_os != 2 && xc0 == 3 {
+                            // #306: every eightbyte, in order, to the stack
+                            uint64 xmq = 0
+                            while xmq < (xsz + 7) / 8 {
+                                emit_load_rax_from_stack(xsrc)
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(xmq * 8)
+                                rax_cache = 0
+                                emit_store_rax_to_stack(xbase + xj * 8)
+                                uint64 xz0 = 0
+                                uint64 xkp_m = xkinds + xj * 8
+                                unsafe { *(xkp_m as uint64) = xz0 }
+                                xj = xj + 1
+                                xmq = xmq + 1
+                            }
+                            by_addr = 2
+                        }
+                        if by_addr != 2 {
                         emit_load_rax_from_stack(xsrc)
                         if by_addr == 0 {
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)   // mov rax, [rax]
@@ -9665,6 +9684,7 @@ fn gen_expr_node(uint64 node) {
                             uint64 xkp_xk1 = xkinds + xj * 8
                         unsafe { *(xkp_xk1 as uint64) = xk1 }
                             xj = xj + 1
+                        }
                         }
                     }
                     while xfj0 < xj {
@@ -11571,8 +11591,9 @@ fn gen_expr_node(uint64 node) {
                     if xs_sf != 0xFFFFFFFF {
                         xs_any = 1
                         uint64 xs_r = cg_sysv_struct_regs(xs_sf)
+                        if (xs_r & 0x10000) != 0 { xs_need = 1 }        // #306: MEMORY class goes on the stack
                         uint64 xs_ni = xs_r & 0xFF
-                        uint64 xs_ns = xs_r >> 8
+                        uint64 xs_ns = (xs_r >> 8) & 0xFF
                         if xs_gi + xs_ni > 6 || xs_fi + xs_ns > 8 { xs_need = 1 } else { xs_gi = xs_gi + xs_ni; xs_fi = xs_fi + xs_ns }
                     } else if xs_ff != 0 {
                         xs_fi = xs_fi + 1
@@ -11588,7 +11609,7 @@ fn gen_expr_node(uint64 node) {
                     while xs_a < arg_count {
                         uint64 xc_sf = 0
                         unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xc_sf }
-                        if xc_sf != 0xFFFFFFFF && struct_abi_class0(xc_sf) != 3 {
+                        if xc_sf != 0xFFFFFFFF {
                             xn = xn + (struct_total_size(xc_sf) + 7) / 8
                         } else {
                             xn = xn + 1
@@ -11618,12 +11639,13 @@ fn gen_expr_node(uint64 node) {
                         uint64 xe_ff = 0
                         unsafe { *(arg_float_flags + xs_a * 8 as uint64) -> xe_ff }
                         uint64 xsrc = arg_slots_base + xs_a * 8
-                        if xe_sf != 0xFFFFFFFF && struct_abi_class0(xe_sf) != 3 {
+                        if xe_sf != 0xFFFFFFFF {
                             uint64 xr = cg_sysv_struct_regs(xe_sf)
                             uint64 xni = xr & 0xFF
-                            uint64 xns = xr >> 8
+                            uint64 xns = (xr >> 8) & 0xFF
                             uint64 xforce = 0
-                            if pg + xni > 6 || pf + xns > 8 { xforce = 1 } else { pg = pg + xni; pf = pf + xns }
+                            if (xr & 0x10000) != 0 { xforce = 1 }              // #306: MEMORY class, by value on the stack
+                            else if pg + xni > 6 || pf + xns > 8 { xforce = 1 } else { pg = pg + xni; pf = pf + xns }
                             uint64 xsl = (struct_total_size(xe_sf) + 7) / 8
                             uint64 xk = 0
                             while xk < xsl {
@@ -11631,12 +11653,13 @@ fn gen_expr_node(uint64 node) {
                                 if xk == 0 {
                                     emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
                                 } else {
-                                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x40); emit_byte(0x08)
+                                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(xk * 8)
                                 }
                                 rax_cache = 0
                                 emit_store_rax_to_stack(xbase + xj * 8)
                                 uint64 xcls = struct_abi_class0(xe_sf)
                                 if xk == 1 { xcls = struct_abi_class1(xe_sf) }
+                                if (xr & 0x10000) != 0 { xcls = 1 }
                                 uint64 xfv = 0
                                 if xcls == 2 { xfv = 1 }
                                 uint64 xfp = xff + xj * 8
@@ -11700,6 +11723,7 @@ fn gen_expr_node(uint64 node) {
                     emit_byte(0x24); emit_u32_le(caller_sret_area)
                 }
                 emit_mov_rdi_rax()
+                rax_cache = 0        // R26: rax now holds the sret address, not an argument slot
                 call_int_idx = 1
             }
             uint64 ii = 0
@@ -15992,9 +16016,10 @@ fn gen_function(uint64 fn_node) {
                     // arrived whole on the stack, its eightbytes in order.
                     uint64 sv_r = cg_sysv_struct_regs(param_si_spill)
                     uint64 sv_ovf = 0
-                    if int_pidx + (sv_r & 0xFF) > 6 || float_pidx + (sv_r >> 8) > 8 { sv_ovf = 1 }
+                    if int_pidx + (sv_r & 0xFF) > 6 || float_pidx + ((sv_r >> 8) & 0xFF) > 8 { sv_ovf = 1 }
+                    if (sv_r & 0x10000) != 0 { sv_ovf = 1 }             // #306: MEMORY class arrives by value on the stack
                     if sv_ovf != 0 {
-                        if sv_c0 == 3 {
+                        if sv_c0 == 99 {
                             if stack_pidx >= 64 {
                                 write(2, "error: too many stack parameters (max 64)\n", 42)
                                 fatal_exit()
