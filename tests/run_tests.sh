@@ -33933,8 +33933,10 @@ fi
 
 # A known mnemonic with operands that do not parse must say THAT, not "unknown
 # instruction" -- which would send the reader looking for a missing `mov`.
+# (`x99` was the operand here; since A1 an x/w-and-digits token that names no
+# register has its own located error, #280/#287, so a non-register word is used.)
 TOTAL=$((TOTAL + 1))
-printf 'fn main() -> uint64 { asm { "mov x0, x99" }  return 0 }\n' > "$A64A_D/op.kr"
+printf 'fn main() -> uint64 { asm { "mov x0, v99" }  return 0 }\n' > "$A64A_D/op.kr"
 op_err=$($KRC --arch=arm64 --emit=arx "$A64A_D/op.kr" -o "$A64A_D/op.arx" 2>&1)
 if printf '%s' "$op_err" | grep -q "bad operands in arm64 asm"; then
     PASS=$((PASS + 1)); echo "  a64_bad_operands_name_the_mnemonic: PASS"
