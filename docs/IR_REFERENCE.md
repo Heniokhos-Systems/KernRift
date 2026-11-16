@@ -603,7 +603,7 @@ Four emitters, one dispatch function each:
 |---|---|---|---|
 | x86_64 | `ir_emit_x86_insn` | `src/ir.kr:9752` | `x86_nyi_op`, `src/ir.kr:9352` |
 | AArch64 | `ir_emit_arm64_insn` | `src/ir_aarch64.kr:1270` | `a64_nyi_op`, `src/ir_aarch64.kr:906` |
-| RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1113` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
+| RV32IMC | `ir_emit_riscv_insn` | `src/ir_riscv.kr:1107` | `rv_nyi_op`, `src/ir_riscv.kr:133` |
 | Xtensa LX6 | `ir_emit_xtensa_insn` | `src/ir_xtensa.kr:1713` | `xt_nyi_op`, `src/ir_xtensa.kr:157` |
 
 All four NYI helpers write `error: <arch>: IR op <N> not yet implemented\n`
@@ -663,7 +663,7 @@ Consequences worth stating plainly:
 - **`IR_NEG` (12) and `IR_NOT` (13) are unimplemented on riscv32 and
   xtensa**, and both *are* emitted by ordinary lowering, so `-x` and `~x` on
   a non-constant operand are hard build failures on those targets.
-- **`IR_ALLOC` (70) is hosted-only on riscv32** (`src/ir_riscv.kr:2070`
+- **`IR_ALLOC` (70) is hosted-only on riscv32** (`src/ir_riscv.kr:2064`
   opens `if freestanding != 0 { rv_nyi_op(op); return }`) **and absent on
   xtensa entirely.** Since structs and local arrays over the stack threshold
   lower to `IR_ALLOC`, they are unavailable on freestanding riscv32 and on
@@ -705,7 +705,7 @@ internal `fixup_table`; it never calls `extern_fn_lookup`. Extern symbols are
 the reason `--emit=obj` and `--emit=lkm` are routed to the legacy backend
 (§2).
 
-**One exception, and it is real:** `src/ir_riscv.kr:1587`–`1608` *does* emit
+**One exception, and it is real:** `src/ir_riscv.kr:1581`–`1602` *does* emit
 `R_RISCV_CALL_PLT` for an extern callee when `cg_emit_mode == 3`. riscv32 has
 no legacy backend, so `--emit=obj` there necessarily goes through the IR, and
 the relocation had to be implemented in it. Verified:
@@ -749,7 +749,7 @@ therefore cannot add an anonymous `IR_SYSCALL` by accident.
 
 Readers: `ir_insn_origin_at()` (`src/ir.kr:544`), called from the op-52
 handler on all three IR backends that have one (`src/ir.kr:11441`,
-`src/ir_aarch64.kr:2078`, `src/ir_riscv.kr:2352`). Each falls back to
+`src/ir_aarch64.kr:2078`, `src/ir_riscv.kr:2346`). Each falls back to
 `"an unnamed syscall lowering"` when the slot is 0 — never a guessed name.
 The table is also read by **codegen**: on Windows the op-52 dispatch copies the
 origin into `ir_win_sc_origin`, and the x86_64 and arm64 write arms read it
@@ -904,7 +904,7 @@ document. It runs once per function, after lowering and before liveness.
 
 `--O0` sets `ir_opt_level = 0` (`src/ir.kr:13490`, written only at
 `src/main.kr:10964`) and each backend skips the whole call
-(`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2418`,
+(`src/ir.kr:15665`, `src/ir_aarch64.kr:3683`, `src/ir_riscv.kr:2412`,
 `src/ir_xtensa.kr:2832`). Note the spelling: **`--O0`**, two dashes. There is
 no `-O0`, `-O1`, `--O2` — no other write to `ir_opt_level` exists.
 
