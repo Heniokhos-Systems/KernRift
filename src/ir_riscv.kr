@@ -2172,7 +2172,7 @@ fn ir_emit_riscv_insn(uint64 ii) {
     // interned name id and NOT the callee-name token IR_CALL's fixups use,
     // so it can't be resolved via fn_lookup(); resolve_fnaddr_fixups_riscv()
     // below strips the quotes and byte-scans fn_table, exactly like
-    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7481-7580). Lower to the
+    // resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7526-7627). Lower to the
     // same pcrel auipc+addi pair as STR_CONST/STATIC_ADDR (table_sel=2 =
     // fnaddr_fixup_table) — full auipc+addi, NOT arm64's ADR+NOP shortcut:
     // riscv has no single-instruction ±1 MiB pcrel-address op, and jal is a
@@ -2927,7 +2927,7 @@ fn resolve_static_fixups_riscv(uint64 data_start) {
 // fn_lookup compares token IDENTITY against that table, not raw source
 // bytes against an arbitrary string-literal payload. Strip the quotes and
 // byte-compare against fn_table instead — ported from
-// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7481-7580), identical to
+// resolve_fnaddr_fixups_a64 (codegen_aarch64.kr:7526-7627), identical to
 // the x86 resolver (codegen.kr:16559-16623).
 fn resolve_fnaddr_fixups_riscv() {
     uint64 i = 0
@@ -2940,7 +2940,7 @@ fn resolve_fnaddr_fixups_riscv() {
         unsafe { *(fe4 as uint32) -> str_tok }
 
         // str_tok's text includes the surrounding quotes; strip them to
-        // get the bare function name (mirrors codegen_aarch64.kr:7494-7495).
+        // get the bare function name (mirrors codegen_aarch64.kr:7540-7541).
         uint64 wst = str_tok
         uint64 sstart = tok_text_start(wst)
         uint64 slen = tok_text_len(wst)
@@ -2994,7 +2994,7 @@ fn resolve_fnaddr_fixups_riscv() {
             patch_u32(wpo + 4, (lo << 20) | (rd << 15) | (rd << 7) | 0x13)
         } else {
             // Undefined function — mirror the x86/arm64 fn_addr resolvers
-            // (codegen.kr:16618-16619, codegen_aarch64.kr:7575-7576): without
+            // (codegen.kr:16618-16619, codegen_aarch64.kr:7622-7623): without
             // this the placeholder pair would silently resolve to disp=0
             // (pointing at its own auipc) instead of failing to compile.
             write(2, "error: fn_addr: undefined function '", 36)

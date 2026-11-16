@@ -7478,7 +7478,53 @@ fn resolve_fixups_a64() {
 }
 
 // Resolve fn_addr fixups for ARM64: ADRP+ADD → patch to function address
+// #298/#299: every ADRP+ADD pair the arm64 resolvers patch inside .text
+// (string literals, fn_addr), recorded as (site, target offset in the blob)
+// so an object writer can emit relocations for them instead of trusting the
+// baked page arithmetic, which assumes .text lands page-aligned.
+static uint64 a64_pc_tab = 0
+static uint64 a64_pc_n = 0
+static uint64 a64_pc_cap = 0
+fn a64_pc_reset() { a64_pc_n = 0 }
+fn a64_pc_record(uint64 site, uint64 target) {
+    if a64_pc_n >= a64_pc_cap {
+        uint64 ncap = a64_pc_cap * 2
+        if ncap < 256 { ncap = 256 }
+        uint64 nt = cg_alloc(ncap * 16)
+        uint64 k = 0
+        while k < a64_pc_n * 2 {
+            uint64 sp = a64_pc_tab + k * 8
+            uint64 v = 0
+            unsafe { *(sp as uint64) -> v }
+            uint64 dp = nt + k * 8
+            unsafe { *(dp as uint64) = v }
+            k = k + 1
+        }
+        a64_pc_tab = nt
+        a64_pc_cap = ncap
+    }
+    uint64 e = a64_pc_tab + a64_pc_n * 16
+    unsafe { *(e as uint64) = site }
+    uint64 e8 = e + 8
+    unsafe { *(e8 as uint64) = target }
+    a64_pc_n = a64_pc_n + 1
+}
+fn a64_pc_count() -> uint64 { return a64_pc_n }
+fn a64_pc_site(uint64 i) -> uint64 {
+    uint64 e = a64_pc_tab + i * 16
+    uint64 v = 0
+    unsafe { *(e as uint64) -> v }
+    return v
+}
+fn a64_pc_target(uint64 i) -> uint64 {
+    uint64 e = a64_pc_tab + i * 16 + 8
+    uint64 v = 0
+    unsafe { *(e as uint64) -> v }
+    return v
+}
+
 fn resolve_fnaddr_fixups_a64() {
+    a64_pc_reset()
     uint64 i = 0
     while i < fnaddr_fixup_count {
         uint64 fentry = fnaddr_fixup_table + i * 8
@@ -7524,6 +7570,7 @@ fn resolve_fnaddr_fixups_a64() {
                     unsafe { *(fe4_2 as uint32) -> foff }
                     target_off = foff
                     found = 1
+                    a64_pc_record(patch_off, target_off)
                 }
             }
             fi = fi + 1
@@ -7664,6 +7711,7 @@ fn resolve_string_fixups_a64(uint64 str_data_start) {
         unsafe { *(fe4 as uint32) -> str_off }
         uint64 wso = str_off
         uint64 wco = code_off
+        a64_pc_record(wco, str_data_start + wso)
         if target_os == 2 || target_os == 3 {
             // PE/Android: patch ADRP + ADD with PC-relative offsets
             uint64 code_va = a64_compute_va(wco)

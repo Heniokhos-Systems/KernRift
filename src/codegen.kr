@@ -20105,8 +20105,12 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         static_rel_n = static_fixup_count
         if arch == 1 { static_rel_n = static_fixup_count * 2 }
     }
+    // #298/#299: arm64 string-literal and fn_addr ADRP+ADD pairs inside .text
+    // get relocations too (against a .text section symbol).
+    uint64 pc_rel_n = 0
+    if arch == 1 { pc_rel_n = a64_pc_count() * 2 }
     uint64 has_relocs = 0
-    if extern_call_count > 0 || static_rel_n > 0 { has_relocs = 1 }
+    if extern_call_count > 0 || static_rel_n > 0 || pc_rel_n > 0 { has_relocs = 1 }
     uint64 shstrtab_size = 55
     if has_relocs != 0 { shstrtab_size = 66 }
 
@@ -20126,6 +20130,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Elf64_Sym = 24 bytes each
     uint64 sym_count = 1 + fn_count + extern_fn_count
     if static_rel_n > 0 { sym_count = sym_count + 1 }   // .data section symbol
+    if pc_rel_n > 0 { sym_count = sym_count + 1 }       // .text section symbol
     uint64 symtab_size = sym_count * 24
 
     // Build strtab: copy each function name from source
@@ -20209,7 +20214,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // then: .rela.text (optional, only if externs exist)
     // then: section headers (6 or 7 * 64 bytes)
 
-    uint64 rela_count = extern_call_count + static_rel_n
+    uint64 rela_count = extern_call_count + static_rel_n + pc_rel_n
     uint64 rela_size = rela_count * 24   // Elf64_Rela = 24 bytes
 
     uint64 elf_hdr_size = 64
@@ -20353,6 +20358,18 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u64_le(0)
         emit_u64_le(0)
         data_sec_sym = local_count
+        local_count = local_count + 1
+    }
+
+    uint64 text_sec_sym = 0
+    if pc_rel_n > 0 {
+        emit_u32_le(0)
+        emit_byte(0x03)
+        emit_byte(0)
+        emit_u16_le(1)
+        emit_u64_le(0)
+        emit_u64_le(0)
+        text_sec_sym = local_count
         local_count = local_count + 1
     }
 
@@ -20538,6 +20555,18 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
                 emit_u64_le(wsd - 4)
             }
             sfi = sfi + 1
+        }
+        uint64 pci = 0
+        while pc_rel_n > 0 && pci < a64_pc_count() {
+            uint64 pcs = a64_pc_site(pci)
+            uint64 pct = a64_pc_target(pci)
+            emit_u64_le(pcs)
+            emit_u64_le((text_sec_sym << 32) | 275)         // R_AARCH64_ADR_PREL_PG_HI21
+            emit_u64_le(pct)
+            emit_u64_le(pcs + 4)
+            emit_u64_le((text_sec_sym << 32) | 277)         // R_AARCH64_ADD_ABS_LO12_NC
+            emit_u64_le(pct)
+            pci = pci + 1
         }
     }
 
