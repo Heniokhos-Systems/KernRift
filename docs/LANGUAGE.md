@@ -1251,6 +1251,25 @@ asm {
 }
 ```
 
+Each string is **exactly one instruction**, written in **lower case** (hex
+digits may be either case: `#0x3C5`, `0xD503201F`), operands separated by
+spaces, with no comment inside the string. A `;`, a newline, a carriage
+return, `\n` / `\r` (asm text is not escape-processed, so these are two
+characters), a tab inside the instruction, a comment (`//`, `/*`, `@`; `#` on
+x86_64, riscv32 and xtensa, and on arm64 a `#` that does not start an
+immediate) or any text after the instruction is an error at the string
+(#245; before 2.11.1 everything after the first instruction was silently
+dropped, so `"mov x0, #5; mov x0, #9"` assembled as `mov x0, #5`). Trailing
+spaces and tabs are allowed. The `;` *between* strings is a separator of the
+block, outside any string. Comments go outside the string:
+
+```kr
+asm {
+    "str x9, [sp, #-16]!";   // push
+    "ldr x0, [sp], #16"      // pop
+} in(v -> x9) out(x0 -> v)
+```
+
 ### Raw hex bytes
 
 When the assembler doesn't recognize a mnemonic, drop to hex:
@@ -1269,6 +1288,13 @@ asm("0xD503201F")        // nop (ARM64)
 `push`/`pop` of a register, and **`call <reg>` / `jmp <reg>`** (indirect,
 `FF /2` and `FF /4`).
 
+Every form is matched exactly: `mov cr3, rax junk` or `invlpg [rax]; nop` is
+an error, not the first instruction. A `gs:` displacement (`mov rax, gs:[d]`,
+`mov gs:[d], rax`, `push gs:[d]`) and `[rsp+d]` are 0 … `0x7FFFFFFF` (a disp32
+is sign-extended; larger values used to be truncated to 32 bits), a negative
+`gs:` displacement is not supported, and a number that does not fit in 64
+bits is an error (#282, #289).
+
 `call <reg>` exists for the one thing `call_ptr` cannot do: enter a function
 after changing `rsp` yourself. `call_ptr` is framed normally by the compiler,
 and a compiler-managed frame does not survive `rsp` moving underneath it, so a
@@ -1277,10 +1303,48 @@ still absent — there is **no memory operand** (`mov [rcx], rsp`) and no
 immediate arithmetic (`and rsp, -16`), so a trampoline must keep its saved
 state in registers and let the caller do any alignment.
 
-**ARM64**: `nop`, `ret`, `eret`, `wfi`, `wfe`, `sev`, barriers (`isb`,
-`dsb sy/ish`, `dmb sy/ish`), `svc #N`, and `mrs` / `msr` for 20+ system
-registers including `SCTLR_EL1`, `VBAR_EL1`, `TCR_EL1`, `MAIR_EL1`,
-`MPIDR_EL1`, `CurrentEL`.
+**ARM64** (64-bit forms only; registers `x0` … `x30`, `sp`, `xzr`, with no
+leading zeros):
+- `nop`, `ret`, `eret`, `wfi`, `wfe`, `sev`, `isb`; barriers `dsb sy|ish`,
+  `dmb sy|ish`;
+- `dc cvac|cvau|civac|cvap|ivac|isw|csw|cisw, xN`, `ic ivau, xN`,
+  `ic iallu|ialluis`, `tlbi vmalle1|vmalle1is|alle1|alle2|alle3`;
+- `msr daifset|daifclr, #imm` (0 … 15); `svc`, `smc`, `hvc`, `brk #imm`
+  (0 … 65535, decimal or `0x`);
+- `msr <sysreg>, xN` / `mrs xN, <sysreg>` for 20+ system registers, written in
+  lower case: `sctlr_el1`, `vbar_el1`, `tcr_el1`, `mair_el1`, `mpidr_el1`,
+  `currentel`, …;
+- `mov xD, xN` (an `sp` operand gives the `add #0` form), `mov xD, #0..65535`,
+  `movz`/`movk xD, #imm{, lsl #0|16|32|48}`;
+- `and`/`orr`/`eor`/`bic xD, xN, xM` or `#imm` (any 64-bit value with an
+  AArch64 logical-immediate encoding, e.g. `#0xffff0000ffff0000`), `orn xD,
+  xN, xM`; `add`/`sub xD, xN, xM` or `#0..4095`; `br`/`blr xN`;
+- `ldr`/`str xT, [xN{, #0..32760}]` (a multiple of 8), pre-index `[xN,
+  #-256..255]!` and post-index `[xN], #-256..255` (they write back, #245);
+  `ldp`/`stp xA, xB, [xN{, #imm}]`, `[xN, #imm]!`, `[xN], #imm` (imm a
+  multiple of 8 from -512 to 504).
+
+Register 31 must be spelled as the register the field means: `sp` as a
+load/store base, in `add`/`sub` with an immediate, as the destination of a
+logical immediate and in `mov` to or from `sp`; `xzr` everywhere else (`add
+x0, xzr, #1` and `and xzr, x0, #1` are errors, #276). Refused, located: a
+writeback whose base is also a transfer register and an `ldp` naming one
+register twice (the architecture leaves them UNPREDICTABLE, #278), `[xN]!`,
+an out-of-range offset or an immediate past 2^64. Forms the assembler does
+not encode are refused as "not supported by the inline assembler" -- `w`
+registers, the `fp`/`lr` aliases (write `x29`/`x30`), shifted or extended
+operands (`, lsl #12`), unscaled and register offsets, literal loads, other
+barrier options (`dsb ishst`), other `dc`/`ic`/`tlbi` operations and other
+mnemonics (`ldadd`, `swp`, `cmp`, `ldur`, …): use a raw hex word for them.
+
+A writeback writes its base register: name it in `in()`/`out()`/`clobbers()`
+like any register the block writes. An `sp` writeback must leave SP as it
+found it (`str x9, [sp, #-16]!` … `ldr x0, [sp], #16`) and, in Linux user
+space, keep it 16-byte aligned.
+
+**riscv32**: `csrr` / `csrrw` check every field (text inside or after one is
+an error, #288) and raw hex is exactly eight hex digits after `0x`, one word
+per string (#283). **xtensa**: `nop`, `memw`, `simcall`.
 
 For anything not in the built-in table, use the raw hex form.
 

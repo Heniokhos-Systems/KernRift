@@ -59,6 +59,13 @@ calling `file_size`, compile to different code: 135 of 13062 surveyed builds cha
 compiler itself is byte-identical. Rebuild `-c` objects, modules, Windows programs and `--legacy` programs
 containing such asm.
 
+**arm64 inline asm: pre- and post-index `ldr`/`str` now write back (#245).** `ldr x0, [x9], #8` assembled as
+`ldr x0, [x9]` and `ldr x0, [x18, #8]!` lost its `!`: no writeback and, for post-index, no offset. They now
+encode as written (imm9, −256..255). Also corrected: `svc #0x…` read hex digits as decimal and summed every digit
+of the string (`svc #0x80` was `svc #80`, #273); `msr`/`mrs` with `xzr` used x0 and a following `;` could change
+the system register (#274); the `--emit=asm` listing printed `ldp`/`stp` post-index as an offset form and register
+31 as `sp` where it is `xzr` (#281). No surveyed program is affected.
+
 ### Correctness fixes that stop a program from building
 
 Emergency correctness breakage (ABI_POLICY.md), no deprecation period:
@@ -106,9 +113,25 @@ Inline asm (#214, #215, #218, #219), the same policy:
   `x29`/`fp`, the frame pointer every unwind record relies on. Before, Windows refused only lower-case
   first-register and `ldp` writes, exempted `bic` as if it were a branch (#251), and wrongly refused an atomic whose
   first register is only read (#252: no longer refused by this check; the inline assembler does not
-  support `ldadd`/`swp` yet, #245). Raw-byte asm cannot be checked and now gets a warning on macOS
+  accept `ldadd`/`swp`; it refuses them as not supported). Raw-byte asm cannot be checked and now gets a warning on macOS
   and Android, as on Windows. Linux and bare metal are unchanged. Migration: use another register. No surveyed
   program is affected.
+- **An asm string holds exactly one instruction, in lower case, with no comment (#245, #277, #282, #283)** —
+  everything after the first instruction (`;`, newline, `\n`, `, lsl #12`, a second operand list, a comment) was
+  silently dropped on arm64, on x86_64 for the fixed forms (`mov cr3, rax`, `invlpg [rax]`, `in`/`out`,
+  `lgdt`/`lidt`/`sidt`, `ltr`, `gs:` forms) and on riscv32 (`csrr`/`csrrw`); it is now an error at the string, as
+  are upper-case letters (other than hex digits) and tabs inside an instruction. Also refused instead of
+  mis-assembled: `dsb`/`dmb` options other than `sy`/`ish` (they assembled as `sy`/`ish`, #275); `sp`/`xzr` where
+  the encoding means the other register (`add x0, xzr, #1` read SP, `and xzr, x0, #1` wrote SP, #276); writeback
+  forms the architecture leaves UNPREDICTABLE and `[xN]!` (#278); immediates that do not fit in 64 bits (they
+  wrapped, #279); **register names with leading zeros or more than two digits — `x018` and
+  `x18446744073709551634` were x18, `x029` was x29, and they passed the macOS/Android/Windows register checks
+  (#280, #287)**; x86_64 numbers that do not fit in 64 bits (#289) and displacements of 2^31 or more (`gs:` forms
+  and `[rsp+d]`, #282); text inside a riscv32 operand (`csrr a0 junk, mstatus`, #288); riscv32 raw hex that is not
+  exactly eight hex digits (#283). Forms the inline assembler does not encode (unscaled offsets, register offsets,
+  literal loads, `w` registers, `fp`/`lr`, shifted operands, other barrier options, mnemonics such as
+  `ldadd`/`swp`/`cmp`) now say so at the string. Migration: one string per instruction (`asm { "a"; "b" }`), lower
+  case, the supported form, or a raw hex word. No surveyed program is affected.
 
 These are emergency correctness breakage under ABI_POLICY.md: an ignored or misread constraint
 register is a silent miscompile. No surveyed program used `clobbers()`, named the stack pointer
