@@ -15931,6 +15931,13 @@ fn gen_function(uint64 fn_node) {
                         emit_store_regN_to_stack(0x48, 0, poff)
                     }
                     float_pidx = float_pidx + 1
+                } else if param_is_float != 0 && target_os == 2 && pidx < 4 {
+                    // #297: Windows x64 passes the Nth float argument in xmmN
+                    // (positional). The GPR of the same position is NOT
+                    // defined for a non-varargs call -- the legacy direct-call
+                    // loader happens to fill both, call_ptr and C callers fill
+                    // only xmmN.
+                    emit_store_xmmN_f64(pidx, poff)
                 } else if target_os == 2 {
                     // Windows calling convention (positional, no change)
                     if pidx == 0 {
