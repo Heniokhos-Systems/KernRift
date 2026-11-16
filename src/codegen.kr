@@ -14612,6 +14612,9 @@ fn gen_stmt(uint64 node) {
         uint32 val_child = ast_child(node)
         uint64 wvc = val_child
         gen_expr(wvc)
+        // #312 (assign half): only a struct DESTINATION takes a byte copy; into a
+        // scalar (`u64 p; p = s`, a static `g = s`) the struct's address is stored.
+        if expr_is_struct != 0xFFFFFFFF && struct_var_lookup(name_tok) == 0xFFFFFFFF { expr_is_struct = 0xFFFFFFFF }
         // Struct assignment: copy bytes for value semantics
         if expr_is_struct != 0xFFFFFFFF {
             uint64 src_si = expr_is_struct
@@ -17211,8 +17214,7 @@ fn dce_register_fn(uint64 name_tok, uint64 fn_node) {
 // loads) leave it alone. Method calls are left to their own self handling (a
 // method name may be shared, so its declaration is not looked up by name).
 fn cg_clear_scalar_param_struct_flags(uint64 callee_tok, uint64 flags, uint64 argc) {
-    if fn_method_lookup(callee_tok) != 0 { return }
-    uint64 cn = dce_lookup_fn(callee_tok)
+    uint64 cn = dce_lookup_fn(callee_tok)          // #314: fn names (methods too) are global
     if cn == 0 { return }
     uint32 cp = ast_child(cn)
     uint64 wcp = cp
