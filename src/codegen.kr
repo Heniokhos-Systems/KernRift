@@ -3491,6 +3491,35 @@ fn legacy_field_fkind(uint64 obj_tok, uint64 field_tok) -> uint64 {
     return legacy_fkind_of_type(tk)
 }
 
+// #303: replace the struct address in frame slot `slot` by the address of a
+// fresh copy of the struct (a caller-owned temporary, Win64 / AAPCS64 B.4).
+fn legacy_copy_struct_arg_x86(uint64 slot, uint64 si) {
+    uint64 sz = struct_total_size(si)
+    uint64 n = (sz + 7) / 8
+    uint64 area = cg_slot_off(var_count)
+    uint64 c = 0
+    while c < n { var_count = var_count + 1; c = c + 1 }
+    var_frame_size = var_count * 8
+    uint64 rem = var_frame_size & 15
+    if rem != 0 { var_frame_size = var_frame_size + 16 - rem }
+    emit_load_rax_from_stack(slot)
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)            // mov rcx, rax
+    uint64 k = 0
+    while k < n {
+        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x81); emit_u32_le(k * 8)   // mov rax, [rcx + 8k]
+        rax_cache = 0
+        emit_store_rax_to_stack(area + k * 8)
+        k = k + 1
+    }
+    if area < 128 {
+        emit_byte(0x48); emit_byte(0x8D); emit_byte(0x44); emit_byte(0x24); uint8 a8 = area; emit_byte(a8)
+    } else {
+        emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84); emit_byte(0x24); emit_u32_le(area)
+    }
+    rax_cache = 0
+    emit_store_rax_to_stack(slot)
+}
+
 // Resolve all static RIP-relative fixups. Call after all code is emitted.
 // data_start = out_len at the time statics are placed.
 @export
@@ -9579,7 +9608,10 @@ fn gen_expr_node(uint64 node) {
                         uint64 xsz = struct_total_size(xsi2)
                         uint64 xc0 = struct_abi_class0(xsi2)
                         uint64 by_addr = 0
-                        if target_os == 2 && xsz > 8 { by_addr = 1 }
+                        if target_os == 2 && xsz > 8 {
+                            by_addr = 1
+                            legacy_copy_struct_arg_x86(xsrc, xsi2)    // #303: caller-owned copy
+                        }
                         if target_os != 2 && xc0 == 3 { by_addr = 1 }
                         emit_load_rax_from_stack(xsrc)
                         if by_addr == 0 {
@@ -11304,6 +11336,21 @@ fn gen_expr_node(uint64 node) {
         if fn_method_lookup(callee_tok) != 0 {
             uint64 self_ptr_flag = 0xFFFFFFFF
             unsafe { *(arg_struct_flags as uint64) = self_ptr_flag }
+        }
+
+        // #303: Win64 passes a struct of more than 8 bytes as a pointer to a
+        // CALLER-OWNED COPY, which the callee may modify. Make that copy here
+        // (the callee's own copy stays: harmless, and C callers pass a copy).
+        if target_os == 2 && abi_struct_pass_by_val != 0 {
+            uint64 w3 = 0
+            while w3 < arg_count {
+                uint64 w3sf = 0
+                unsafe { *(arg_struct_flags + w3 * 8 as uint64) -> w3sf }
+                if w3sf != 0xFFFFFFFF && struct_total_size(w3sf) > 8 {
+                    legacy_copy_struct_arg_x86(arg_slots_base + w3 * 8, w3sf)
+                }
+                w3 = w3 + 1
+            }
         }
 
         // Load args into registers from temp slots
