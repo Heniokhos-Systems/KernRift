@@ -87,8 +87,8 @@ jobs:
       # never graded. These packages are what a full local run has.
       #
       # EACH PACKAGE INSTALLS ON ITS OWN, AND A MISSING ONE IS NOT FATAL.
-      # Package names differ across releases: Ubuntu 26.04 has no
-      # qemu-user-static (its qemu-user ships plain-named static binaries) and
+      # Package names differ across releases: Ubuntu 26.04 has no "-static"
+      # qemu-user package (its qemu-user ships plain-named static binaries) and
       # split qemu-system-riscv out of qemu-system-misc (#323: the x86_64 job
       # skipped the 11 riscv32 system rows until qemu-system-riscv was listed;
       # on 24.04 it is "unavailable" and qemu-system-misc has riscv32). A job
@@ -97,11 +97,12 @@ jobs:
       # tests/helpers/qemu_bin.sh (the -static name if present, else the plain
       # one), so no name needs bridging here (#260).
       #
-      # --no-install-recommends, AND NO qemu-user-static (#272): qemu-user
-      # recommends qemu-user-binfmt, and 24.04's qemu-user-static ships
-      # binfmt.d files itself; either registers a binfmt_misc handler for every
-      # foreign arch, and then a row meant to run a foreign binary only through
-      # qemu_bin, or to skip because the host cannot run it, execs it directly.
+      # --no-install-recommends, AND NO "-static" qemu-user PACKAGE (#272):
+      # qemu-user recommends its "-binfmt" companion package, and 24.04's
+      # "-static" one ships binfmt.d files itself; either registers a
+      # binfmt_misc handler for every foreign arch, and then a row meant to run
+      # a foreign binary only through qemu_bin, or to skip because the host
+      # cannot run it, execs it directly.
       # The next step fails the job on such a handler.
       - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
         timeout-minutes: 15
@@ -562,8 +563,8 @@ jobs:
       # never graded. These packages are what a full local run has.
       #
       # EACH PACKAGE INSTALLS ON ITS OWN, AND A MISSING ONE IS NOT FATAL.
-      # Package names differ across releases: Ubuntu 26.04 has no
-      # qemu-user-static (its qemu-user ships plain-named static binaries) and
+      # Package names differ across releases: Ubuntu 26.04 has no "-static"
+      # qemu-user package (its qemu-user ships plain-named static binaries) and
       # split qemu-system-riscv out of qemu-system-misc (#323: the x86_64 job
       # skipped the 11 riscv32 system rows until qemu-system-riscv was listed;
       # on 24.04 it is "unavailable" and qemu-system-misc has riscv32). A job
@@ -572,11 +573,12 @@ jobs:
       # tests/helpers/qemu_bin.sh (the -static name if present, else the plain
       # one), so no name needs bridging here (#260).
       #
-      # --no-install-recommends, AND NO qemu-user-static (#272): qemu-user
-      # recommends qemu-user-binfmt, and 24.04's qemu-user-static ships
-      # binfmt.d files itself; either registers a binfmt_misc handler for every
-      # foreign arch, and then a row meant to run a foreign binary only through
-      # qemu_bin, or to skip because the host cannot run it, execs it directly.
+      # --no-install-recommends, AND NO "-static" qemu-user PACKAGE (#272):
+      # qemu-user recommends its "-binfmt" companion package, and 24.04's
+      # "-static" one ships binfmt.d files itself; either registers a
+      # binfmt_misc handler for every foreign arch, and then a row meant to run
+      # a foreign binary only through qemu_bin, or to skip because the host
+      # cannot run it, execs it directly.
       # The next step fails the job on such a handler.
       - name: Install optional cross-target tooling (riscv32, xtensa, qemu-user)
         timeout-minutes: 15

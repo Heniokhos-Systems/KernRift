@@ -5858,68 +5858,134 @@ else FAIL=$((FAIL + 1)); echo "FAIL: qemu_resolver_single_site ($QRS_BAD)"; fi
 # registers a binfmt handler for every foreign arch, and qemu-user recommends
 # qemu-user-binfmt, which does the same. With a foreign-arch handler a row
 # that means to run a foreign binary only through tests/helpers/qemu_bin.sh, or
-# to skip because the host cannot run it, would exec it directly. Over
-# .github/workflows/*.yml (non-comment lines):
-#   no qemu-*-static name at all (qemu-user-static, qemu-<arch>-static, the
-#   removed qemu-$a-static symlink loop of #260);
-#   in every step that installs qemu-user, each apt-get install of a qemu
-#   package (or of the tooling loop's variable) has --no-install-recommends;
+# to skip because the host cannot run it, would exec it directly. Over every
+# step of .github/workflows/*.yml, with `\`-continued lines joined:
+#   neither package name appears anywhere in a workflow file, comments
+#   included, and no qemu-*-static name in a non-comment line (the removed
+#   qemu-$a-static symlink loop of #260, qemu-<arch>-static binaries);
+#   every apt-get/apt install that names qemu-user (or installs a loop
+#   variable whose `for` list names it) has --no-install-recommends;
 #   every `$( ... qemu_bin ...)` assignment is followed by a loud `|| { ...
 #   exit 1; }` (a failing substitution would end a `bash -e` step silently);
-#   the binfmt check (tests/helpers/ci_binfmt_check.sh) runs right after each
-#   Linux job's optional-tooling step and after the qemu-user installs of the
-#   ARM64 smoke and Android steps.
+#   tests/helpers/ci_binfmt_check.sh runs after every qemu-user install (later
+#   in its step, or as the next step), and both Linux jobs' optional-tooling
+#   steps install qemu-user.
+# The same checker runs first on synthetic workflows, one per gap it must
+# catch (a step installing qemu-user-binfmt by name, qemu-user on a continued
+# install line, the static package in a step that never says qemu-user, a
+# loop install without the flag, no binfmt check, a silent qemu_bin), each of
+# which must be flagged, and a clean one, which must not.
 TOTAL=$((TOTAL + 1))
 if ! command -v python3 > /dev/null 2>&1; then skip_row ci_qemu_user_names "no python3"
 else
     CQU_O=$(python3 -B - "$DIR/.." <<'CQUEOF' 2>&1
 import glob, os, re, sys
 root = sys.argv[1]
-bad = []
 CHECK = 'tests/helpers/ci_binfmt_check.sh'
+BANNED = ('qemu-user' + '-static', 'qemu-user' + '-binfmt')
+QU = re.compile(r'(?<![\w-])qemu-user(?![\w-])')
+INSTALL = re.compile(r'\bapt(?:-get)?\b.*\binstall\b')
+def joined(lines):
+    """(first line number, text) per logical line: comments dropped, `\\`-continued lines joined."""
+    out, buf, at = [], '', 0
+    for i, l in enumerate(lines, 1):
+        if l.lstrip().startswith('#') and not buf:
+            continue
+        if not buf:
+            at = i
+        if l.rstrip().endswith('\\'):
+            buf += l.rstrip()[:-1] + ' '
+            continue
+        out.append((at, buf + l))
+        buf = ''
+    if buf:
+        out.append((at, buf))
+    return out
 def steps(lines):
-    cur = None
+    sts, cur = [], None
     for i, l in enumerate(lines, 1):
         m = re.match(r'^\s*- name:\s*(.*)$', l)
         if m:
             cur = [m.group(1).strip(), i, []]
-            yield cur
+            sts.append(cur)
         if cur is not None:
-            cur[2].append((i, l))
-tooling = 0
-for p in sorted(glob.glob(os.path.join(root, '.github', 'workflows', '*.yml'))):
-    name = os.path.basename(p)
-    lines = open(p, encoding='utf-8').read().split('\n')
-    code = [(i, l) for i, l in enumerate(lines, 1) if not l.lstrip().startswith('#')]
-    for i, l in code:
+            cur[2].append(l)
+    return sts
+def check(name, text):
+    bad, tooling = [], 0
+    lines = text.split('\n')
+    for i, l in enumerate(lines, 1):
+        for b in BANNED:
+            if b in l:
+                bad.append('%s:%d names %s' % (name, i, b))
+    for i, l in joined(lines):
         for m in re.finditer(r'qemu-[^\s"\'`;|&)]*-static', l):
-            bad.append('%s:%d names %s' % (name, i, m.group(0)))
+            if m.group(0) not in BANNED:
+                bad.append('%s:%d names %s' % (name, i, m.group(0)))
         if re.search(r'=\$\([^)]*\bqemu_bin\b', l) and not re.search(r'\)\s*\|\|\s*\{[^}]*\bexit 1\s*;\s*\}', l):
             bad.append('%s:%d assigns a qemu_bin substitution without || { ...; exit 1; }' % (name, i))
-    sts = list(steps(lines))
+    sts = steps(lines)
     for k, (title, at, body) in enumerate(sts):
-        bcode = [(i, l) for i, l in body if not l.lstrip().startswith('#')]
-        text = '\n'.join(l for _, l in bcode)
-        if re.search(r'(?<![\w-])qemu-user(?![\w-])', text):
-            for i, l in bcode:
-                # a line naming a qemu package, or installing a loop variable (the tooling loop)
-                if re.search(r'apt-get\b.*\binstall\b', l) and re.search(r'(?<![\w-])qemu-|"\$\{?\w+\}?"', l) \
-                   and '--no-install-recommends' not in l:
-                    bad.append('%s:%d step "%s" installs qemu without --no-install-recommends' % (name, i, title))
-            last_install = max((i for i, l in bcode if re.search(r'apt-get\b.*\binstall\b', l)), default=0)
-            after = [i for i, l in bcode if CHECK in l and i > last_install]
-            if title.startswith('Install optional cross-target tooling'):
-                tooling += 1
-                nxt = sts[k + 1] if k + 1 < len(sts) else None
-                if not nxt or not any(CHECK in l for _, l in nxt[2] if not l.lstrip().startswith('#')):
-                    bad.append('%s:%d the step after "%s" does not run %s' % (name, at, title, CHECK))
-            elif last_install and not after:
-                bad.append('%s:%d step "%s" installs qemu-user and does not run %s after it' % (name, at, title, CHECK))
+        code = joined(body)
+        loops = {}
+        for _, l in code:
+            for m in re.finditer(r'\bfor\s+(\w+)\s+in\s+([^;]*?)\s*;\s*do\b', l):
+                loops[m.group(1)] = m.group(2)
+        installs = []
+        for i, l in code:
+            if not INSTALL.search(l):
+                continue
+            names_qu = bool(QU.search(l)) or any(QU.search(v) for var, v in loops.items()
+                                                  if re.search(r'"?\$\{?%s\}?"?' % var, l))
+            if names_qu:
+                installs.append(at + i - 1)
+                if '--no-install-recommends' not in l:
+                    bad.append('%s:%d step "%s" installs qemu-user without --no-install-recommends' % (name, at + i - 1, title))
+        if not installs:
+            continue
+        if title.startswith('Install optional cross-target tooling'):
+            tooling += 1
+        later = any(CHECK in l and at + i - 1 > max(installs) for i, l in code)
+        nxt = sts[k + 1] if k + 1 < len(sts) else None
+        if not later and not (nxt and any(CHECK in l for _, l in joined(nxt[2]))):
+            bad.append('%s:%d step "%s" installs qemu-user and %s does not run after it' % (name, at, title, CHECK))
+    return bad, tooling
+def wf(*stepdefs):
+    t = ['jobs:', '  j:', '    steps:']
+    for title, run in stepdefs:
+        t += ['      - name: ' + title, '        run: |'] + ['          ' + r for r in run.split('\n')]
+    return '\n'.join(t) + '\n'
+APT = 'sudo apt-get install -y '
+GOOD = ('Install optional cross-target tooling (x)',
+        'for p in qemu-system-misc \\\n    qemu-user llvm; do\n  ' + APT + '--no-install-recommends "$p"\ndone')
+BF = ('binfmt', 'bash ' + CHECK)
+mutants = [
+    ('clean', wf(GOOD, BF), 0),
+    ('qemu-user-binfmt installed by name', wf(GOOD, BF, ('x', APT + '--no-install-recommends ' + BANNED[1])), 1),
+    ('qemu-user on a continued install line', wf(GOOD, BF, ('x', APT + '\\\n  qemu-user\nbash ' + CHECK)), 1),
+    ('the static package in a step without qemu-user', wf(GOOD, BF, ('x', APT + '--no-install-recommends gcc ' + BANNED[0])), 1),
+    ('a loop install without the flag', wf(('Install optional cross-target tooling (x)',
+        'for p in qemu-user llvm; do\n  ' + APT + '"$p"\ndone'), BF), 1),
+    ('no binfmt check after a qemu-user install', wf(GOOD, ('x', APT + '--no-install-recommends qemu-user')), 1),
+    ('a silent qemu_bin substitution', wf(GOOD, BF, ('x', 'Q=$(. tests/helpers/qemu_bin.sh; qemu_bin aarch64)')), 1),
+    ('a qemu-<arch>-static binary', wf(GOOD, BF, ('x', 'qemu-aarch64' + '-static /tmp/a')), 1),
+]
+bad = []
+for label, text, want in mutants:
+    got = check('synthetic', text)[0]
+    if bool(got) != bool(want):
+        bad.append('self-test "%s": %s' % (label, ('flagged: ' + got[0]) if got else 'not flagged'))
+tooling = 0
+for p in sorted(glob.glob(os.path.join(root, '.github', 'workflows', '*.yml'))):
+    b, t = check(os.path.basename(p), open(p, encoding='utf-8').read())
+    bad += b
+    tooling += t
 if tooling != 2:
     bad.append('%d optional-tooling steps install qemu-user, want 2 (both Linux jobs)' % tooling)
 print('FAIL: ' + '; '.join(bad[:10]) + ('; ... %d more' % (len(bad) - 10) if len(bad) > 10 else '') if bad else
-      'PASS (no qemu-*-static name; qemu-user installs --no-install-recommends; qemu_bin substitutions fail loudly; '
-      'binfmt check after both tooling steps and each qemu-user install)')
+      'PASS (%d synthetic gaps flagged, clean workflow accepted; no qemu-user-static/-binfmt or qemu-*-static name; '
+      'qemu-user installs --no-install-recommends; qemu_bin substitutions fail loudly; binfmt check after each '
+      'qemu-user install, both tooling steps)' % (len(mutants) - 1))
 CQUEOF
 )
     case "$CQU_O" in
@@ -39757,7 +39823,10 @@ fi
 #  control:  the same link with a --test-no-unwind object: the walk does not
 #            recover through the table-less KR frames -- its exit is neither 7
 #            nor 11 and its chain does not begin walk,d3,d2,main (Wine 9 gave
-#            32 garbage slots, Wine 10 and Windows give 2: walk,d3).
+#            32 garbage slots, Wine 10 and Windows give 2: walk,d3). It must
+#            also have run: its chain starts at walk, and its exit is not 124
+#            (timeout) or 125 (the runner failed), so a launch or transport
+#            failure cannot pass as "did not recover".
 PEU_ROW=pe_unwind_obj_link_windows_wine
 if ! command -v python3 > /dev/null 2>&1 || ! command -v clang > /dev/null 2>&1 || ! command -v lld-link > /dev/null 2>&1 \
    || ! command -v llvm-dlltool > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
@@ -39787,10 +39856,14 @@ else
                 elif [ "$PEU_RC" = 11 ] && [ "$PEU_CH" = "$PEU_PCH,NULL,NULL,NULL,NULL" ]; then PEU_OKS="exit 11, chain $PEU_PCH + Wine <= 9's 4 NULLs"
                 else PEU_WHY="$PEU_WHY peu_p: exit $PEU_RC, chain $PEU_CH; want exit 7 and chain $PEU_PCH (Windows, Wine >= 10), or exit 11 and that chain + 4 NULLs (Wine <= 9);"; fi
             else
+                # the control must have RUN: a chain that starts at walk (the
+                # probe printed its frames), and not a launcher's or timeout's
+                # status (124 timeout, 125 the runner/transport failed)
                 case "$PEU_RC:$PEU_CH" in
-                    7:*|11:*|*:FAIL*|*:walk,d3,d2,main|*:walk,d3,d2,main,*)
-                        PEU_WHY="$PEU_WHY peu_pn: exit $PEU_RC, chain $PEU_CH; want an exit other than 7 and 11 and a readable chain not beginning walk,d3,d2,main (the walk must not recover without tables);" ;;
-                    *) PEU_OKS="$PEU_OKS; --test-no-unwind control exits $PEU_RC, chain $PEU_CH" ;;
+                    7:*|11:*|124:*|125:*|*:|*:FAIL*|*:walk,d3,d2,main|*:walk,d3,d2,main,*)
+                        PEU_WHY="$PEU_WHY peu_pn: exit $PEU_RC, chain '$PEU_CH'; want an exit other than 7, 11, 124 and 125 and a non-empty readable chain starting at walk but not walk,d3,d2,main (the walk must not recover without tables);" ;;
+                    *:walk|*:walk,*) PEU_OKS="$PEU_OKS; --test-no-unwind control exits $PEU_RC, chain $PEU_CH" ;;
+                    *) PEU_WHY="$PEU_WHY peu_pn: exit $PEU_RC, chain '$PEU_CH'; want a chain starting at walk (the probe's own frame);" ;;
                 esac
             fi
         done
@@ -40159,6 +40232,10 @@ else
         if [ -n "$T10_WINE" ]; then
             (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=+unwind timeout 300 "$T10_WINE" peu_x.exe > /dev/null 2> "$T10_D/peu_x.trace")
             PEU_CH=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" --runner=$T10_RUNNER "$T10_D/peu_x.trace" "$T10_D/peu_x.lst" "$PEU_WALK" 2>&1 | tail -1)
+            # Wine 10 faults on in ntdll until a stack overflow and writes
+            # ~4.8 GB of trace per table-less image (#339): gone at once, so a
+            # run never holds it past this read
+            rm -f "$T10_D/peu_x.trace"
             [[ "$PEU_CH" == walk* ]] && PEU_WHY="$PEU_WHY $PEU_B:Wine walked it without tables ($PEU_CH);"
             # the walk must be seen to break, not just be unreadable: with a
             # trace the helper cannot read, this leg passed with nothing
@@ -40167,6 +40244,7 @@ else
                 [ "$T10_RUNNER" = wine ] && PEU_WHY="$PEU_WHY $PEU_B:Wine's trace not read ($PEU_CH);" ;; esac
         fi
     done
+    rm -f "$T10_D/peu_x.trace" "$T10_D/peu_x.exe" "$T10_D/peu_x.lst"
     if [ -z "$T10_WINE" ] && [ -z "$PEU_WHY" ]; then pe_row_skip pe_unwind_no_unwind_switch "no wine (C1 half passed)"
     elif [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_no_unwind_switch "3 images: C1 finds no exception directory, Wine's walk breaks"
     else pe_row_bad pe_unwind_no_unwind_switch "$PEU_WHY"; fi
