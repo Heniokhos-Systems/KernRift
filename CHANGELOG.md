@@ -245,8 +245,9 @@ time limit stops them (#261), and `examples/tutorial-btree` puts its database at
 `$TMPDIR` (#263).
 
 **The suite and CI work on Ubuntu 26.04 (#228, #229, #260, #268, #272, #322, #323, #327).** No
-compiler change: the images these rows build are byte-identical to v2.11.0's; the environment
-changed.
+compiler change: the compiler's output for these rows is byte-identical to v2.11.0's; the
+environment changed. (The linked COFF probe's C host, `host.c`, changed, so the probe images that
+row links are new.)
 - *xtensa boots (#228).* QEMU 10.2.0 (its commit 18727804c065) writes the xtfpga `-kernel` boot
   trampoline before the CPU reset, so `qemu-system-xtensa -M lx60 -kernel <elf>` never reaches the
   image's entry point and the 14 xtensa boot rows timed out. They now boot through one helper,
