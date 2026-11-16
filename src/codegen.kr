@@ -19737,8 +19737,17 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     //                                        ld "executable stack" warning
     // idx 55: .rela.text\0     (11 bytes) — only if extern_call_count > 0
     // Total: 55 or 66 bytes
+    // Static-variable references become relocations against the .data
+    // section symbol (#294): x86_64 one R_X86_64_PC32 per site, arm64 an
+    // ADRP (ADR_PREL_PG_HI21) + its ADD/LDR/STR (ADD_ABS_LO12_NC /
+    // LDST64_ABS_LO12_NC) pair per site.
+    uint64 static_rel_n = 0
+    if data_len > 0 && static_fixup_count > 0 {
+        static_rel_n = static_fixup_count
+        if arch == 1 { static_rel_n = static_fixup_count * 2 }
+    }
     uint64 has_relocs = 0
-    if extern_call_count > 0 { has_relocs = 1 }
+    if extern_call_count > 0 || static_rel_n > 0 { has_relocs = 1 }
     uint64 shstrtab_size = 55
     if has_relocs != 0 { shstrtab_size = 66 }
 
@@ -19757,6 +19766,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // then one per extern function.
     // Elf64_Sym = 24 bytes each
     uint64 sym_count = 1 + fn_count + extern_fn_count
+    if static_rel_n > 0 { sym_count = sym_count + 1 }   // .data section symbol
     uint64 symtab_size = sym_count * 24
 
     // Build strtab: copy each function name from source
@@ -19840,7 +19850,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // then: .rela.text (optional, only if externs exist)
     // then: section headers (6 or 7 * 64 bytes)
 
-    uint64 rela_count = extern_call_count
+    uint64 rela_count = extern_call_count + static_rel_n
     uint64 rela_size = rela_count * 24   // Elf64_Rela = 24 bytes
 
     uint64 elf_hdr_size = 64
@@ -19974,6 +19984,19 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         fi = fi + 1
     }
 
+    // .data STT_SECTION symbol (LOCAL), the target of every static reference.
+    uint64 data_sec_sym = 0
+    if static_rel_n > 0 {
+        emit_u32_le(0)
+        emit_byte(0x03)
+        emit_byte(0)
+        emit_u16_le(2)
+        emit_u64_le(0)
+        emit_u64_le(0)
+        data_sec_sym = local_count
+        local_count = local_count + 1
+    }
+
     // Second pass: emit GLOBAL functions (main)
     if main_fn_idx != 0xFFFFFFFF {
         uint64 no_ptr = name_offsets + main_fn_idx * 8
@@ -20102,7 +20125,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // --- Emit .rela.text section content ---
     if has_relocs != 0 {
         uint64 ri = 0
-        while ri < rela_count {
+        while ri < extern_call_count {
             uint64 re = extern_call_sites + ri * 16
             uint32 rco = 0
             unsafe { *(re as uint32) -> rco }
@@ -20127,6 +20150,35 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
                 emit_u64_le(0xFFFFFFFFFFFFFFFC)
             }
             ri = ri + 1
+        }
+        uint64 sfi = 0
+        while static_rel_n > 0 && sfi < static_fixup_count {
+            uint64 sfe = static_fixups + sfi * 8
+            uint32 sf_code = 0
+            unsafe { *(sfe as uint32) -> sf_code }
+            uint64 sfe4 = sfe + 4
+            uint32 sf_data = 0
+            unsafe { *(sfe4 as uint32) -> sf_data }
+            uint64 wsc = sf_code
+            uint64 wsd = sf_data
+            if arch == 1 {
+                emit_u64_le(wsc)                               // ADRP
+                emit_u64_le((data_sec_sym << 32) | 275)        // R_AARCH64_ADR_PREL_PG_HI21
+                emit_u64_le(wsd)
+                uint64 lo_p = blob + wsc + 4
+                uint32 lo_insn = 0
+                unsafe { *(lo_p as uint32) -> lo_insn }
+                uint64 lo_type = 286                           // R_AARCH64_LDST64_ABS_LO12_NC
+                if (lo_insn & 0xFF800000) == 0x91000000 { lo_type = 277 }   // ADD (imm) -> ADD_ABS_LO12_NC
+                emit_u64_le(wsc + 4)
+                emit_u64_le((data_sec_sym << 32) | lo_type)
+                emit_u64_le(wsd)
+            } else {
+                emit_u64_le(wsc)                               // disp32 field
+                emit_u64_le((data_sec_sym << 32) | 2)          // R_X86_64_PC32
+                emit_u64_le(wsd - 4)
+            }
+            sfi = sfi + 1
         }
     }
 

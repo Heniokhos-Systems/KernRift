@@ -5888,7 +5888,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // nonzero ("Invalid relocation target, existing value is nonzero"),
     // so the disp32 placeholders must stay 0. String-literal fixups are
     // still resolved (they're intra-.text and position-independent).
-    if emit_mode != 7 {
+    // An ELF relocatable (-c, x86_64/arm64) keeps its statics in a separate
+    // writable .data section and refers to them through relocations, like
+    // LKM output (#294), so the displacements are left 0 here.
+    uint64 elf_obj_data = 0
+    if emit_mode == 3 && (arch == 0 || arch == 1) && target_os != 1 && target_os != 2 { elf_obj_data = 1 }
+    if emit_mode != 7 && elf_obj_data == 0 {
         if arch == 0 {
             resolve_static_fixups(data_start)
         } else if arch == 1 {
@@ -5920,7 +5925,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         uint64 total_code = codegen_output_len()
         if arch == 2 {
             // riscv is Linux-ELF only — bypass the target_os Mach-O/COFF split.
-            emit_elf_relocatable_rv32(total_code, 0)
+            emit_elf_relocatable_rv32(data_start, total_code - data_start)
         } else if arch == 3 {
             xtensa_nyi("relocatable (.o) emission")
         } else if target_os == 1 {
@@ -5929,7 +5934,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
             emit_coff_relocatable(total_code, 0, arch)
         } else {
-            emit_elf_relocatable(total_code, 0, arch)
+            emit_elf_relocatable(data_start, total_code - data_start, arch)
         }
         codegen_write_output(output_path)
 
