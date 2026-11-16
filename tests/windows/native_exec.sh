@@ -75,7 +75,9 @@ LOCAL_STATE="${NATIVE_STATE_DIR:-$HOME/.cache/pe_unwind/native_sessions}"
 die() { echo "native_exec.sh: $*" >&2; exit 125; }
 # rps CODE: run inline PowerShell CODE on the laptop (single quotes only, no
 # double quote, no %); the exit status is PowerShell's ($LASTEXITCODE there).
-rps() { ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
+SSH_OPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SSH_OPTS_DIR/ssh_opts.sh"   # NATIVE_SSH_OPTS (#268)
+rps() { ssh "${NATIVE_SSH_OPTS[@]}" "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
 # rrm PATH: remove PATH and assert it is gone. A file a program just wrote may
 # be held for a moment by the laptop's antivirus scan, so removal retries for
 # up to 60 s.
@@ -422,11 +424,11 @@ tar -C "$LJ/up" -cf "$LJ/up.tar" . || die "tar up failed"
 # one mkdir, one upload, one run, one download, one removal
 R="$REMOTE_ROOT\\$NATIVE_SESSION"; RF="$REMOTE_ROOT_FWD/$NATIVE_SESSION"
 rps "New-Item -ItemType Directory -Force '$R' | Out-Null; exit 0" > /dev/null || { cleanup_local; die "remote mkdir failed"; }
-scp -q -o BatchMode=yes "$LJ/up.tar" "$NATIVE_HOST:$RF/up-$JOB.tar" < /dev/null || { cleanup_local; die "scp up failed"; }
+scp -q "${NATIVE_SSH_OPTS[@]}" "$LJ/up.tar" "$NATIVE_HOST:$RF/up-$JOB.tar" < /dev/null || { cleanup_local; die "scp up failed"; }
 rps "$(runner "$R" "$JOB")" >&2
 RC=$?
 [ "$RC" = 0 ] || { cleanup_local; die "remote run failed (status $RC)"; }
-scp -q -o BatchMode=yes "$NATIVE_HOST:$RF/$JOB/out.tar" "$LJ/out.tar" < /dev/null || { cleanup_local; die "scp down failed"; }
+scp -q "${NATIVE_SSH_OPTS[@]}" "$NATIVE_HOST:$RF/$JOB/out.tar" "$LJ/out.tar" < /dev/null || { cleanup_local; die "scp down failed"; }
 rrm "$R\\$JOB" || { cleanup_local; die "remote job tree $R\\$JOB not removed"; }
 awk '{print $1}' "$LJ/blobs.lst" >> "$ST/cached.lst"
 mkdir -p "$LJ/out" && tar -m -C "$LJ/out" -xf "$LJ/out.tar" || { cleanup_local; die "bad result archive"; }

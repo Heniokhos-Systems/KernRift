@@ -58,7 +58,9 @@ NATIVE_HOST="${NATIVE_HOST:-laptop}"
 KRC="${1:?usage: native_concurrent.sh <compiler> <fixtures dir>}"; FX="${2:?fixtures dir}"
 L=$(mktemp -d "${TMPDIR:-$HOME/.cache/pe_unwind}/ncc.XXXXXX")
 RD="C:\\Users\\pante\\pe_unwind_scratch\\ncc$$"; RDF="C:/Users/pante/pe_unwind_scratch/ncc$$"
-rps() { timeout -k 10 "${2:-300}" ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
+SSH_OPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SSH_OPTS_DIR/ssh_opts.sh"   # NATIVE_SSH_OPTS (#268)
+rps() { timeout -k 10 "${2:-300}" ssh "${NATIVE_SSH_OPTS[@]}" "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
 REMOTE=0; CLEANED=0
 cleanup() {
     [ "$CLEANED" = 1 ] && return 0
@@ -180,7 +182,7 @@ if [ $((SLE_OK + RWS_OK + LSH_OK)) = 0 ]; then cleanup; exit 1; fi
 REMOTE=1
 rps "New-Item -ItemType Directory -Force '$RD\\sle','$RD\\rws','$RD\\lsh' | Out-Null; exit 0" > /dev/null; MRC=$?
 [ "$MRC" = 0 ] || { echo "native_concurrent.sh: remote mkdir failed (rc=$MRC)" >&2; cleanup; exit 2; }
-up() { timeout -k 10 300 scp -q -o BatchMode=yes "$@" < /dev/null; local rc=$?; [ "$rc" = 0 ] || { echo "native_concurrent.sh: scp failed (rc=$rc)" >&2; cleanup; exit 2; }; }
+up() { timeout -k 10 300 scp -q "${NATIVE_SSH_OPTS[@]}" "$@" < /dev/null; local rc=$?; [ "$rc" = 0 ] || { echo "native_concurrent.sh: scp failed (rc=$rc)" >&2; cleanup; exit 2; }; }
 if [ "$SLE_OK" = 1 ]; then up "$L/sle/w32_hold.exe" "$L/sle/sys_lasterr.exe" "$L/sle/held.txt" "$NATIVE_HOST:$RDF/sle/"; fi
 if [ "$RWS_OK" = 1 ]; then up "$L/rws/kr.exe" "$L/rws/slow.exe" "$L/rws/hold.exe" "$L/rws/first.exe" "$NATIVE_HOST:$RDF/rws/"; fi
 if [ "$LSH_OK" = 1 ]; then up "$L/lsh/hold.exe" "$L/lsh/probe.exe" "$NATIVE_HOST:$RDF/lsh/"; fi

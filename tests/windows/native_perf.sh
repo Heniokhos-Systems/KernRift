@@ -29,7 +29,9 @@ NATIVE_HOST="${NATIVE_HOST:-laptop}"
 BASE="${1:?usage: native_perf.sh <base krc> <new krc> <out dir> [samples]}"; NEW="${2:?new krc}"; OUT="${3:?out dir}"; N="${4:-15}"
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 RD="C:\\Users\\pante\\pe_unwind_scratch\\perf$$"; RDF="C:/Users/pante/pe_unwind_scratch/perf$$"
-rps() { ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
+SSH_OPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SSH_OPTS_DIR/ssh_opts.sh"   # NATIVE_SSH_OPTS (#268)
+rps() { ssh "${NATIVE_SSH_OPTS[@]}" "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
 cleanup() {
     rps "for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
         || { echo "native_perf.sh: remote $RD not removed" >&2; return 1; }
@@ -55,9 +57,9 @@ run() {
     rps "New-Item -ItemType Directory -Force '$RD' | Out-Null; exit 0" > /dev/null || { echo "native_perf.sh: remote mkdir failed" >&2; return 2; }
     local p
     for p in $(cat "$2"); do
-        scp -q -o BatchMode=yes "$OUT/img/${p}_b.exe" "$OUT/img/${p}_n.exe" "$NATIVE_HOST:$RDF/" < /dev/null || { cleanup; echo "native_perf.sh: scp failed" >&2; return 2; }
+        scp -q "${NATIVE_SSH_OPTS[@]}" "$OUT/img/${p}_b.exe" "$OUT/img/${p}_n.exe" "$NATIVE_HOST:$RDF/" < /dev/null || { cleanup; echo "native_perf.sh: scp failed" >&2; return 2; }
     done
-    scp -q -o BatchMode=yes "$2" "$NATIVE_HOST:$RDF/pairs.txt" < /dev/null || { cleanup; return 2; }
+    scp -q "${NATIVE_SSH_OPTS[@]}" "$2" "$NATIVE_HOST:$RDF/pairs.txt" < /dev/null || { cleanup; return 2; }
     rps "\$ErrorActionPreference='Stop'; Set-Location '$RD'; \$pairs = Get-Content 'pairs.txt'; \$sw = [Diagnostics.Stopwatch]::new(); for (\$k=1; \$k -le $1; \$k++) { foreach (\$p in \$pairs) { \$order = @('b','n'); if ((\$k -band 1) -eq 0) { \$order = @('n','b') }; \$t = @{}; foreach (\$w in \$order) { \$exe = Join-Path '$RD' (\$p + '_' + \$w + '.exe'); \$sw.Restart(); for (\$i=0; \$i -lt 10; \$i++) { & \$exe; if (\$LASTEXITCODE -ne 0) { [Console]::Out.WriteLine('BADEXIT ' + \$p + ' ' + \$w + ' ' + \$LASTEXITCODE); exit 3 } }; \$sw.Stop(); \$t[\$w] = \$sw.Elapsed.TotalMilliseconds }; [Console]::Out.WriteLine('S ' + \$p + ' ' + \$k + ' ' + \$t['b'] + ' ' + \$t['n']) } }; exit 0" \
         | tr -d '\r' >> "$OUT/samples.txt"
     local rc=$?

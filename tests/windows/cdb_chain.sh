@@ -29,13 +29,15 @@ BP=""
 if [ "${4:-}" = --bp ]; then BP="${5:?--bp needs a symbol}"; fi
 RD="C:\\Users\\pante\\pe_unwind_scratch\\cdb$$"; RDF="C:/Users/pante/pe_unwind_scratch/cdb$$"
 NAME=$(basename "$EXE")
-rps() { ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
+SSH_OPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SSH_OPTS_DIR/ssh_opts.sh"   # NATIVE_SSH_OPTS (#268)
+rps() { ssh "${NATIVE_SSH_OPTS[@]}" "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
 cleanup() {
     rps "for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
         || { echo "cdb_chain.sh: remote $RD not removed" >&2; exit 2; }
 }
 rps "New-Item -ItemType Directory -Force '$RD' | Out-Null; exit 0" > /dev/null || { echo "cdb_chain.sh: remote mkdir failed" >&2; exit 2; }
-scp -q -o BatchMode=yes "$EXE" "$NATIVE_HOST:$RDF/$NAME" < /dev/null || { cleanup; echo "cdb_chain.sh: scp failed" >&2; exit 2; }
+scp -q "${NATIVE_SSH_OPTS[@]}" "$EXE" "$NATIVE_HOST:$RDF/$NAME" < /dev/null || { cleanup; echo "cdb_chain.sh: scp failed" >&2; exit 2; }
 CMDS='g; .lastevent; k 30; q'
 # --bp: run to the image's entry first, so a breakpoint in a system DLL only
 # hits once the image's own code calls it (not during loader/CRT start-up)

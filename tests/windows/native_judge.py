@@ -31,6 +31,20 @@ Writes <out dir>/summary.txt (one line per corpus row:
 `<row>: PASS | FAIL (why) | SKIP (class: proof; native reason)`) and prints the
 counts; exit 0 when nothing FAILed, 1 otherwise, 2 on an input error.
 --c7 prints only the C7 corpus rows (c7_native.sh) with the same judgement.
+
+ONLY A NATIVE LOG IS JUDGED (#229). run_tests.sh prints, before its first
+row, one header line naming who ran the Windows programs: `wine runner:
+native` (KR_WINE is this tree's native_exec.sh), `wine runner: wine (<wine
+--version>)` or `wine runner: none`. suite.log must contain exactly one line
+starting `wine runner: `, it must say `native`, and it must come before the
+first row line; anything else is an input error (exit 2). Several rules below
+accept a row's failure as "the native failure" by its text alone; under Wine
+the same text can mean that Wine's behaviour changed (Wine 10's renamed
++unwind trace line produced exactly the `fault` text), so a Wine log must
+never be judged. Consequence: an out dir written before T1 (no header line)
+cannot be judged by this judge, by `<out dir>` or by --c7 (c7_native.sh);
+re-judge it with the judge of its own era (`git show <commit>:tests/windows/
+native_judge.py`).
 """
 import os
 import re
@@ -45,18 +59,14 @@ FAULT = re.compile(r"^\(rc=(\d+) stdout '([^']*)' want rc=(\d+) '([^']*)'; "
                    r"FAIL: no RtlVirtualUnwind type 1 walk starting in the image; "
                    r"checker C0-C6 \+ C3b \+ C4b PASS\)$")
 CP932 = re.compile(r"ANSI code page is not 932")
-LINKP = re.compile(r"^\( peu_p: Wine exit 7, want 11; peu_p: chain [^;]*; peu_pn: Wine exit (\d+), want 32;\)$")
-OVERRIDE = re.compile(r"^\( base image: rc=5 stdout 'armed\|', want rc=0 'armed\|';\)$")
+OVERRIDE = re.compile(r"^\( base image: rc=5 stdout 'armed\|', want rc other than 5 and 124, stdout 'armed\|';\)$")
+RUNNER = 'wine runner: '
+ROW = re.compile(r'^(?:\s+[A-Za-z0-9_]+: (?:PASS|FAIL|SKIP)\b|FAIL: [A-Za-z0-9_]+)')
 
 
 def fault_ok(why):
     m = FAULT.match(why)
     return bool(m) and m.group(1) == m.group(3) and m.group(2) == m.group(4)
-
-
-def linkprobe_ok(why):
-    m = LINKP.match(why)
-    return bool(m) and m.group(1) != '7'
 
 
 RULES = {
@@ -66,12 +76,9 @@ RULES = {
     'fault': fault_ok,
     # the laptop's ANSI code page is not 932 (the reason must say so)
     'cp932': lambda why: bool(CP932.search(why)),
-    # the linked COFF probe: natively it exits 7 (the native target, Wine's
-    # 11 is 7 + 4 NULLs) and the --test-no-unwind control does not
-    'linkprobe': linkprobe_ok,
     # Wine's winedbg override: main's table-less image ends natively with
-    # STATUS_ACCESS_VIOLATION (exit 5), as Windows must; Wine's "exits 0" red
-    # does not exist natively
+    # STATUS_ACCESS_VIOLATION (exit 5), as Windows must; under Wine it does
+    # not (0 or 1, never 5), and that is what the row pins
     'override': lambda why: bool(OVERRIDE.match(why)),
 }
 SCRIPTED = {'concurrent': 'concurrent.txt', 'hostrows': 'hostrows.txt'}
@@ -120,6 +127,13 @@ def main(argv):
                 raise ValueError('known red %s is also reclassified' % r)
     except (OSError, ValueError) as ex:
         print('native_judge.py: %s' % ex)
+        return 2
+    heads = [i for i, l in enumerate(log) if l.startswith(RUNNER)]
+    first_row = next((i for i, l in enumerate(log) if ROW.match(l)), len(log))
+    if len(heads) != 1 or log[heads[0]] != RUNNER + 'native' or heads[0] > first_row:
+        print('native_judge.py: suite.log is not a native run: it has %d "%s" header lines (%s), want exactly one, '
+              '"%snative", before the first row' % (len(heads), RUNNER.strip(),
+                                                   '; '.join(repr(log[i][:60]) for i in heads) or 'none', RUNNER))
         return 2
     bad = []
     dup = sorted(set(n for n in corpus if corpus.count(n) > 1))
@@ -222,11 +236,10 @@ def selftest():
         'fault': "(rc=5 stdout 'armed|f3|' want rc=5 'armed|f3|'; FAIL: no RtlVirtualUnwind type 1 walk "
                  "starting in the image; checker C0-C6 + C3b + C4b PASS)",
         'cp932': "(rc=0 (the ANSI code page is not 932: single-byte) GetCPInfo(CP_ACP) said 'ok=1 max=01')",
-        'linkprobe': "( peu_p: Wine exit 7, want 11; peu_p: chain main,main,kernel32.dll; peu_pn: Wine exit 2, want 32;)",
-        'override': "( base image: rc=5 stdout 'armed|', want rc=0 'armed|';)",
+        'override': "( base image: rc=5 stdout 'armed|', want rc other than 5 and 124, stdout 'armed|';)",
     }
 
-    def run(mut):
+    def run(mut, head=(RUNNER + 'native',)):
         d = tempfile.mkdtemp(prefix='njst')
         try:
             rows = []
@@ -239,6 +252,7 @@ def selftest():
             rows.append('=== Results: %d/%d passed, %d failed ===' % (len(rows) - len(reds), len(rows), len(reds)))
             scripted = ['%s: PASS (native)' % n for n, c in reclass.items() if c in SCRIPTED]
             rows, scripted = mut(rows, scripted)
+            rows = ['scratch root: /x/krc_suite.y (statvfs: 99 GiB)'] + list(head) + rows
             open(os.path.join(d, 'suite.log'), 'w').write('\n'.join(rows) + '\n')
             open(os.path.join(d, 'concurrent.txt'), 'w').write('\n'.join(scripted) + '\n')
             open(os.path.join(d, 'hostrows.txt'), 'w').write('\n'.join(scripted) + '\n')
@@ -304,10 +318,24 @@ def selftest():
         ('a known red with another exit code', 1, lambda r, s: (sub(r, red,
             '  %s: FAIL %s' % (red, red_why.replace('exit 41', 'exit 5'))), s)),
     ]
+    # the runner header (#229): only a native log is judged, exit 2 otherwise
+    def mid(line):
+        return lambda r, s: (r[:1] + [line] + r[1:], s)
+    for name, head, mut in (
+            ('no runner header', (), lambda r, s: (r, s)),
+            ('a wine runner header', (RUNNER + 'wine (wine-10.0)',), lambda r, s: (r, s)),
+            ('a none runner header', (RUNNER + 'none',), lambda r, s: (r, s)),
+            ('two native runner headers', (RUNNER + 'native', RUNNER + 'native'), lambda r, s: (r, s)),
+            ('a second native header after a row', (RUNNER + 'native',), mid(RUNNER + 'native')),
+            ('the native header only after a row', (), mid(RUNNER + 'native')),
+            ('a wine header, then a native one', (RUNNER + 'wine (wine-10.0)', RUNNER + 'native'),
+             lambda r, s: (r, s))):
+        cases.append((name, 2, mut, head))
     bad = 0
-    for name, want, mut in cases:
-        got = run(mut)
-        ok = (got == 0) if want == 0 else (got != 0)
+    for case in cases:
+        name, want, mut = case[:3]
+        got = run(mut, *case[3:])
+        ok = (got == 0) if want == 0 else (got == 2) if want == 2 else (got != 0)
         print('  case %s: judge rc %d%s' % (name, got, '' if ok else '  <-- WRONG'))
         bad += 0 if ok else 1
     print('native_judge selftest: %d cases, %d wrong' % (len(cases), bad))

@@ -14,8 +14,11 @@
 //
 // Build:
 //   ./build/krc2 --arch=xtensa --freestanding examples/xtensa/hello.kr -o hello.elf
-// Run (Ctrl-A x to exit):
-//   qemu-system-xtensa -M lx60 -nographic -kernel hello.elf
+// Run (Ctrl-A x to exit), <e_entry> being the ELF's entry point
+// (`readelf -h hello.elf`, "Entry point address"):
+//   qemu-system-xtensa -M lx60 -nographic -kernel hello.elf -device loader,addr=<e_entry>,cpu-num=0
+// The loader argument starts the CPU at e_entry. QEMU 10.2 needs it: since its
+// commit 18727804c065 a plain `-kernel` boot never reaches the entry point.
 //
 // Expected output: hello
 

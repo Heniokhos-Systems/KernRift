@@ -36,7 +36,9 @@ NATIVE_HOST="${NATIVE_HOST:-laptop}"
 KRC="${1:?usage: native_hostrows.sh <compiler> <fixtures dir>}"; FX="${2:?fixtures dir}"
 L=$(mktemp -d "$HOME/.cache/pe_unwind/nhr.XXXXXX")
 RD="C:\\Users\\pante\\pe_unwind_scratch\\nhr$$"; RDF="C:/Users/pante/pe_unwind_scratch/nhr$$"
-rps() { ssh -o BatchMode=yes "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
+SSH_OPTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "$SSH_OPTS_DIR/ssh_opts.sh"   # NATIVE_SSH_OPTS (#268)
+rps() { ssh "${NATIVE_SSH_OPTS[@]}" "$NATIVE_HOST" "powershell -NoProfile -NonInteractive -Command \"\$ProgressPreference='SilentlyContinue'; $1\"" < /dev/null; }
 cleanup() {
     rm -rf "$L"
     rps "for (\$i=0; \$i -lt 120 -and (Test-Path -LiteralPath '$RD'); \$i++) { Remove-Item -LiteralPath '$RD' -Recurse -Force -ErrorAction SilentlyContinue; if (Test-Path -LiteralPath '$RD') { Start-Sleep -Milliseconds 500 } }; if ((Test-Path 'C:\\Users\\pante\\pe_unwind_scratch') -and -not (Get-ChildItem -Force 'C:\\Users\\pante\\pe_unwind_scratch')) { Remove-Item -Force 'C:\\Users\\pante\\pe_unwind_scratch' }; if (Test-Path -LiteralPath '$RD') { exit 1 }; exit 0" \
@@ -47,7 +49,7 @@ for f in sys_bcast sys_ifaces; do
         || { echo "native_hostrows.sh: build of $f failed: $(grep -m1 error "$L/b.log")"; rm -rf "$L"; exit 1; }
 done
 rps "New-Item -ItemType Directory -Force '$RD' | Out-Null; exit 0" > /dev/null || { rm -rf "$L"; echo "native_hostrows.sh: remote mkdir failed" >&2; exit 2; }
-scp -q -o BatchMode=yes "$L/sys_bcast.exe" "$L/sys_ifaces.exe" "$NATIVE_HOST:$RDF/" < /dev/null || { cleanup; exit 2; }
+scp -q "${NATIVE_SSH_OPTS[@]}" "$L/sys_bcast.exe" "$L/sys_ifaces.exe" "$NATIVE_HOST:$RDF/" < /dev/null || { cleanup; exit 2; }
 OUT=$(rps "Set-Location '$RD'; \$b=& '$RD\\sys_bcast.exe' all; 'BC_RC=' + \$LASTEXITCODE; \$b | ForEach-Object { 'BC=' + \$_ }; \$f=& '$RD\\sys_ifaces.exe'; 'IF_RC=' + \$LASTEXITCODE; \$f | ForEach-Object { 'IF=' + \$_ }; Get-NetIPAddress -AddressFamily IPv4 | ForEach-Object { 'NA=' + \$_.IPAddress + '/' + \$_.PrefixLength + ' ' + (Get-NetIPInterface -InterfaceIndex \$_.InterfaceIndex -AddressFamily IPv4).ConnectionState + ' ' + \$_.AddressState }; exit 0" | tr -d '\r')
 TRC=$?
 cleanup

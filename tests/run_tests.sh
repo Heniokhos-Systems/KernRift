@@ -91,6 +91,13 @@ if [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then RUN_ARCH="arm64"; fi
 ARCH_QEMU_X86="$(qemu_bin x86_64)"
 ARCH_QEMU_A64="$(qemu_bin aarch64)"
 ARCH_QEMU_RV32="$(qemu_bin riscv32)"
+# xt_boot (tests/helpers/xtensa_boot.sh) is the one place qemu-system-xtensa
+# runs (#228: QEMU 10.2 no longer boots a plain `-kernel` ELF; see the
+# helper). xt_refusal OUT: "; <first line>" when a row's captured output is
+# the helper's refusal (status 99, `xt_boot: refused <elf>: <reason>`), for
+# the row's FAIL text; nothing otherwise.
+. "$DIR/helpers/xtensa_boot.sh"
+xt_refusal() { case "$1" in "xt_boot: "*) printf '; %s' "$(printf '%s\n' "$1" | head -1)" ;; esac; }
 arch_runner() {
     ARCH_RUNNER=""; ARCH_NORUN=""
     [ "$1" = "$RUN_ARCH" ] && return 0
@@ -228,6 +235,20 @@ SUITE_EXIT_TRAP="rm -rf '$SUITE_TMP'; $SUITE_EXIT_TRAP"
 trap "$SUITE_EXIT_TRAP" EXIT
 : > "$SUITE_TMP/run_start.stamp"
 echo "scratch root: $SUITE_TMP ($KRT_SRC: $KRT_GIBS GiB, $KRT_INODES inodes free; floor $KRT_GIB GiB / $KRT_INO inodes; $KRT_NOTE)"
+# The host's qemu binfmt_misc handlers, for the log (#272): with a handler for
+# a foreign arch the kernel runs that arch's binaries itself, so a row meant
+# to run one only through qemu_bin, or to skip because the host cannot, would
+# exec it directly. A developer host may have them (qemu-user-binfmt); CI
+# fails on a foreign-arch handler (tests/helpers/ci_binfmt_check.sh).
+if [ -r /proc/sys/fs/binfmt_misc/status ]; then
+    KRT_BF=""
+    for KRT_F in /proc/sys/fs/binfmt_misc/qemu-*; do
+        [ -e "$KRT_F" ] && KRT_BF="$KRT_BF ${KRT_F##*/}=$(head -1 "$KRT_F")"
+    done
+    echo "binfmt: ${KRT_BF:- no qemu handler}"
+else
+    echo "binfmt: binfmt_misc not mounted"
+fi
 
 # Interrupted (make test's traps send TERM to the suite's process group; INT
 # and HUP the same way when run by hand): stop what SUITE_ABORT_HOOK names,
@@ -309,6 +330,25 @@ wine_na() {   # <row>: no usable wine -- SKIP if none was asked for, FAIL if KR_
     if [ -n "$KR_WINE_BAD" ]; then FAIL=$((FAIL + 1)); echo "FAIL: $1 ($KR_WINE_BAD)"
     else skip_row "$1" "no wine; set KR_WINE=<path to wine>"; fi
 }
+# Who runs the Windows programs (#229 guard): the native harness
+# (KR_WINE=tests/windows/native_exec.sh of this tree, by realpath), Wine, or
+# nobody. Printed once, here, before any row: tests/windows/native_judge.py
+# judges a log only when this header says native, so a Wine log can never be
+# judged as a native run; and tests/helpers/wine_unwind_chain.py gets it as
+# --runner (T10_RUNNER), so that only a native run can print the one failure
+# text the judge accepts as the expected native one. Row
+# wine_fault_text_not_native_accepted checks this is the header's only site.
+WINE_RUNNER_IS=none
+if [ -z "$KR_WINE_BAD" ] && [ -n "$(wine_path)" ]; then
+    if [ "$(realpath -- "$(wine_path)" 2> /dev/null)" = "$(realpath -- "$DIR/windows/native_exec.sh" 2> /dev/null)" ]; then
+        WINE_RUNNER_IS=native
+    else
+        WINE_RUNNER_IS="wine ($(timeout 30 "$(wine_path)" --version 2> /dev/null | head -1))"
+    fi
+fi
+echo "wine runner: $WINE_RUNNER_IS"
+T10_RUNNER=wine
+[ "$WINE_RUNNER_IS" = native ] && T10_RUNNER=native
 
 run_test() {
     local name="$1"
@@ -20302,10 +20342,12 @@ rm -rf "$XBE_D"
 
 # --- Xtensa LX6 freestanding UART hello (boots under qemu — MILESTONE 1) ---
 # Compiles examples/xtensa/hello.kr with --arch=xtensa --freestanding (Elf32
-# boot image, load base 0xd0000000), then boots it under
-# qemu-system-xtensa -M lx60 and greps stdout for "hello". qemu is a dev-only
-# toolchain: SKIP cleanly when absent so its absence can never fail the suite
-# (mirrors the riscv_hello_boot test above). Note: a later --arch= flag
+# boot image, load base 0xd0000000), then boots it on qemu-system-xtensa's
+# lx60 board through xt_boot (tests/helpers/xtensa_boot.sh: -kernel plus a
+# PC-only loader at e_entry, which QEMU 10.2 needs, #228) and greps stdout for
+# "hello". Every xtensa boot row below boots the same way. qemu is a dev-only
+# toolchain: a counted skip_row when absent (a FAIL under REQUIRE_FULL_RUN=1),
+# mirroring the riscv_hello_boot test above. Note: a later --arch= flag
 # overrides an earlier one, so this works through the `make test` wrapper that
 # bakes in --arch=x86_64.
 echo ""
@@ -20339,12 +20381,12 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
         # -semihosting is required or SIMCALL is a silent no-op and this
         # times out at 124 instead of asserting. Command substitution
         # captures the full stdout before qemu exits.
-        XT_OUT=$(timeout 10 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_HELLO_ELF" 2>/dev/null); XT_ST=$?
+        XT_OUT=$(xt_boot 10 "$XT_HELLO_ELF" 2>/dev/null); XT_ST=$?
         if [ "$XT_ST" = "30" ] && echo "$XT_OUT" | grep -q "hello"; then
             PASS=$((PASS + 1))
             echo "  xtensa_hello_boot: PASS (qemu printed hello, exited 30)"
         else
-            echo "FAIL: xtensa_hello_boot (status $XT_ST, output did not contain 'hello', or both)"
+            echo "FAIL: xtensa_hello_boot (status $XT_ST, output did not contain 'hello', or both$(xt_refusal "$XT_OUT"))"
             FAIL=$((FAIL + 1))
         fi
     else
@@ -20383,13 +20425,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
         # SIMCALL (-semihosting required) instead of running out the timeout.
         # fib(20) is ~21.9k calls — microseconds under qemu; 8s is ample headroom.
         # Strip CR so the compare is newline-exact regardless of UART line endings.
-        XT_ST_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_STRESS_ELF" 2>/dev/null); XT_ST_STATUS=$?
+        XT_ST_RAW=$(xt_boot 8 "$XT_STRESS_ELF" 2>/dev/null); XT_ST_STATUS=$?
         XT_ST_OUT=$(echo "$XT_ST_RAW" | tr -d '\r')
         if [ "$XT_ST_STATUS" = "31" ] && [ "$XT_ST_OUT" = "$XT_ST_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_stress_boot: PASS (recursion + spills + signed div all correct, exited 31)"
         else
-            echo "FAIL: xtensa_stress_boot (output mismatch or status $XT_ST_STATUS != 31)"
+            echo "FAIL: xtensa_stress_boot (output mismatch or status $XT_ST_STATUS != 31$(xt_refusal "$XT_ST_RAW"))"
             echo "    expected: $(echo "$XT_ST_EXP" | tr '\n' ' ')"
             echo "    got:      $(echo "$XT_ST_OUT" | tr '\n' ' ')"
             FAIL=$((FAIL + 1))
@@ -20421,13 +20463,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_STR_OK" = 1 ]; then
         XT_STR_EXP="xtensa strings ok"
-        XT_STR_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_STR_ELF" 2>/dev/null); XT_STR_STATUS=$?
+        XT_STR_RAW=$(xt_boot 8 "$XT_STR_ELF" 2>/dev/null); XT_STR_STATUS=$?
         XT_STR_OUT=$(echo "$XT_STR_RAW" | tr -d '\r')
         if [ "$XT_STR_STATUS" = "32" ] && [ "$XT_STR_OUT" = "$XT_STR_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_str_boot: PASS (string literal materialized + printed, exited 32)"
         else
-            echo "FAIL: xtensa_str_boot (output mismatch or status $XT_STR_STATUS != 32)"
+            echo "FAIL: xtensa_str_boot (output mismatch or status $XT_STR_STATUS != 32$(xt_refusal "$XT_STR_RAW"))"
             echo "    expected: $XT_STR_EXP"
             echo "    got:      $XT_STR_OUT"
             FAIL=$((FAIL + 1))
@@ -20461,13 +20503,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_GLB_OK" = 1 ]; then
         XT_GLB_EXP="42"
-        XT_GLB_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_GLB_ELF" 2>/dev/null); XT_GLB_STATUS=$?
+        XT_GLB_RAW=$(xt_boot 8 "$XT_GLB_ELF" 2>/dev/null); XT_GLB_STATUS=$?
         XT_GLB_OUT=$(echo "$XT_GLB_RAW" | tr -d '\r')
         if [ "$XT_GLB_STATUS" = "33" ] && [ "$XT_GLB_OUT" = "$XT_GLB_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_globals_boot: PASS (static load/store + print = 42, exited 33)"
         else
-            echo "FAIL: xtensa_globals_boot (output mismatch or status $XT_GLB_STATUS != 33)"
+            echo "FAIL: xtensa_globals_boot (output mismatch or status $XT_GLB_STATUS != 33$(xt_refusal "$XT_GLB_RAW"))"
             echo "    expected: $XT_GLB_EXP"
             echo "    got:      $XT_GLB_OUT"
             FAIL=$((FAIL + 1))
@@ -20500,13 +20542,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_FP_OK" = 1 ]; then
         XT_FP_EXP="42"
-        XT_FP_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_FP_ELF" 2>/dev/null); XT_FP_STATUS=$?
+        XT_FP_RAW=$(xt_boot 8 "$XT_FP_ELF" 2>/dev/null); XT_FP_STATUS=$?
         XT_FP_OUT=$(echo "$XT_FP_RAW" | tr -d '\r')
         if [ "$XT_FP_STATUS" = "34" ] && [ "$XT_FP_OUT" = "$XT_FP_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_fnptr_boot: PASS (fn_addr + call_ptr = 42, exited 34)"
         else
-            echo "FAIL: xtensa_fnptr_boot (output mismatch or status $XT_FP_STATUS != 34)"
+            echo "FAIL: xtensa_fnptr_boot (output mismatch or status $XT_FP_STATUS != 34$(xt_refusal "$XT_FP_RAW"))"
             echo "    expected: $XT_FP_EXP"
             echo "    got:      $XT_FP_OUT"
             FAIL=$((FAIL + 1))
@@ -20546,13 +20588,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_CI_OK" = 1 ]; then
         XT_CI_EXP="32529"
-        XT_CI_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_CI_ELF" 2>/dev/null); XT_CI_STATUS=$?
+        XT_CI_RAW=$(xt_boot 8 "$XT_CI_ELF" 2>/dev/null); XT_CI_STATUS=$?
         XT_CI_OUT=$(echo "$XT_CI_RAW" | tr -d '\r')
         if [ "$XT_CI_STATUS" = "35" ] && [ "$XT_CI_OUT" = "$XT_CI_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_callind_clobber_boot: PASS (8 live-across-callx0 values survive = 32529, exited 35)"
         else
-            echo "FAIL: xtensa_callind_clobber_boot (output mismatch or status $XT_CI_STATUS != 35 — CALL_IND missing from xt_seed_call_ceilings?)"
+            echo "FAIL: xtensa_callind_clobber_boot (output mismatch or status $XT_CI_STATUS != 35$(xt_refusal "$XT_CI_RAW") — CALL_IND missing from xt_seed_call_ceilings?)"
             echo "    expected: $XT_CI_EXP"
             echo "    got:      $XT_CI_OUT"
             FAIL=$((FAIL + 1))
@@ -20622,13 +20664,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_BSS_OK" = 1 ]; then
         XT_BSS_EXP="42 0 99"
-        XT_BSS_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_BSS_ELF" 2>/dev/null); XT_BSS_STATUS=$?
+        XT_BSS_RAW=$(xt_boot 8 "$XT_BSS_ELF" 2>/dev/null); XT_BSS_STATUS=$?
         XT_BSS_OUT=$(echo "$XT_BSS_RAW" | tr -d '\r')
         if [ "$XT_BSS_STATUS" = "36" ] && [ "$XT_BSS_OUT" = "$XT_BSS_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_bss_boot: PASS (real BSS gap + zero loop; marker/buf = 42 0 99, exited 36)"
         else
-            echo "FAIL: xtensa_bss_boot (output mismatch or status $XT_BSS_STATUS != 36)"
+            echo "FAIL: xtensa_bss_boot (output mismatch or status $XT_BSS_STATUS != 36$(xt_refusal "$XT_BSS_RAW"))"
             echo "    expected: $XT_BSS_EXP"
             echo "    got:      $XT_BSS_OUT"
             FAIL=$((FAIL + 1))
@@ -20671,13 +20713,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
 A
 1
 0"
-        XT_MS_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_MS_ELF" 2>/dev/null); XT_MS_STATUS=$?
+        XT_MS_RAW=$(xt_boot 8 "$XT_MS_ELF" 2>/dev/null); XT_MS_STATUS=$?
         XT_MS_OUT=$(echo "$XT_MS_RAW" | tr -d '\r')
         if [ "$XT_MS_STATUS" = "37" ] && [ "$XT_MS_OUT" = "$XT_MS_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_memstack_boot: PASS (stack array + memset/memcpy/memcmp, exited 37)"
         else
-            echo "FAIL: xtensa_memstack_boot (output mismatch or status $XT_MS_STATUS != 37)"
+            echo "FAIL: xtensa_memstack_boot (output mismatch or status $XT_MS_STATUS != 37$(xt_refusal "$XT_MS_RAW"))"
             echo "    expected: $XT_MS_EXP"
             echo "    got:      $XT_MS_OUT"
             FAIL=$((FAIL + 1))
@@ -20713,13 +20755,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
 1
 0
 60705"
-        XT_SI_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_SI_ELF" 2>/dev/null); XT_SI_STATUS=$?
+        XT_SI_RAW=$(xt_boot 8 "$XT_SI_ELF" 2>/dev/null); XT_SI_STATUS=$?
         XT_SI_OUT=$(echo "$XT_SI_RAW" | tr -d '\r')
         if [ "$XT_SI_STATUS" = "38" ] && [ "$XT_SI_OUT" = "$XT_SI_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_strfmt_boot: PASS (str_len/str_eq/fmt_uint = 4/1/0/60705, exited 38)"
         else
-            echo "FAIL: xtensa_strfmt_boot (output mismatch or status $XT_SI_STATUS != 38)"
+            echo "FAIL: xtensa_strfmt_boot (output mismatch or status $XT_SI_STATUS != 38$(xt_refusal "$XT_SI_RAW"))"
             echo "    expected: $XT_SI_EXP"
             echo "    got:      $XT_SI_OUT"
             FAIL=$((FAIL + 1))
@@ -20765,13 +20807,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_ASM_OK" = 1 ]; then
         XT_ASM_EXP="XY"
-        XT_ASM_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_ASM_ELF" 2>/dev/null); XT_ASM_STATUS=$?
+        XT_ASM_RAW=$(xt_boot 8 "$XT_ASM_ELF" 2>/dev/null); XT_ASM_STATUS=$?
         XT_ASM_OUT=$(echo "$XT_ASM_RAW" | tr -d '\r')
         if [ "$XT_ASM_STATUS" = "39" ] && [ "$XT_ASM_OUT" = "$XT_ASM_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_asm_boot: PASS (asm block assembled: nop present + output = XY, exited 39)"
         else
-            echo "FAIL: xtensa_asm_boot (output mismatch or status $XT_ASM_STATUS != 39)"
+            echo "FAIL: xtensa_asm_boot (output mismatch or status $XT_ASM_STATUS != 39$(xt_refusal "$XT_ASM_RAW"))"
             echo "    expected: $XT_ASM_EXP"
             echo "    got:      $XT_ASM_OUT"
             FAIL=$((FAIL + 1))
@@ -20808,13 +20850,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_CAP_OK" = 1 ]; then
         XT_CAP_EXP=$(printf 'xtensa capstone ok\n42\n0\n0\n10\nA\n4\n1\n0\n60705\n1\n0\n42\nXY')
-        XT_CAP_RAW=$(timeout 10 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_CAP_ELF" 2>/dev/null); XT_CAP_STATUS=$?
+        XT_CAP_RAW=$(xt_boot 10 "$XT_CAP_ELF" 2>/dev/null); XT_CAP_STATUS=$?
         XT_CAP_OUT=$(echo "$XT_CAP_RAW" | tr -d '\r')
         if [ "$XT_CAP_STATUS" = "40" ] && [ "$XT_CAP_OUT" = "$XT_CAP_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_capstone_boot: PASS (all freestanding ops: str_const/static/bss/stack+memset/memcpy/strlen/str_eq/fmt_uint/memcmp/fn_addr+call_ind/asm_block, exited 40)"
         else
-            echo "FAIL: xtensa_capstone_boot (output mismatch or status $XT_CAP_STATUS != 40)"
+            echo "FAIL: xtensa_capstone_boot (output mismatch or status $XT_CAP_STATUS != 40$(xt_refusal "$XT_CAP_RAW"))"
             echo "    expected: $XT_CAP_EXP"
             echo "    got:      $XT_CAP_OUT"
             FAIL=$((FAIL + 1))
@@ -20850,13 +20892,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_BF_OK" = 1 ]; then
         XT_BF_EXP=$(printf '61100\n5559680\n1499500\n928296122\n45353\n79800')
-        XT_BF_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_BF_ELF" 2>/dev/null); XT_BF_STATUS=$?
+        XT_BF_RAW=$(xt_boot 8 "$XT_BF_ELF" 2>/dev/null); XT_BF_STATUS=$?
         XT_BF_OUT=$(echo "$XT_BF_RAW" | tr -d '\r')
         if [ "$XT_BF_STATUS" = "41" ] && [ "$XT_BF_OUT" = "$XT_BF_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_bigframe_boot: PASS (1K/12K frames + deep spills + overflow params all correct, exited 41)"
         else
-            echo "FAIL: xtensa_bigframe_boot (output mismatch or status $XT_BF_STATUS != 41)"
+            echo "FAIL: xtensa_bigframe_boot (output mismatch or status $XT_BF_STATUS != 41$(xt_refusal "$XT_BF_RAW"))"
             echo "    expected: $(echo "$XT_BF_EXP" | tr '\n' ' ')"
             echo "    got:      $(echo "$XT_BF_OUT" | tr '\n' ' ')"
             FAIL=$((FAIL + 1))
@@ -20896,13 +20938,13 @@ if command -v qemu-system-xtensa >/dev/null 2>&1; then
     fi
     if [ "$XT_MA_OK" = 1 ]; then
         XT_MA_EXP=$(printf '319\n30\n385')
-        XT_MA_RAW=$(timeout 8 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_MA_ELF" 2>/dev/null); XT_MA_STATUS=$?
+        XT_MA_RAW=$(xt_boot 8 "$XT_MA_ELF" 2>/dev/null); XT_MA_STATUS=$?
         XT_MA_OUT=$(echo "$XT_MA_RAW" | tr -d '\r')
         if [ "$XT_MA_STATUS" = "42" ] && [ "$XT_MA_OUT" = "$XT_MA_EXP" ]; then
             PASS=$((PASS + 1))
             echo "  xtensa_many_args_boot: PASS (24-arg call + 1-slot and 0-slot reserves all correct, exited 42)"
         else
-            echo "FAIL: xtensa_many_args_boot (output mismatch or status $XT_MA_STATUS != 42)"
+            echo "FAIL: xtensa_many_args_boot (output mismatch or status $XT_MA_STATUS != 42$(xt_refusal "$XT_MA_RAW"))"
             echo "    expected: $(echo "$XT_MA_EXP" | tr '\n' ' ')"
             echo "    got:      $(echo "$XT_MA_OUT" | tr '\n' ' ')"
             FAIL=$((FAIL + 1))
@@ -22103,22 +22145,27 @@ if [ $XT_REFUSE_RC -ne 0 ] && echo "$XT_REFUSE_ERR" | grep -q "no OS to return a
 else
     echo "FAIL: xtensa_esp32_exit_refused (rc=$XT_REFUSE_RC, expected nonzero rc and an error mentioning 'no OS to return an exit status to')"; FAIL=$((FAIL + 1))
 fi
-# lx60 must terminate qemu with 42
+# lx60 must terminate qemu with 42. Counted (and a skip_row when qemu is
+# absent) like every other xtensa boot row: it used to be counted only inside
+# the `if`, so on a host without qemu-system-xtensa it vanished from the run
+# without a SKIP, and REQUIRE_FULL_RUN=1 could not see it was missing (#322).
+TOTAL=$((TOTAL + 1))
 if command -v qemu-system-xtensa >/dev/null 2>&1; then
-    TOTAL=$((TOTAL + 1))
     XT_E_BIN="$SUITE_TMP/krc_xt_exit_$$.elf"
     if $KRC --arch=xtensa --freestanding "$XT_E_SRC" -o "$XT_E_BIN" >/dev/null 2>&1; then
-        timeout 10 qemu-system-xtensa -M lx60 -nographic -semihosting -kernel "$XT_E_BIN" >/dev/null 2>&1
+        XT_E_OUT=$(xt_boot 10 "$XT_E_BIN" 2>/dev/null)
         XT_E_ST=$?
         if [ "$XT_E_ST" = "42" ]; then
             PASS=$((PASS + 1)); echo "  xtensa_lx60_exit_42: PASS"
         else
-            echo "FAIL: xtensa_lx60_exit_42 (expected 42, got $XT_E_ST)"; FAIL=$((FAIL + 1))
+            echo "FAIL: xtensa_lx60_exit_42 (expected 42, got $XT_E_ST$(xt_refusal "$XT_E_OUT"))"; FAIL=$((FAIL + 1))
         fi
     else
         echo "FAIL: xtensa_lx60_exit_42 (compile failed)"; FAIL=$((FAIL + 1))
     fi
     rm -f "$XT_E_BIN"
+else
+    skip_row xtensa_lx60_exit_42 "qemu-system-xtensa not installed"
 fi
 rm -f "$XT_E_SRC"
 
@@ -36492,8 +36539,9 @@ peu_missing() { local t m=""; for t in "$@"; do command -v "$t" > /dev/null 2>&1
 # prefix that HANGS (measured: exit 124 after 120 s), on an initialised one it
 # prints a crash report on stdout. Disabling winedbg leaves exactly the
 # program's own output and the fault status (5 as a byte). It hides nothing:
-# an image WITHOUT tables still exits 0 under it (row
-# wine_crash_override_does_not_mask pins both).
+# an image WITHOUT tables still does not exit with the fault status under it
+# (0 or 1 depending on the host's Wine; never 5), row
+# wine_crash_override_does_not_mask pins both.
 T10_RETRY53=0
 t10_wine() {
     local o="$1" e="$2" t rc r53=0; shift 2
@@ -37065,10 +37113,17 @@ else
 fi
 # The Wine harness change (WINEDLLOVERRIDES=winedbg.exe=d, see t10_wine) must
 # not mask a failure: through t10_wine itself, the base compiler's table-less
-# image still exits 0 (#143's red stays visible), while the frame-pointer
-# prototype with tables exits 5 with stdout exactly "armed" -- without the
-# override it hangs in winedbg instead. Both images are committed
-# (tests/fixtures/pe_unwind_oracle/README.md).
+# image prints exactly "armed" and does NOT end with the fault status (#143's
+# red stays visible), while the frame-pointer prototype with tables exits 5
+# with stdout exactly "armed" -- without the override it hangs in winedbg
+# instead. Both images are committed (tests/fixtures/pe_unwind_oracle/README.md).
+# The base image's exit code is whatever Wine's walk over its garbage frames
+# ends in, not a property (#229): 0 under Wine 9.0 on one host, 1 under the
+# same 9.0 build in an ubuntu:24.04 container, 1 under Wine 10 (repeated
+# faults in ntdll until a stack overflow). So the row pins what it exists to
+# prove: not 5 (the override made a table-less image look like a correct
+# fault exit) and not 124 (a winedbg hang); natively it is 5, and the native
+# judge's `override` rule reclassifies exactly that.
 if [ -z "$T10_WINE" ]; then
     if [ -n "$KR_WINE_BAD" ]; then pe_row_bad wine_crash_override_does_not_mask "$KR_WINE_BAD"
     else pe_row_skip wine_crash_override_does_not_mask "no wine; set KR_WINE=<path to wine>"; fi
@@ -37078,12 +37133,13 @@ else
     cp "$DIR/fixtures/pe_unwind_oracle/alloc_guard_fault_fp.exe" "$T10_D/peu_proto.exe"
     printf 'armed\n' > "$T10_D/peu_armed.want"
     t10_wine "$T10_D/peu.out" "$T10_D/peu.err" peu_base.exe; PEU_RC=$?
-    [ "$PEU_RC" = 0 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
-        || PEU_WHY="$PEU_WHY base image: rc=$PEU_RC stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc=0 'armed|';"
+    PEU_BRC=$PEU_RC
+    [ "$PEU_RC" != 5 ] && [ "$PEU_RC" != 124 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
+        || PEU_WHY="$PEU_WHY base image: rc=$PEU_RC stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc other than 5 and 124, stdout 'armed|';"
     t10_wine "$T10_D/peu.out" "$T10_D/peu.err" peu_proto.exe; PEU_RC=$?
     [ "$PEU_RC" = 5 ] && cmp -s "$T10_D/peu.out" "$T10_D/peu_armed.want" \
         || PEU_WHY="$PEU_WHY prototype image: rc=$PEU_RC$([ "$PEU_RC" = 124 ] && printf ' (timed out: winedbg?)') stdout '$(tr '\n' '|' < "$T10_D/peu.out" | head -c 60)', want rc=5 'armed|';"
-    if [ -z "$PEU_WHY" ]; then pe_row_ok wine_crash_override_does_not_mask "base rc=0, prototype rc=5, stdout exactly 'armed'$(t10_note)"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok wine_crash_override_does_not_mask "base rc=$PEU_BRC (not the fault status), prototype rc=5, stdout exactly 'armed'$(t10_note)"
     else pe_row_bad wine_crash_override_does_not_mask "$PEU_WHY"; fi
 fi
 # --test-no-unwind (hidden, test-only, #143): accepted, absent from --help.
@@ -39032,7 +39088,7 @@ peu_wine_fault() {
     t10_wine "$T10_D/win.out" "$T10_D/win.err" peu_w.exe; rc=$?
     got=$(tr -d '\r' < "$T10_D/win.out")
     (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=+unwind timeout 300 "$T10_WINE" peu_w.exe > /dev/null 2> "$T10_D/peu_w.trace")
-    ch=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" "$T10_D/peu_w.trace" "$T10_D/peu_w.lst" "$walk" 2>&1 | tail -1)
+    ch=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" --runner=$T10_RUNNER "$T10_D/peu_w.trace" "$T10_D/peu_w.lst" "$walk" 2>&1 | tail -1)
     ck=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_w.exe" --listing "$T10_D/peu_w.lst" 2>&1)
     if [ "$(grep -c ': PASS' <<< "$ck")" = 9 ]; then ck="checker C0-C6 + C3b + C4b PASS"
     else ck="checker: $( { grep -m1 -e FAIL -e error <<< "$ck" || head -1 <<< "$ck"; } | cut -c1-160)"; fi
@@ -39689,13 +39745,19 @@ fi
 # lld-link /nodefaultlib /entry:start with a /map.
 #  static:   the checker's --linked mode (the KR object's functions only, the
 #            listing shifted to where lld put KR's .text) passes C0-C6 + C3b + C4b;
-#  run-time: under Wine the probe exits 11 and walk() prints the chain
-#            walk > d3 > d2 > main > start (named through the /map) >
-#            kernel32.dll > ntdll.dll, then FOUR NULL entries. The NULLs are a
-#            Wine 9.0 quirk of RtlCaptureStackBackTrace (it counts slots past
-#            RtlUserThreadStart); they are pinned so a Wine change is noticed.
-#            Natively the count is 7 (Task D / A14b native scripts);
-#  control:  the same link with a --test-no-unwind object exits 32.
+#  run-time: the probe exits with RtlCaptureStackBackTrace's count and walk()
+#            prints the chain walk > d3 > d2 > main > start (named through
+#            the /map by tests/helpers/probe_chain.py, relative to the image's
+#            real load base: host.c prints it, #327) > kernel32.dll >
+#            ntdll.dll: exit 7, as natively (Task D / A14b native scripts) and
+#            under Wine 10. Wine <= 9's RtlCaptureStackBackTrace appended FOUR
+#            NULL slots past RtlUserThreadStart (exit 11); that quirk is the
+#            one other accepted form (#229), and only with exit 11 -- any other
+#            NULL count, order, or an exit that disagrees with the count fails;
+#  control:  the same link with a --test-no-unwind object: the walk does not
+#            recover through the table-less KR frames -- its exit is neither 7
+#            nor 11 and its chain does not begin walk,d3,d2,main (Wine 9 gave
+#            32 garbage slots, Wine 10 and Windows give 2: walk,d3).
 PEU_ROW=pe_unwind_obj_link_windows_wine
 if ! command -v python3 > /dev/null 2>&1 || ! command -v clang > /dev/null 2>&1 || ! command -v lld-link > /dev/null 2>&1 \
    || ! command -v llvm-dlltool > /dev/null 2>&1 || ! command -v llvm-readobj > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1; then
@@ -39715,41 +39777,26 @@ else
     else
         PEU_O=$(python3 -B "$PEU_CHK" --arch x86_64 "$T10_D/peu_p.exe" --listing "$T10_D/peu_k.lst" --linked "$T10_D/peu_p.map" 2>&1)
         [ "$(grep -c ': PASS' <<< "$PEU_O")" = 9 ] || PEU_WHY="$PEU_WHY checker --linked: $( { grep -m1 -e FAIL -e error <<< "$PEU_O" || head -1 <<< "$PEU_O"; } | cut -c1-160);"
-        for PEU_X in "peu_p:11:walk,d3,d2,main,start,kernel32.dll,ntdll.dll,NULL,NULL,NULL,NULL" "peu_pn:32:"; do
-            PEU_E=${PEU_X%%:*}; PEU_R=${PEU_X#*:}; PEU_WANT=${PEU_R#*:}; PEU_R=${PEU_R%%:*}
+        PEU_PCH="walk,d3,d2,main,start,kernel32.dll,ntdll.dll"
+        PEU_OKS=""
+        for PEU_E in peu_p peu_pn; do
             t10_wine "$T10_D/peu_w.out" "$T10_D/peu_w.err" "$PEU_E.exe"; PEU_RC=$?
-            [ "$PEU_RC" = "$PEU_R" ] || PEU_WHY="$PEU_WHY $PEU_E: Wine exit $PEU_RC, want $PEU_R;"
-            [ -n "$PEU_WANT" ] || continue
-            PEU_CH=$(python3 -B - "$T10_D/$PEU_E.map" "$T10_D/peu_w.out" "$PEU_E.exe" <<'PEULINKEOF'
-import re, sys
-syms = []
-for ln in open(sys.argv[1], encoding='latin-1'):
-    m = re.match(r'^\s*0001:[0-9a-f]{8}\s+(\S+)\s+([0-9a-f]{16})\s+\S+\s*$', ln)
-    if m:
-        syms.append((int(m.group(2), 16), m.group(1)))
-syms.sort()
-out = []
-for ln in open(sys.argv[2], encoding='latin-1', errors='replace'):
-    ln = ln.strip().replace('\r', '')
-    if not ln:
-        continue
-    pc, mod = ln.split(' ', 1)
-    pc = int(pc, 16)
-    if pc == 0:
-        out.append('NULL')
-    elif mod.lower().endswith('\\' + sys.argv[3]):
-        own = [n for a, n in syms if a <= pc]
-        out.append(own[-1] if own else '?image')
-    else:
-        out.append(mod.replace('/', '\\').split('\\')[-1].lower())
-print(','.join(out))
-PEULINKEOF
-)
-            [ "$PEU_CH" = "$PEU_WANT" ] || PEU_WHY="$PEU_WHY $PEU_E: chain $PEU_CH, want $PEU_WANT;"
+            PEU_CH=$(python3 -B "$DIR/helpers/probe_chain.py" "$T10_D/$PEU_E.map" "$T10_D/peu_w.out" "$PEU_E.exe" 2>&1 | tr '\n' ' ' | sed 's/ $//')
+            if [ "$PEU_E" = peu_p ]; then
+                if [ "$PEU_RC" = 7 ] && [ "$PEU_CH" = "$PEU_PCH" ]; then PEU_OKS="exit 7, chain $PEU_PCH"
+                elif [ "$PEU_RC" = 11 ] && [ "$PEU_CH" = "$PEU_PCH,NULL,NULL,NULL,NULL" ]; then PEU_OKS="exit 11, chain $PEU_PCH + Wine <= 9's 4 NULLs"
+                else PEU_WHY="$PEU_WHY peu_p: exit $PEU_RC, chain $PEU_CH; want exit 7 and chain $PEU_PCH (Windows, Wine >= 10), or exit 11 and that chain + 4 NULLs (Wine <= 9);"; fi
+            else
+                case "$PEU_RC:$PEU_CH" in
+                    7:*|11:*|*:FAIL*|*:walk,d3,d2,main|*:walk,d3,d2,main,*)
+                        PEU_WHY="$PEU_WHY peu_pn: exit $PEU_RC, chain $PEU_CH; want an exit other than 7 and 11 and a readable chain not beginning walk,d3,d2,main (the walk must not recover without tables);" ;;
+                    *) PEU_OKS="$PEU_OKS; --test-no-unwind control exits $PEU_RC, chain $PEU_CH" ;;
+                esac
+            fi
         done
     fi
     rm -f "$T10_D"/peu_k.lst "$T10_D"/peu_k.obj "$T10_D"/peu_kn.obj "$T10_D"/peu_k32.lib "$T10_D"/peu_host.obj "$T10_D"/peu_p.* "$T10_D"/peu_pn.* "$T10_D"/peu_w.*
-    if [ -z "$PEU_WHY" ]; then pe_row_ok $PEU_ROW "checker --linked C0-C6 + C3b + C4b pass; Wine exit 11, chain walk>d3>d2>main>start>kernel32>ntdll + 4 Wine NULLs; --test-no-unwind control exits 32"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok $PEU_ROW "checker --linked C0-C6 + C3b + C4b pass; $PEU_OKS"
     else pe_row_bad $PEU_ROW "$PEU_WHY"; fi
 fi
 
@@ -40111,8 +40158,13 @@ else
         [[ "$PEU_O" == "C1: FAIL no exception directory"* ]] || PEU_WHY="$PEU_WHY $PEU_B:C1 '$PEU_O';"
         if [ -n "$T10_WINE" ]; then
             (cd "$T10_D" && WINEPREFIX="$T10_D/pfx" WINEDLLOVERRIDES=winedbg.exe=d WINEDEBUG=+unwind timeout 300 "$T10_WINE" peu_x.exe > /dev/null 2> "$T10_D/peu_x.trace")
-            PEU_CH=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" "$T10_D/peu_x.trace" "$T10_D/peu_x.lst" "$PEU_WALK" 2>&1 | tail -1)
+            PEU_CH=$(python3 -B "$DIR/helpers/wine_unwind_chain.py" --runner=$T10_RUNNER "$T10_D/peu_x.trace" "$T10_D/peu_x.lst" "$PEU_WALK" 2>&1 | tail -1)
             [[ "$PEU_CH" == walk* ]] && PEU_WHY="$PEU_WHY $PEU_B:Wine walked it without tables ($PEU_CH);"
+            # the walk must be seen to break, not just be unreadable: with a
+            # trace the helper cannot read, this leg passed with nothing
+            # checked (Wine 10's renamed trace line, #229)
+            case "$PEU_CH" in "FAIL: Wine wrote no +unwind trace"*|"FAIL: unrecognized Wine +unwind trace format"*)
+                [ "$T10_RUNNER" = wine ] && PEU_WHY="$PEU_WHY $PEU_B:Wine's trace not read ($PEU_CH);" ;; esac
         fi
     done
     if [ -z "$T10_WINE" ] && [ -z "$PEU_WHY" ]; then pe_row_skip pe_unwind_no_unwind_switch "no wine (C1 half passed)"
