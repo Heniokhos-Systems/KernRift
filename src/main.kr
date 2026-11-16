@@ -5892,7 +5892,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // writable .data section and refers to them through relocations, like
     // LKM output (#294), so the displacements are left 0 here.
     uint64 elf_obj_data = 0
-    if emit_mode == 3 && (arch == 0 || arch == 1) && target_os != 1 && target_os != 2 { elf_obj_data = 1 }
+    if emit_mode == 3 && (arch == 0 || arch == 1) && target_os != 1 { elf_obj_data = 1 }   // ELF and COFF (#149)
     if emit_mode != 7 && elf_obj_data == 0 {
         if arch == 0 {
             resolve_static_fixups(data_start)
@@ -5932,7 +5932,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
             emit_macho_relocatable(total_code, 0, arch)
         } else if target_os == 2 {
             uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
-            emit_coff_relocatable(total_code, 0, arch)
+            emit_coff_relocatable(data_start, total_code - data_start, arch)
         } else {
             emit_elf_relocatable(data_start, total_code - data_start, arch)
         }
