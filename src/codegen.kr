@@ -4117,6 +4117,18 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
     // Like every per-slice refusal, it fires only for a slice that ships
     // (fat_slice_ships, main.kr): `--targets=linux-x64` must not be refused
     // by the discarded win-x64 slice. The decl is routed either way.
+    // #307: a struct parameter or return would need the Win64 by-value rules
+    // the routed call path does not implement; no table import takes one.
+    uint64 rw_stok = decl_struct_abi_tok(fn_node)
+    if rw_stok != 0 && fat_slice_ships() != 0 {
+        diag_loc_head(rw_stok, 0)
+        write(2, "routed Windows import '", 23)
+        write(2, cg_source + tok_text_start(wrn), tok_text_len(wrn))
+        uint64 rs_msg = "' has a struct parameter or return type; routed Windows imports take integer/pointer arguments only (#307)\n"
+        write(2, rs_msg, str_len(rs_msg))
+        diag_span_of(rw_stok)
+        fatal_exit()
+    }
     if rw_float != 0 && fat_slice_ships() != 0 {
         diag_loc_head(wrn, 0)
         write(2, "routed Windows import '", 23)
@@ -4127,6 +4139,60 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
         fatal_exit()
     }
     return 1
+}
+
+// #307: the type token of the first struct-typed parameter, else of a struct
+// return type, of FnDecl `fn_node`; 0 when it has neither.
+fn decl_struct_abi_tok(uint64 fn_node) -> uint64 {
+    uint32 dp = ast_child(fn_node)
+    uint64 wdp = dp
+    while wdp != 0 {
+        if ast_kind(wdp) == 3 {
+            uint32 dpt = ast_data1(wdp)
+            uint64 wdpt = dpt
+            if wdpt != 0 && struct_lookup(wdpt) != 0xFFFFFFFF { return wdpt }
+        }
+        uint32 dpn = ast_next(wdp)
+        wdp = dpn
+    }
+    uint32 drt = ast_data2(fn_node)
+    uint64 wdrt = drt
+    if wdrt != 0 && struct_lookup(wdrt) != 0xFFFFFFFF { return wdrt }
+    return 0
+}
+
+// #307: a riscv32 object (`-c` / `--emit=obj`, IR backend) passes structs by
+// KernRift's own convention (a pointer to a copy), not the ILP32 C ABI. Refuse
+// the functions C reaches on purpose -- an `extern fn` and an `@export` fn --
+// when one takes or returns a struct, instead of miscompiling the C side.
+// Planned for v2.11.2 (full ILP32 struct lowering).
+fn refuse_rv32_obj_struct_abi(uint64 mod_node) {
+    uint32 rc = ast_child(mod_node)
+    uint64 wrc = rc
+    while wrc != 0 {
+        if ast_kind(wrc) == 2 {
+            uint32 rfl = ast_data4(wrc)
+            if (rfl & 12) != 0 {
+                uint64 rtok = decl_struct_abi_tok(wrc)
+                if rtok != 0 {
+                    uint32 rname = ast_data1(wrc)
+                    uint64 wrname = rname
+                    diag_loc_head(rtok, 0)
+                    uint64 rm1 = "fn '"
+                    if (rfl & 8) != 0 { rm1 = "extern fn '" }
+                    write(2, rm1, str_len(rm1))
+                    write(2, cg_source + tok_text_start(wrname), tok_text_len(wrname))
+                    uint64 rm2 = "' takes or returns a struct by value; riscv32 objects do not follow the\n  ILP32 C ABI for struct arguments and returns yet (#307, planned for v2.11.2).\n  Pass a pointer to the struct instead.\n"
+                    if (rfl & 8) == 0 { rm2 = "' is @export and takes or returns a struct by value; riscv32 objects do not\n  follow the ILP32 C ABI for struct arguments and returns yet (#307, planned for\n  v2.11.2). Pass a pointer to the struct instead.\n" }
+                    write(2, rm2, str_len(rm2))
+                    diag_span_of(rtok)
+                    fatal_exit()
+                }
+            }
+        }
+        uint32 rnx = ast_next(wrc)
+        wrc = rnx
+    }
 }
 
 // Record an extern call site for later relocation emission.
@@ -21952,7 +22018,7 @@ static uint64 import_failed = 0
 // created yet therefore got a green build and no artifact.
 //
 // Checked HERE, not in codegen_write_output: main.kr:1967 (asm listing) and
-// main.kr:5697 (esp32 image) call this directly and bypass
+// main.kr:5698 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {
