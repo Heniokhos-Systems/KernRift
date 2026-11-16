@@ -1786,6 +1786,10 @@ static uint64 var_type_count = 0
 // out-param triples in its DER parser for exactly that reason and carried the
 // packing until the underlying bug was found.
 static uint64 cg_current_fn_tok = 0
+// #312: 1 when the function being generated is declared to return a struct.
+// A `return e` whose e is struct-typed only returns the struct BY VALUE then;
+// in a `-> u64` function a struct variable's value is its address.
+static uint64 cg_cur_ret_struct = 0
 
 fn cg_set_current_fn(uint64 tok) { cg_current_fn_tok = tok }
 
@@ -11475,6 +11479,7 @@ fn gen_expr_node(uint64 node) {
             uint64 self_ptr_flag = 0xFFFFFFFF
             unsafe { *(arg_struct_flags as uint64) = self_ptr_flag }
         }
+        cg_clear_scalar_param_struct_flags(callee_tok, arg_struct_flags, arg_count)   // #312
 
         // #303: Win64 passes a struct of more than 8 bytes as a pointer to a
         // CALLER-OWNED COPY, which the callee may modify. Make that copy here
@@ -14732,6 +14737,9 @@ fn gen_stmt(uint64 node) {
         }
         // If returning a struct, load eightbytes into rax/rdx or xmm0/xmm1,
         // or copy to sret buffer for MEMORY class (>16 bytes).
+        // #312: only when the function RETURNS a struct; otherwise rax already
+        // holds the struct's address, which is the scalar being returned.
+        if expr_is_struct != 0xFFFFFFFF && cg_cur_ret_struct == 0 { expr_is_struct = 0xFFFFFFFF }
         if expr_is_struct != 0xFFFFFFFF {
             uint64 ret_si = expr_is_struct
             uint64 ret_size = struct_total_size(ret_si)
@@ -15787,6 +15795,7 @@ fn gen_function(uint64 fn_node) {
     if is_export != 0 { export_fn_register(name_tok) }
 
     // Register float return type if applicable
+    cg_cur_ret_struct = 0                                  // #312
     uint32 ret_type_tok = ast_data2(fn_node)
     uint64 wrt = ret_type_tok
     if wrt != 0 {
@@ -15795,6 +15804,7 @@ fn gen_function(uint64 fn_node) {
         if ret_kind == 95 { fn_ret_float_register(name_tok, 2) }
         // Register struct return type if applicable
         uint64 ret_si = struct_lookup(wrt)
+        if ret_si != 0xFFFFFFFF { cg_cur_ret_struct = 1 }
         if ret_si != 0xFFFFFFFF {
             fn_ret_struct_register(name_tok, ret_si)
         }
@@ -17191,6 +17201,35 @@ fn dce_register_fn(uint64 name_tok, uint64 fn_node) {
     uint32 nd = fn_node
     unsafe { *(e4 as uint32) = nd }
     dce_fn_map_count = dce_fn_map_count + 1
+}
+
+// #312 (argument twin): a struct VARIABLE passed to a SCALAR parameter
+// (`fn f(u64 p)`, `f(s)`) passes the struct's address -- the value a struct
+// variable has as a scalar, and what the IR passes. Clear the struct flag of
+// every argument whose parameter in the callee's declaration is not a struct,
+// so the by-value paths (SysV eightbytes, #306 stack copy, #303 copies, AAPCS64
+// loads) leave it alone. Method calls are left to their own self handling (a
+// method name may be shared, so its declaration is not looked up by name).
+fn cg_clear_scalar_param_struct_flags(uint64 callee_tok, uint64 flags, uint64 argc) {
+    if fn_method_lookup(callee_tok) != 0 { return }
+    uint64 cn = dce_lookup_fn(callee_tok)
+    if cn == 0 { return }
+    uint32 cp = ast_child(cn)
+    uint64 wcp = cp
+    uint64 ci = 0
+    while wcp != 0 && ci < argc {
+        if ast_kind(wcp) == 3 {
+            uint32 cpt = ast_data1(wcp)
+            uint64 wcpt = cpt
+            if wcpt != 0 && struct_lookup(wcpt) == 0xFFFFFFFF {
+                uint64 none_f = 0xFFFFFFFF
+                unsafe { *(flags + ci * 8 as uint64) = none_f }
+            }
+            ci = ci + 1
+        }
+        uint32 cpn = ast_next(wcp)
+        wcp = cpn
+    }
 }
 
 // Look up function AST node by name token

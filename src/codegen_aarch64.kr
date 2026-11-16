@@ -5116,6 +5116,7 @@ fn gen_expr_a64_node(uint64 node) {
             uint64 self_ptr_flag_a = 0xFFFFFFFF
             unsafe { *(arg_struct_flags_a as uint64) = self_ptr_flag_a }
         }
+        cg_clear_scalar_param_struct_flags(callee_tok, arg_struct_flags_a, arg_count)   // #312
 
         // #303: AAPCS64 B.4 -- a composite of more than 16 bytes (not an HFA) is
         // passed as a pointer to a CALLER-OWNED COPY, which the callee may
@@ -5873,6 +5874,9 @@ fn gen_stmt_a64(uint64 node) {
             emit_a64_ldr(0, 31, a64_var_base + rt2a_ar)
         } else if wec != 0 {
             gen_expr_a64(wec)
+            // #312: a struct-typed value in a function that does not return a
+            // struct is its address (x0 already holds it).
+            if expr_is_struct_a64 != 0xFFFFFFFF && cg_cur_ret_struct == 0 { expr_is_struct_a64 = 0xFFFFFFFF }
             // Struct return: load eightbytes or copy via sret
             if expr_is_struct_a64 != 0xFFFFFFFF {
                 uint64 ret_si_ar = expr_is_struct_a64
@@ -6918,6 +6922,7 @@ fn gen_function_a64(uint64 fn_node) {
     if is_export_a != 0 { export_fn_register(name_tok) }
 
     // Register float return type if applicable
+    cg_cur_ret_struct = 0                                  // #312
     uint32 ret_type_tok_a = ast_data2(fn_node)
     uint64 wrt_a = ret_type_tok_a
     if wrt_a != 0 {
@@ -6927,6 +6932,7 @@ fn gen_function_a64(uint64 fn_node) {
         // Register struct return type if applicable
         uint64 ret_si_a = struct_lookup(wrt_a)
         if ret_si_a != 0xFFFFFFFF {
+            cg_cur_ret_struct = 1                          // #312
             fn_ret_struct_register(name_tok, ret_si_a)
         }
     }
