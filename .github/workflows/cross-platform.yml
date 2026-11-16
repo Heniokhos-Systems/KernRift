@@ -158,6 +158,17 @@ jobs:
           done
           cat /tmp/test-bins/smoke/manifest.txt
 
+          # L1: Mach-O object fixtures for the native Intel rows (test-macos-x64)
+          F=tests/fixtures/obj_rows; O=/tmp/test-bins/obj-rows
+          mkdir -p $O/macho $O/src
+          for t in multi ext strl fa exp; do
+            ./build/krc2 --arch=x86_64 --target=macos -c $F/$t.kr -o $O/macho/$t-x86_64.o
+          done
+          for T in S8 S16 S24 F16 H8 U3 S6 S12 S20; do
+            ./build/krc2 --arch=x86_64 --target=macos -c $F/abi_$T.kr -o $O/macho/abi_$T-x86_64.o
+          done
+          cp $F/c_macos.c $F/abi_*.h $F/abi_main_macos.c $O/src/
+
           ls -la /tmp/test-bins/
 
       - name: Upload test binaries
@@ -176,6 +187,28 @@ jobs:
         with:
           name: test-bins
           path: bins
+
+      # L1: the Mach-O objects of the build job, linked with Xcode's clang and
+      # run natively on Intel. A signal is a FAIL; all 41 rows must PASS.
+      - name: Mach-O object rows, native x86_64
+        run: |
+          set -u; FAIL=0; N=0; D=bins/obj-rows
+          row() { local name=$1 want=$2; shift 2
+            if ! clang -arch x86_64 -O1 "$@" -o /tmp/r_$name 2>/tmp/r_$name.err; then echo "FAIL: $name (link)"; FAIL=1; return; fi
+            set +e; /tmp/r_$name; got=$?; set -e
+            if [ $got -ge 128 ]; then echo "FAIL: $name (signal $((got-128)))"; FAIL=1
+            elif [ "$got" = "$want" ]; then echo "PASS: $name (exit=$got)"; N=$((N+1)); else echo "FAIL: $name (expected=$want, got=$got)"; FAIL=1; fi
+          }
+          row macho_obj_static_write_x86_64  61 $D/src/c_macos.c $D/macho/multi-x86_64.o
+          row macho_obj_static_extern_x86_64 83 $D/src/c_macos.c $D/macho/ext-x86_64.o
+          row macho_obj_string_x86_64        87 $D/src/c_macos.c $D/macho/strl-x86_64.o
+          row macho_obj_fn_addr_x86_64       88 $D/src/c_macos.c $D/macho/fa-x86_64.o
+          row macho_obj_export_x86_64        11 $D/src/c_macos.c $D/macho/exp-x86_64.o
+          for T in S8 S16 S24 F16 H8 U3 S6 S12 S20; do for m in 1 4 8 32; do
+            row macho_obj_struct_abi_${T}_${m}_x86_64 0 -I$D/src -DMODE=$m -include $D/src/abi_$T.h $D/src/abi_main_macos.c $D/macho/abi_$T-x86_64.o
+          done; done
+          echo "native x86_64 macho_obj rows passed: $N (want 41)"; [ $N -eq 41 ] || FAIL=1
+          exit $FAIL
 
       - name: Run tests (capture to log)
         continue-on-error: true
