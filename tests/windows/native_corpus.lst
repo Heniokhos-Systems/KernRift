@@ -349,3 +349,6 @@ asm_x29_text_refused_newline_windows_arm64
 asm_x18_text_tab_refused_windows_arm64
 asm_a64_reg_name_agree_windows
 asm_a64_wb_sp_windows_frame_arm64
+# T1 (#229): host-side rows over synthetic inputs (no Wine); build-side, they run on the Linux host
+wine_unwind_chain_formats
+wine_fault_text_not_native_accepted

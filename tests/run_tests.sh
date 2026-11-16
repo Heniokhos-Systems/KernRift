@@ -5812,6 +5812,82 @@ rm -rf "$QRS_P"
 if [ -z "$QRS_BAD" ]; then PASS=$((PASS + 1)); echo "  qemu_resolver_single_site: PASS (no literal -static site or other qemu-user probe in tests/**/*.sh, the diff scripts and count_insns.sh source qemu_bin, which prefers -static, falls back to the plain name and reports neither)"
 else FAIL=$((FAIL + 1)); echo "FAIL: qemu_resolver_single_site ($QRS_BAD)"; fi
 
+# --- #272/#260/#323: CI installs qemu-user, never qemu-user-static ----------
+# ubuntu-latest became ubuntu-26.04, which has no qemu-user-static package, so
+# the hard `install qemu-user-static` steps failed; on 24.04 that package
+# registers a binfmt handler for every foreign arch, and qemu-user recommends
+# qemu-user-binfmt, which does the same. With a foreign-arch handler a row
+# that means to run a foreign binary only through tests/helpers/qemu_bin.sh, or
+# to skip because the host cannot run it, would exec it directly. Over
+# .github/workflows/*.yml (non-comment lines):
+#   no qemu-*-static name at all (qemu-user-static, qemu-<arch>-static, the
+#   removed qemu-$a-static symlink loop of #260);
+#   in every step that installs qemu-user, each apt-get install of a qemu
+#   package (or of the tooling loop's variable) has --no-install-recommends;
+#   every `$( ... qemu_bin ...)` assignment is followed by a loud `|| { ...
+#   exit 1; }` (a failing substitution would end a `bash -e` step silently);
+#   the binfmt check (tests/helpers/ci_binfmt_check.sh) runs right after each
+#   Linux job's optional-tooling step and after the qemu-user installs of the
+#   ARM64 smoke and Android steps.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row ci_qemu_user_names "no python3"
+else
+    CQU_O=$(python3 -B - "$DIR/.." <<'CQUEOF' 2>&1
+import glob, os, re, sys
+root = sys.argv[1]
+bad = []
+CHECK = 'tests/helpers/ci_binfmt_check.sh'
+def steps(lines):
+    cur = None
+    for i, l in enumerate(lines, 1):
+        m = re.match(r'^\s*- name:\s*(.*)$', l)
+        if m:
+            cur = [m.group(1).strip(), i, []]
+            yield cur
+        if cur is not None:
+            cur[2].append((i, l))
+tooling = 0
+for p in sorted(glob.glob(os.path.join(root, '.github', 'workflows', '*.yml'))):
+    name = os.path.basename(p)
+    lines = open(p, encoding='utf-8').read().split('\n')
+    code = [(i, l) for i, l in enumerate(lines, 1) if not l.lstrip().startswith('#')]
+    for i, l in code:
+        for m in re.finditer(r'qemu-[^\s"\'`;|&)]*-static', l):
+            bad.append('%s:%d names %s' % (name, i, m.group(0)))
+        if re.search(r'=\$\([^)]*\bqemu_bin\b', l) and not re.search(r'\)\s*\|\|\s*\{[^}]*\bexit 1\s*;\s*\}', l):
+            bad.append('%s:%d assigns a qemu_bin substitution without || { ...; exit 1; }' % (name, i))
+    sts = list(steps(lines))
+    for k, (title, at, body) in enumerate(sts):
+        bcode = [(i, l) for i, l in body if not l.lstrip().startswith('#')]
+        text = '\n'.join(l for _, l in bcode)
+        if re.search(r'(?<![\w-])qemu-user(?![\w-])', text):
+            for i, l in bcode:
+                # a line naming a qemu package, or installing a loop variable (the tooling loop)
+                if re.search(r'apt-get\b.*\binstall\b', l) and re.search(r'(?<![\w-])qemu-|"\$\{?\w+\}?"', l) \
+                   and '--no-install-recommends' not in l:
+                    bad.append('%s:%d step "%s" installs qemu without --no-install-recommends' % (name, i, title))
+            last_install = max((i for i, l in bcode if re.search(r'apt-get\b.*\binstall\b', l)), default=0)
+            after = [i for i, l in bcode if CHECK in l and i > last_install]
+            if title.startswith('Install optional cross-target tooling'):
+                tooling += 1
+                nxt = sts[k + 1] if k + 1 < len(sts) else None
+                if not nxt or not any(CHECK in l for _, l in nxt[2] if not l.lstrip().startswith('#')):
+                    bad.append('%s:%d the step after "%s" does not run %s' % (name, at, title, CHECK))
+            elif last_install and not after:
+                bad.append('%s:%d step "%s" installs qemu-user and does not run %s after it' % (name, at, title, CHECK))
+if tooling != 2:
+    bad.append('%d optional-tooling steps install qemu-user, want 2 (both Linux jobs)' % tooling)
+print('FAIL: ' + '; '.join(bad[:10]) + ('; ... %d more' % (len(bad) - 10) if len(bad) > 10 else '') if bad else
+      'PASS (no qemu-*-static name; qemu-user installs --no-install-recommends; qemu_bin substitutions fail loudly; '
+      'binfmt check after both tooling steps and each qemu-user install)')
+CQUEOF
+)
+    case "$CQU_O" in
+        PASS*) PASS=$((PASS + 1)); echo "  ci_qemu_user_names: ${CQU_O}" ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL: ci_qemu_user_names ($(printf '%s' "${CQU_O#FAIL: }" | tr '\n' '|' | cut -c1-600))" ;;
+    esac
+fi
+
 # --- One scratch root: rows (#250, #262) --------------------------------------
 # suite_tmp_single_root: no test script writes under a literal /tmp any more.
 # Scope by DISCOVERY, not a list: every tracked tests/**/*.sh and *.py (the
@@ -20125,6 +20201,104 @@ if command -v xtensa-lx106-elf-objdump >/dev/null 2>&1 && command -v readelf >/d
 else
     TOTAL=$((TOTAL + 1)); skip_row xtensa_call_disasm "xtensa-lx106-elf-objdump/readelf not installed"
 fi
+
+# --- #228: the xtensa boot helper (tests/helpers/xtensa_boot.sh) -------------
+# QEMU 10.2.0 (commit 18727804c065, upstream #321) writes xtfpga's -kernel boot
+# trampoline before the CPU is reset, so it never lands at the reset vector
+# 0xfe000000: a plain `qemu-system-xtensa -M lx60 -kernel <elf>` executes
+# zeros there forever and every boot row below timed out (status 124). xt_boot
+# keeps -kernel (xtfpga's MMU-translated ELF load) and adds a PC-only generic
+# loader, `-device loader,addr=<e_entry>,cpu-num=0`, which starts the CPU at
+# the image's entry point on every QEMU >= 2.9 (measured on 8.2.2 and 10.2.1).
+#  xtensa_boot_single_site: no non-comment line of tests/**/*.sh starts
+#    qemu-system-xtensa with an option except the helper's one line, and that
+#    line carries -M lx60, -kernel and the loader;
+#  xtensa_boot_entry_selftest: xt_boot on synthetic Elf32 headers, with a fake
+#    qemu-system-xtensa first on PATH that records its arguments: the hello
+#    image's entry 0xd00000b4 is passed to the loader and the emulator's status
+#    comes back; a non-ELF file, ELFCLASS64, big-endian and e_machine != 0x5e
+#    (EM_XTENSA) are refused with status 99 and an `xt_boot: refused` line on
+#    stdout, and the emulator is never started for them.
+echo ""
+echo "--- xtensa boot helper (#228) ---"
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row xtensa_boot_single_site "no python3"
+else
+    XBS_O=$(python3 -B - "$DIR" <<'XBSEOF' 2>&1
+import os, re, sys
+tests = sys.argv[1]
+helper = os.path.join(tests, 'helpers', 'xtensa_boot.sh')
+inv = re.compile(r'qemu-system-xtensa[ \t]+-')
+outside, inside = [], []
+for root, dirs, files in os.walk(tests):
+    dirs.sort()
+    for f in sorted(files):
+        if not f.endswith('.sh'):
+            continue
+        p = os.path.join(root, f)
+        for n, l in enumerate(open(p, encoding='utf-8', errors='replace'), 1):
+            if l.lstrip().startswith('#') or not inv.search(l):
+                continue
+            (inside if p == helper else outside).append(('tests/' + os.path.relpath(p, tests), n, l.strip()))
+bad = []
+if outside:
+    bad.append('%d invocation(s) outside the helper: %s' % (len(outside), ' '.join('%s:%d' % (p, n) for p, n, _ in outside[:8])))
+if not os.path.exists(helper):
+    bad.append('tests/helpers/xtensa_boot.sh is missing')
+elif len(inside) != 1:
+    bad.append('the helper starts qemu-system-xtensa %d times, want 1' % len(inside))
+else:
+    l = inside[0][2]
+    for need, rx in (('-M lx60', r'-M lx60\b'), ('-kernel', r'-kernel\s'),
+                     ('-device loader,addr=<e_entry>,cpu-num=0', r'-device\s+"?loader,addr=\$\{?[A-Za-z_]+\}?,cpu-num=0\b')):
+        if not re.search(rx, l):
+            bad.append('the helper line lacks %s: %s' % (need, l[:120]))
+print('FAIL: ' + '; '.join(bad) if bad else 'PASS (%s:%d is the one invocation)' % inside[0][:2])
+XBSEOF
+)
+    case "$XBS_O" in
+        PASS*) PASS=$((PASS + 1)); echo "  xtensa_boot_single_site: ${XBS_O}" ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL: xtensa_boot_single_site (${XBS_O#FAIL: })" ;;
+    esac
+fi
+TOTAL=$((TOTAL + 1))
+XBE_D="$SUITE_TMP/xbe_$$"
+mkdir -p "$XBE_D/bin"
+if [ ! -f "$DIR/helpers/xtensa_boot.sh" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: xtensa_boot_entry_selftest (tests/helpers/xtensa_boot.sh is missing)"
+else
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$XBE_LOG"\nexit 42\n' > "$XBE_D/bin/qemu-system-xtensa"
+    chmod +x "$XBE_D/bin/qemu-system-xtensa"
+    # xbe_hdr <file> <EI_CLASS> <EI_DATA> <e_machine lo> <e_machine hi> <e_entry, 4 bytes LE>:
+    # a 52-byte Elf32 header (ET_EXEC, EV_CURRENT), every byte as two hex digits
+    xbe_hdr() {
+        printf "\\x7fELF\\x$2\\x$3\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\x$4\\x$5\\x01\\x00\\x00\\x00\\x$6\\x$7\\x$8\\x$9" > "$1"
+        head -c 24 /dev/zero >> "$1"
+    }
+    xbe_hdr "$XBE_D/hello.elf" 01 01 5e 00 b4 00 00 d0
+    xbe_hdr "$XBE_D/elf64.elf" 02 01 5e 00 b4 00 00 d0
+    xbe_hdr "$XBE_D/msb.elf" 01 02 00 5e d0 00 00 b4
+    xbe_hdr "$XBE_D/x86.elf" 01 01 3e 00 b4 00 00 d0
+    printf '#!/bin/sh\necho this is not an ELF image, it is a shell script\n' > "$XBE_D/text.elf"
+    XBE_WHY=""
+    : > "$XBE_D/log"
+    XBE_OUT=$(PATH="$XBE_D/bin:$PATH" XBE_LOG="$XBE_D/log"; export XBE_LOG; . "$DIR/helpers/xtensa_boot.sh"; xt_boot 5 "$XBE_D/hello.elf"); XBE_RC=$?
+    XBE_WANT="-M lx60 -nographic -semihosting -kernel $XBE_D/hello.elf -device loader,addr=0xd00000b4,cpu-num=0"
+    [ "$XBE_RC" = 42 ] || XBE_WHY="$XBE_WHY hello: status $XBE_RC, want the emulator's 42;"
+    [ "$(cat "$XBE_D/log")" = "$XBE_WANT" ] || XBE_WHY="$XBE_WHY hello: emulator called with '$(tr '\n' '|' < "$XBE_D/log")', want '$XBE_WANT';"
+    [ -z "$XBE_OUT" ] || XBE_WHY="$XBE_WHY hello: stdout '$XBE_OUT', want the emulator's (empty);"
+    for XBE_C in "text.elf|not an ELF file" "elf64.elf|EI_CLASS 0x2 is not ELFCLASS32" "msb.elf|EI_DATA 0x2 is not ELFDATA2LSB" "x86.elf|e_machine 0x3e is not EM_XTENSA (0x5e)"; do
+        XBE_F="$XBE_D/${XBE_C%%|*}"; XBE_R="${XBE_C#*|}"
+        : > "$XBE_D/log"
+        XBE_OUT=$(PATH="$XBE_D/bin:$PATH" XBE_LOG="$XBE_D/log"; export XBE_LOG; . "$DIR/helpers/xtensa_boot.sh"; xt_boot 5 "$XBE_F" 2> /dev/null); XBE_RC=$?
+        [ "$XBE_RC" = 99 ] || XBE_WHY="$XBE_WHY ${XBE_C%%|*}: status $XBE_RC, want 99;"
+        [ "$XBE_OUT" = "xt_boot: refused $XBE_F: $XBE_R" ] || XBE_WHY="$XBE_WHY ${XBE_C%%|*}: stdout '$XBE_OUT', want 'xt_boot: refused <elf>: $XBE_R';"
+        [ ! -s "$XBE_D/log" ] || XBE_WHY="$XBE_WHY ${XBE_C%%|*}: the emulator was started;"
+    done
+    if [ -z "$XBE_WHY" ]; then PASS=$((PASS + 1)); echo "  xtensa_boot_entry_selftest: PASS (entry 0xd00000b4 -> -device loader,addr=0xd00000b4,cpu-num=0; non-ELF, ELFCLASS64, big-endian, e_machine 0x3e refused with 99, emulator not started)"
+    else FAIL=$((FAIL + 1)); echo "FAIL: xtensa_boot_entry_selftest ($(printf '%s' "$XBE_WHY" | cut -c1-400))"; fi
+fi
+rm -rf "$XBE_D"
 
 # --- Xtensa LX6 freestanding UART hello (boots under qemu — MILESTONE 1) ---
 # Compiles examples/xtensa/hello.kr with --arch=xtensa --freestanding (Elf32
@@ -38905,6 +39079,165 @@ for peu_m in "pe_unwind_mixed_fault_windows_wine|" "pe_unwind_mixed_fault_legacy
     peu_mixed_classes "$peu_mr" "$T10_D/peu_mx.lst" || continue
     peu_wine_fault "$peu_mr" pe_unwind_mixed_fault "$(printf 'armed\nb')" c,b,a,main $peu_mf
 done
+# --- #229: tests/helpers/wine_unwind_chain.py and the native judge ---------
+# Wine 10 renamed the +unwind walk line (`RtlVirtualUnwind2 type 1 base B rip X
+# rva R rsp`; Wine <= 9 printed `RtlVirtualUnwind type 1 rip X rsp`), and the
+# fault rows above then failed with exactly the text native_judge.py's `fault`
+# rule accepts as the expected NATIVE failure: Wine evidence had silently
+# become native-equivalent. Both rows use synthetic inputs only (no Wine).
+#  wine_unwind_chain_formats: the helper walks both known shapes in both
+#    --runner modes; a Wine 10 line with rva != rip - base, an unknown shape,
+#    an empty trace and walks that never start in the image FAIL -- under
+#    --runner=wine each with its own text, under --runner=native with the one
+#    text the judge accepts (natively there is no trace at all);
+#  wine_fault_text_not_native_accepted: (a) no --runner=wine failure text,
+#    wrapped as peu_wine_fault reports it, is accepted by native_judge.fault_ok;
+#    (b) the native-mode text still is (the rule bites natively); (c) the judge
+#    exits 2 (input error) on a log whose runner header says wine, has none, or
+#    repeats the native header after a row, and not on a log with the native
+#    header; (d) run_tests.sh prints the runner header at exactly one site, in
+#    its preamble, and no other file under tests/ but native_judge.py spells it.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row wine_unwind_chain_formats "no python3"
+else
+    WUC_O=$(python3 -B - "$DIR/helpers/wine_unwind_chain.py" "$SUITE_TMP/wuc_$$" <<'WUCEOF' 2>&1
+import os, shutil, subprocess, sys
+helper, d = sys.argv[1], sys.argv[2]
+os.makedirs(d, exist_ok=True)
+NATIVE = 'FAIL: no RtlVirtualUnwind type 1 walk starting in the image'
+lst = os.path.join(d, 'l.lst')
+open(lst, 'w').write('f2:\n  00000000: 55  push rbp\n  00000010: c3  ret\nf1:\n  00000020: 55  push rbp\n'
+                     '  00000030: c3  ret\nmain:\n  00000040: 55  push rbp\n  00000050: c3  ret\n'
+                     '; uw-code-end 00000060\n')
+info = '0128:trace:unwind:dump_unwind_info **** func 1000-1011\n'
+rips = [0x140001005, 0x140001025, 0x140001045, 0x6fffffb6a2e1]
+bases = [0x140000000] * 3 + [0x6fffffb40000]
+w9 = ''.join('0128:trace:unwind:RtlVirtualUnwind type 1 rip %x rsp 81fc00\n%s' % (r, info) for r in rips)
+w10 = ''.join('0128:trace:unwind:RtlVirtualUnwind2 type 1 base %x rip %x rva %x rsp 81fc00\n%s' % (b, r, r - b, info)
+              for b, r in zip(bases, rips))
+traces = {
+    'w9': w9, 'w10': w10,
+    'incons': w10.replace('rva 1025 ', 'rva 1026 '),
+    'unknown': '0128:trace:unwind:RtlVirtualUnwind3 type 1 frame 140001005\n' + info,
+    'empty': '',
+    'outside': '0128:trace:unwind:RtlVirtualUnwind2 type 1 base 6fffffb40000 rip 6fffffb6a2e1 rva 2a2e1 rsp 81ff80\n' + info,
+}
+for k, v in traces.items():
+    open(os.path.join(d, k), 'w').write(v)
+WALK = 'walk f2>f1>main > outside the image'
+cases = [
+    ('wine', 'w9', 'f2,f1,main', 0, WALK),
+    ('wine', 'w10', 'f2,f1,main', 0, WALK),
+    ('native', 'w9', 'f2,f1,main', 0, WALK),
+    ('native', 'w10', 'f2,f1,main', 0, WALK),
+    ('wine', 'w10', 'f2,main', 1, 'FAIL: walk f2>f1>main, want f2>main'),
+    ('wine', 'incons', 'f2,f1,main', 1, 'FAIL: inconsistent RtlVirtualUnwind2 line (rip - base != rva): '
+     '0128:trace:unwind:RtlVirtualUnwind2 type 1 base 140000000 rip 140001025 rva 1026 rsp 81fc00'),
+    ('wine', 'unknown', 'f2,f1,main', 1, 'FAIL: unrecognized Wine +unwind trace format: '
+     '0128:trace:unwind:RtlVirtualUnwind3 type 1 frame 140001005'),
+    ('native', 'unknown', 'f2,f1,main', 1, NATIVE),
+    ('wine', 'empty', 'f2,f1,main', 1, 'FAIL: Wine wrote no +unwind trace'),
+    ('native', 'empty', 'f2,f1,main', 1, NATIVE),
+    ('wine', 'outside', 'f2,f1,main', 1, "FAIL: Wine's type 1 walks never start in the image"),
+    ('native', 'outside', 'f2,f1,main', 1, NATIVE),
+]
+bad = []
+for mode, t, want, wrc, wout in cases:
+    p = subprocess.run([sys.executable, '-B', helper, '--runner=' + mode, os.path.join(d, t), lst, want],
+                       capture_output=True, text=True, timeout=60)
+    out = p.stdout.rstrip('\n')
+    if p.returncode != wrc or out != wout or 'Traceback' in p.stderr:
+        bad.append('%s/%s: rc=%d %r%s, want rc=%d %r' % (mode, t, p.returncode, out[:90],
+                   ' (traceback)' if 'Traceback' in p.stderr else '', wrc, wout[:60]))
+shutil.rmtree(d)
+print('FAIL: ' + '; '.join(bad) if bad else 'PASS (%d cases: both trace shapes in both modes; inconsistent, '
+      'unknown, empty and outside-the-image traces fail with the mode\'s text)' % len(cases))
+WUCEOF
+)
+    case "$WUC_O" in
+        PASS*) PASS=$((PASS + 1)); echo "  wine_unwind_chain_formats: ${WUC_O}" ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL: wine_unwind_chain_formats ($(printf '%s' "${WUC_O#FAIL: }" | cut -c1-500))" ;;
+    esac
+fi
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row wine_fault_text_not_native_accepted "no python3"
+else
+    WFN_O=$(python3 -B - "$DIR" "$SUITE_TMP/wfn_$$" <<'WFNEOF' 2>&1
+import os, re, shutil, subprocess, sys
+tests, d = sys.argv[1], sys.argv[2]
+os.makedirs(d, exist_ok=True)
+sys.path.insert(0, os.path.join(tests, 'windows'))
+import native_judge
+helper = os.path.join(tests, 'helpers', 'wine_unwind_chain.py')
+judge = os.path.join(tests, 'windows', 'native_judge.py')
+MARK = 'wine' + ' runner:'          # built, so this file spells it at one site only
+bad = []
+lst = os.path.join(d, 'l.lst')
+open(lst, 'w').write('f1:\n  00000000: 55  push rbp\nmain:\n  00000010: c3  ret\n; uw-code-end 00000020\n')
+traces = {
+    'empty': '',
+    'unknown': '0128:trace:unwind:RtlVirtualUnwind3 type 1 frame 140001005\n',
+    'incons': '0128:trace:unwind:RtlVirtualUnwind2 type 1 base 140000000 rip 140001005 rva 1006 rsp 81fc00\n',
+    'outside': '0128:trace:unwind:RtlVirtualUnwind2 type 1 base 6fffffb40000 rip 6fffffb6a2e1 rva 2a2e1 rsp 81ff80\n',
+}
+def row_text(mode, t):
+    p = os.path.join(d, t)
+    open(p, 'w').write(traces[t])
+    r = subprocess.run([sys.executable, '-B', helper, '--runner=' + mode, p, lst, 'f1,main'],
+                       capture_output=True, text=True, timeout=60)
+    ch = r.stdout.rstrip('\n').split('\n')[-1]
+    if r.returncode != 1 or not ch.startswith('FAIL: ') or 'Traceback' in r.stderr:
+        bad.append('%s/%s: the helper gave rc=%d %r' % (mode, t, r.returncode, ch[:80]))
+    # exactly what peu_wine_fault prints after "<row>: FAIL "
+    return "(rc=5 stdout 'armed|f3|' want rc=5 'armed|f3|'; %s; checker C0-C6 + C3b + C4b PASS)" % ch
+for t in ('empty', 'unknown', 'incons', 'outside'):
+    if native_judge.fault_ok(row_text('wine', t)):
+        bad.append('(a) wine/%s: the judge accepts it as the native failure' % t)
+if not native_judge.fault_ok(row_text('native', 'empty')):
+    bad.append('(b) native/empty: the judge does not accept the native text')
+def judge_rc(lines):
+    o = os.path.join(d, 'out')
+    shutil.rmtree(o, ignore_errors=True)
+    os.makedirs(o)
+    open(os.path.join(o, 'suite.log'), 'w').write('\n'.join(lines) + '\n')
+    return subprocess.run([sys.executable, '-B', judge, o], capture_output=True, text=True, timeout=120).returncode
+body = ['  some_linux_row: PASS', '=== Results: 1/1 passed, 0 failed, 0 skipped ===']
+for name, lines in (('a wine runner header', ['scratch root: x', MARK + ' wine (wine-10.0)'] + body),
+                    ('no runner header', ['scratch root: x'] + body),
+                    ('a second native header after a row', [MARK + ' native', body[0], MARK + ' native', body[1]])):
+    rc = judge_rc(lines)
+    if rc != 2:
+        bad.append('(c) %s: judge rc=%d, want 2' % (name, rc))
+rc = judge_rc(['scratch root: x', MARK + ' native'] + body)
+if rc == 2:
+    bad.append('(c) the native header: judge rc=2 (refused a native log)')
+rt = open(os.path.join(tests, 'run_tests.sh'), encoding='utf-8', errors='replace').read().split('\n')
+sites = [i for i, l in enumerate(rt, 1) if MARK in l]
+first_row = next((i for i, l in enumerate(rt, 1) if l.startswith('run_test() {')), 0)
+if len(sites) != 1 or not re.match(r'^\s*echo "' + MARK, rt[sites[0] - 1]) or sites[0] > first_row:
+    bad.append('(d) run_tests.sh spells the runner header at lines %s, want one echo before run_test() (line %d)'
+               % (sites, first_row))
+others = []
+for root, dirs, files in os.walk(tests):
+    for f in files:
+        p = os.path.join(root, f)
+        if p in (os.path.join(tests, 'run_tests.sh'), judge) or '__pycache__' in p:
+            continue
+        if MARK.encode() in open(p, 'rb').read():
+            others.append(os.path.relpath(p, tests))
+if others:
+    bad.append('(d) also spelled in %s' % ', '.join(sorted(others)[:5]))
+shutil.rmtree(d)
+print('FAIL: ' + '; '.join(bad) if bad else 'PASS (4 Wine-mode failure texts rejected by the fault rule, the native '
+      'text accepted; judge exits 2 on wine/missing/repeated runner headers, not on the native one; one header site)')
+WFNEOF
+)
+    case "$WFN_O" in
+        PASS*) PASS=$((PASS + 1)); echo "  wine_fault_text_not_native_accepted: ${WFN_O}" ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL: wine_fault_text_not_native_accepted ($(printf '%s' "${WFN_O#FAIL: }" | tr '\n' '|' | cut -c1-500))" ;;
+    esac
+fi
+
 # The arm64 variant (finding 17; static here, its run is the A18 job): a in
 # shape S2, b with an asm block, c an S1 leaf; IR and --legacy, C0-C6 + C3b +
 # C4b and the listing classes (arm64: set_fp/add_fp in b and main only).
@@ -39239,6 +39572,117 @@ PEUNFEOF
     else pe_row_bad pe_unwind_obj_no_functions "$PEU_WHY"; fi
 fi
 
+# --- #327: probe frames are named relative to their module's load base -----
+# The linked COFF probe (pe_unwind_obj_link_windows_wine below) prints one line
+# per captured frame. Its image frames used to be named by looking their
+# ABSOLUTE address up in lld's /map, i.e. assuming the image loaded at its
+# preferred base: true under Wine, false natively (ASLR), where every image
+# frame came out as `main` (main,main,main,main,main,kernel32.dll,ntdll.dll)
+# and the linkprobe reclassification hid it. host.c now prints each frame's
+# module base too (`<pc> <module base | -> <module path>`), and
+# tests/helpers/probe_chain.py, used by that row and by native_probe.sh, maps
+# an image frame exactly: pc - module base + preferred base, then the /map
+# symbol containing it. Synthetic map (the real probe's layout) and outputs:
+# at the preferred base (Wine), shifted by an ASLR-style 64 KiB multiple
+# (Windows), and shifted by an amount that is NOT a 64 KiB multiple -- all
+# three name walk,d3,d2,main,start,kernel32.dll,ntdll.dll (KERNEL32,NTDLL in
+# native_probe.sh's --style=native-probe); the absolute rule (the pre-#327 row,
+# kept here as the mutant) must NOT name it on the shifted output. Refused with
+# one `FAIL:` line, exit 1 and no traceback: a map without its "Preferred load
+# address" line, a map without a .text symbol, a two-field probe line (a
+# host.c older than T1) and an image frame without a module base.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row probe_chain_aslr_selftest "no python3"
+else
+    PCA_O=$(python3 -B - "$DIR/helpers/probe_chain.py" "$SUITE_TMP/pca_$$" <<'PCAEOF' 2>&1
+import os, re, shutil, subprocess, sys
+helper, d = sys.argv[1], sys.argv[2]
+os.makedirs(d, exist_ok=True)
+PREF = 0x140000000
+syms = [('walk', 0x140001000, 'host.obj'), ('start', 0x140001160, 'host.obj'), ('main', 0x1400011f4, 'k.obj')]
+static = [('d3', 0x140001180, 'k.obj'), ('d2', 0x1400011ba, 'k.obj')]
+def mapf(pref_line=True, text=True):
+    m = [' p', '', ' Timestamp is 6afb0222 (Mon Nov 16 15:16:18 2026)', '']
+    if pref_line:
+        m += [' Preferred load address is %016x' % PREF, '']
+    m += [' Start         Length     Name                   Class',
+          ' 0001:00000000 00000228H .text                   CODE', '',
+          '  Address         Publics by Value              Rva+Base               Lib:Object', '']
+    if text:
+        m += [' 0001:%08x       %-26s %016x     %s' % (a - PREF - 0x1000, n, a, o) for n, a, o in syms]
+    m += [' 0002:00000060       __imp_ExitProcess          0000000140002060     k32:kernel32.dll', '',
+          ' entry point at         0001:00000160', '', ' Static symbols', '']
+    if text:
+        m += [' 0001:%08x       %-26s %016x     %s' % (a - PREF - 0x1000, n, a, o) for n, a, o in static]
+    return '\n'.join(m) + '\n'
+frames = [0x14000102b, 0x140001192, 0x1400011cc, 0x140001206, 0x140001169]
+def probe(delta, two_field=False, no_base=False):
+    out = []
+    for i, pc in enumerate(frames):
+        base = '-' if (no_base and i == 2) else '%016x' % (PREF + delta)
+        out.append('%016x %s C:\\Users\\x\\p.exe' % (pc + delta, base) if not two_field
+                   else '%016x C:\\Users\\x\\p.exe' % (pc + delta))
+    out.append('00007ffb0d6a2e1f 00007ffb0d690000 C:\\WINDOWS\\System32\\KERNEL32.DLL' if not two_field
+               else '00007ffb0d6a2e1f C:\\WINDOWS\\System32\\KERNEL32.DLL')
+    out.append('00007ffb0f1395db 00007ffb0f0e0000 C:\\WINDOWS\\SYSTEM32\\ntdll.dll' if not two_field
+               else '00007ffb0f1395db C:\\WINDOWS\\SYSTEM32\\ntdll.dll')
+    return '\n'.join(out) + '\n'
+def put(name, text):
+    p = os.path.join(d, name)
+    open(p, 'w').write(text)
+    return p
+good_map = put('p.map', mapf())
+WANT = 'walk,d3,d2,main,start,kernel32.dll,ntdll.dll'
+WANT_NP = 'walk,d3,d2,main,start,KERNEL32,NTDLL'
+ASLR = 0x7ff612340000 - PREF
+ODD = 0x7ff612345000 - PREF
+bad = []
+def run(m, o, *extra):
+    r = subprocess.run([sys.executable, '-B', helper, m, o, 'p.exe'] + list(extra), capture_output=True, text=True, timeout=60)
+    return r.returncode, r.stdout.rstrip('\n'), r.stderr
+for label, delta in (('(a) preferred base', 0), ('(b) ASLR 64 KiB shift', ASLR), ('(c) unaligned shift', ODD)):
+    o = put('o%x' % delta, probe(delta))
+    rc, out, err = run(good_map, o)
+    if (rc, out) != (0, WANT) or err:
+        bad.append('%s: rc=%d %r %r, want %s' % (label, rc, out[:80], err[-80:], WANT))
+    rc, out, err = run(good_map, o, '--style=native-probe')
+    if (rc, out) != (0, WANT_NP) or err:
+        bad.append('%s native-probe style: rc=%d %r, want %s' % (label, rc, out[:80], WANT_NP))
+for label, m, o, why in (
+        ('no Preferred load address', put('nopref.map', mapf(pref_line=False)), probe(ASLR), 'Preferred load address'),
+        ('no .text symbol', put('notext.map', mapf(text=False)), probe(ASLR), 'symbol'),
+        ('a two-field probe line', good_map, probe(ASLR, two_field=True), 'module base'),
+        ('an image frame without a module base', good_map, probe(ASLR, no_base=True), 'module base')):
+    rc, out, err = run(m, put('bad', o))
+    if rc != 1 or len(out.split('\n')) != 1 or not out.startswith('FAIL: ') or why not in out or 'Traceback' in err:
+        bad.append('refusal "%s": rc=%d %r%s' % (label, rc, out[:100], ' (traceback)' if 'Traceback' in err else ''))
+# the mutant: the pre-#327 rule (absolute address in the map), on the shifted output
+ms = sorted((int(m.group(2), 16), m.group(1)) for m in
+            (re.match(r'^\s*0001:[0-9a-f]{8}\s+(\S+)\s+([0-9a-f]{16})\s+\S+\s*$', l) for l in open(good_map)) if m)
+mut = []
+for l in probe(ASLR).split('\n'):
+    if not l:
+        continue
+    pc, _, mod = l.split(' ', 2)
+    pc = int(pc, 16)
+    if mod.lower().endswith('\\p.exe'):
+        own = [n for a, n in ms if a <= pc]
+        mut.append(own[-1] if own else '?image')
+    else:
+        mut.append(mod.split('\\')[-1].lower())
+if ','.join(mut) == WANT:
+    bad.append('the absolute-address mutant names the shifted chain correctly (the selftest cannot tell the rules apart)')
+shutil.rmtree(d)
+print('FAIL: ' + '; '.join(bad) if bad else 'PASS (preferred, 64 KiB-shifted and unaligned-shifted probes all name %s; '
+      '4 refusals; the absolute rule gives %s on the shifted probe)' % (WANT, ','.join(mut)))
+PCAEOF
+)
+    case "$PCA_O" in
+        PASS*) PASS=$((PASS + 1)); echo "  probe_chain_aslr_selftest: ${PCA_O}" ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL: probe_chain_aslr_selftest ($(printf '%s' "${PCA_O#FAIL: }" | tr '\n' '|' | cut -c1-500))" ;;
+    esac
+fi
+
 # The KR COFF probe linked with a C host (#143 A13, spec 8.4/8.5; phase-4
 # ruling): tests/fixtures/pe_unwind_cprobe/k.kr as a --freestanding object,
 # host.c by clang, kernel32 imports by llvm-dlltool from k32.def, linked by
@@ -39490,6 +39934,84 @@ else
     if [ "$PEU_RC" = 0 ] && grep -q ', 0 wrong$' <<< "$PEU_O"; then pe_row_ok native_judge_selftest "$(tail -1 <<< "$PEU_O")"
     else pe_row_bad native_judge_selftest "rc=$PEU_RC $(grep -m2 WRONG <<< "$PEU_O" | tr '\n' '|' | cut -c1-200)$(tail -1 <<< "$PEU_O")"; fi
 fi
+
+# --- #268: every native-run ssh/scp takes its options from ssh_opts.sh ------
+# OpenSSH 10.2 prints a post-quantum "WarnWeakCrypto" warning into the
+# forwarded stderr of every connection to a server without a PQ key exchange,
+# which failed the native rows that compare stderr. tests/windows/ssh_opts.sh
+# defines NATIVE_SSH_OPTS: -o BatchMode=yes, plus -o WarnWeakCrypto=no-pq-kex
+# when `ssh -G` (prints the configuration, never connects) accepts that value;
+# OpenSSH 9.6 rejects the option (rc 255), so it cannot be passed blindly. It
+# silences only the PQ warning: any other weak-crypto warning stays visible.
+#  native_ssh_opts_single_site: every ssh/scp call of tests/windows/*.sh passes
+#    "${NATIVE_SSH_OPTS[@]}", no script spells -o BatchMode itself, and each
+#    calling script sources ssh_opts.sh;
+#  native_ssh_weakcrypto_probe: with a fake ssh first on PATH that rejects the
+#    option (rc 255 + OpenSSH's message) NATIVE_SSH_OPTS omits it, with one that
+#    accepts it the option is there; the probe runs exactly once, with -G.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1; then skip_row native_ssh_opts_single_site "no python3"
+else
+    NSO_O=$(python3 -B - "$DIR/windows" <<'NSOEOF' 2>&1
+import glob, os, re, sys
+wd = sys.argv[1]
+call = re.compile(r'(?:^|[\s;&|({`])(ssh|scp)[ \t]+(?=[-"$])')
+src = re.compile(r'^\s*(?:\.|source)\s+"?\$\{?[A-Za-z_]+\}?/ssh_opts\.sh"?\s*(?:#.*)?$')
+bad, n, scripts = [], 0, 0
+for p in sorted(glob.glob(os.path.join(wd, '*.sh'))):
+    name = os.path.basename(p)
+    if name == 'ssh_opts.sh':
+        continue
+    calls, sourced = 0, False
+    for i, l in enumerate(open(p, encoding='utf-8', errors='replace'), 1):
+        if l.lstrip().startswith('#'):
+            continue
+        if src.match(l):
+            sourced = True
+        if 'BatchMode' in l:
+            bad.append('%s:%d spells BatchMode' % (name, i))
+        for m in call.finditer(l):
+            calls += 1
+            if not l[m.end():].startswith('"${NATIVE_SSH_OPTS[@]}"') and \
+               not (m.group(1) == 'scp' and l[m.end():].startswith('-q "${NATIVE_SSH_OPTS[@]}"')):
+                bad.append('%s:%d %s without "${NATIVE_SSH_OPTS[@]}" first' % (name, i, m.group(1)))
+    if calls:
+        scripts += 1
+        n += calls
+        if not sourced:
+            bad.append('%s calls ssh/scp but does not source ssh_opts.sh' % name)
+if n < 14:
+    bad.append('only %d ssh/scp calls found, want the 14 of the native scripts' % n)
+print('FAIL: ' + '; '.join(bad[:8]) if bad else 'PASS (%d ssh/scp calls in %d scripts, all through NATIVE_SSH_OPTS)' % (n, scripts))
+NSOEOF
+)
+    case "$NSO_O" in
+        PASS*) PASS=$((PASS + 1)); echo "  native_ssh_opts_single_site: ${NSO_O}" ;;
+        *) FAIL=$((FAIL + 1)); echo "FAIL: native_ssh_opts_single_site ($(printf '%s' "${NSO_O#FAIL: }" | tr '\n' '|' | cut -c1-500))" ;;
+    esac
+fi
+TOTAL=$((TOTAL + 1))
+NSW_D="$SUITE_TMP/nsw_$$"
+mkdir -p "$NSW_D/rej" "$NSW_D/acc"
+if [ ! -f "$DIR/windows/ssh_opts.sh" ]; then
+    FAIL=$((FAIL + 1)); echo "FAIL: native_ssh_weakcrypto_probe (tests/windows/ssh_opts.sh is missing)"
+else
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$NSW_LOG"\ncase " $* " in *WarnWeakCrypto*) echo "command-line: line 0: Bad configuration option: warnweakcrypto" >&2; exit 255 ;; esac\nexit 0\n' > "$NSW_D/rej/ssh"
+    printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> "$NSW_LOG"\necho "warnweakcrypto no"\nexit 0\n' > "$NSW_D/acc/ssh"
+    chmod +x "$NSW_D/rej/ssh" "$NSW_D/acc/ssh"
+    NSW_WHY=""
+    for NSW_C in "rej|-o BatchMode=yes" "acc|-o BatchMode=yes -o WarnWeakCrypto=no-pq-kex"; do
+        NSW_M=${NSW_C%%|*}; NSW_W=${NSW_C#*|}
+        : > "$NSW_D/log"
+        NSW_O=$(PATH="$NSW_D/$NSW_M:$PATH" NSW_LOG="$NSW_D/log" bash -c '. "$1" && echo "${NATIVE_SSH_OPTS[*]}"' nsw "$DIR/windows/ssh_opts.sh" 2>&1)
+        [ "$NSW_O" = "$NSW_W" ] || NSW_WHY="$NSW_WHY $NSW_M: NATIVE_SSH_OPTS '$NSW_O', want '$NSW_W';"
+        [ "$(wc -l < "$NSW_D/log")" = 1 ] || NSW_WHY="$NSW_WHY $NSW_M: ssh ran $(wc -l < "$NSW_D/log") times, want once;"
+        case " $(head -1 "$NSW_D/log") " in *" -G "*"WarnWeakCrypto=no-pq-kex"*) ;; *) NSW_WHY="$NSW_WHY $NSW_M: the probe was '$(head -1 "$NSW_D/log")', want ssh -G ... -o WarnWeakCrypto=no-pq-kex;" ;; esac
+    done
+    if [ -z "$NSW_WHY" ]; then PASS=$((PASS + 1)); echo "  native_ssh_weakcrypto_probe: PASS (one ssh -G probe; option omitted when rejected, -o WarnWeakCrypto=no-pq-kex when accepted)"
+    else FAIL=$((FAIL + 1)); echo "FAIL: native_ssh_weakcrypto_probe ($(printf '%s' "$NSW_WHY" | cut -c1-400))"; fi
+fi
+rm -rf "$NSW_D"
 
 # C7 on the laptop (#143 A14b, spec 8.6 (a)): its ANSI code page is not 932,
 # so the native proof of the lead-byte logic is in-suite:
