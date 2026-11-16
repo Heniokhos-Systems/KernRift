@@ -11108,7 +11108,8 @@ done
 # hosted C caller (built for <arch>-apple-macos11): every reference f makes
 # must resolve into __data (multi's statics) or __text (strl's string, fa's g):
 # arm64 decoded by tests/helpers/a64_adrp_targets.py --list, x86_64 from
-# llvm-objdump's `##` targets. Runtime: CI test-macos / test-macos-x64.
+# llvm-objdump's `##` targets; on arm64 no relocation may name ltmp0 (CI
+# found Apple's ld refusing it). Runtime: CI test-macos / test-macos-x64.
 for L1_A in x86_64 arm64; do
     TOTAL=$((TOTAL + 1))
     if ! command -v ld64.lld > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1 || ! command -v clang > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
@@ -11127,6 +11128,12 @@ for L1_A in x86_64 arm64; do
             L1_W="$L1_W $L1_F: link failed ($(grep -m1 -i 'error\|undefined' $L1_D/err | cut -c1-80));"; continue
         fi
         [ "$L1_E" = - ] && continue
+        # Apple's ld refuses a relocation against ltmp0 when a function symbol
+        # shares its address ("invalid r_symbolnum"; ld64.lld accepts it), so
+        # a __text reference must name a function symbol plus an offset.
+        if [ $L1_A = arm64 ] && llvm-objdump -r $L1_D/m.o 2> /dev/null | grep -q ' ltmp0$'; then
+            L1_W="$L1_W $L1_F: a relocation names ltmp0 (Apple ld: invalid r_symbolnum);"
+        fi
         python3 -B "$DIR/helpers/a64_adrp_targets.py" --list $L1_D/mm _f > $L1_D/t 2>&1
         if [ ! -s $L1_D/t ] || grep -qv " in $L1_E\$" $L1_D/t; then
             L1_W="$L1_W $L1_F: $(grep -v " in $L1_E\$" $L1_D/t | head -1) (want every reference in $L1_E);"
