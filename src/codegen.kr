@@ -21106,6 +21106,66 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 // Mach-O C ABI prepends '_' to symbol names (_main, _write, ...).
 // Relocations: X86_64_RELOC_BRANCH(2) on x86_64, ARM64_RELOC_BRANCH26(2) on arm64.
 @export
+// #298/#299 (Mach-O arm64): the symbol a __text reference (a string literal or
+// fn_addr) is relocated against: the function symbol at or before `target`,
+// with mo_text_ref_addend = target - that function's offset. Apple's linker
+// refuses a relocation against ltmp0 when a function symbol shares its
+// address ("invalid r_symbolnum"; ld64.lld accepts it), so __text references
+// name a real symbol plus an offset, as clang's do. Symbol order is the
+// writer's: locals (non-main, non-@export), the ltmp symbols, the @export
+// functions, then main. Returns 0xFFFFFFFF when no function precedes target.
+static uint64 mo_text_ref_addend = 0
+fn macho_a64_text_ref_sym(uint64 target, uint64 nlocal, uint64 main_fn_idx) -> uint64 {
+    uint64 best = 0xFFFFFFFF
+    uint64 best_off = 0
+    uint64 i = 0
+    while i < fn_count {
+        uint64 fe = fn_table + i * 8 + 4
+        uint32 co = 0
+        unsafe { *(fe as uint32) -> co }
+        uint64 wco = co
+        if wco <= target && (best == 0xFFFFFFFF || wco >= best_off) {
+            best = i
+            best_off = wco
+        }
+        i = i + 1
+    }
+    if best == 0xFFFFFFFF { return 0xFFFFFFFF }
+    mo_text_ref_addend = target - best_off
+    uint64 nloc = 0
+    uint64 nexp = 0
+    uint64 j = 0
+    while j < best {
+        uint64 je = fn_table + j * 8
+        uint32 jt = 0
+        unsafe { *(je as uint32) -> jt }
+        uint64 wjt = jt
+        if j != main_fn_idx {
+            if export_fn_is_exported(wjt) != 0 { nexp = nexp + 1 } else { nloc = nloc + 1 }
+        }
+        j = j + 1
+    }
+    uint64 be = fn_table + best * 8
+    uint32 bt = 0
+    unsafe { *(be as uint32) -> bt }
+    uint64 wbt = bt
+    if best == main_fn_idx {
+        uint64 nall = 0
+        uint64 k = 0
+        while k < fn_count {
+            uint64 ke = fn_table + k * 8
+            uint32 kt = 0
+            unsafe { *(ke as uint32) -> kt }
+            uint64 wkt = kt
+            if k != main_fn_idx && export_fn_is_exported(wkt) != 0 { nall = nall + 1 }
+            k = k + 1
+        }
+        return nlocal + nall
+    }
+    if export_fn_is_exported(wbt) != 0 { return nlocal + nexp }
+    return nloc
+}
+
 fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Save the generated code blob (text + data are already in out_buf).
     uint64 blob_len = out_len
@@ -21128,7 +21188,8 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // X86_64_RELOC_SIGNED per site; arm64 ARM64_RELOC_PAGE21 + PAGEOFF12
     // against a section-start local symbol (ltmp0 / ltmp1) with
     // ARM64_RELOC_ADDEND, as the LLVM assembler writes them. arm64 string
-    // and fn_addr pairs (#298/#299) get the same pair against ltmp0.
+    // and fn_addr pairs (#298/#299) get the same pair against the function
+    // symbol at or before their target (macho_a64_text_ref_sym), not ltmp0.
     uint64 section_size = text_len
     uint64 has_data = 0
     if data_len > 0 { has_data = 1 }
@@ -21467,6 +21528,13 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_u32_le(2 | (1 << 24) | (2 << 25) | (1 << 28))
         } else {
             uint64 lsym = ltmp_base + rsec
+            if rsec == 0 {
+                uint64 tsym = macho_a64_text_ref_sym(rtarget, nlocal, main_fn_idx)
+                if tsym != 0xFFFFFFFF {
+                    lsym = tsym
+                    rtarget = mo_text_ref_addend
+                }
+            }
             emit_u32_le(rsite)
             emit_u32_le((rtarget & 0xFFFFFF) | (2 << 25) | (10 << 28))     // ARM64_RELOC_ADDEND
             emit_u32_le(rsite)

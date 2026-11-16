@@ -3940,8 +3940,9 @@ ABI; `_main` and every `@export` function are external. `extern fn` call sites
 use relocations `X86_64_RELOC_BRANCH` (x86_64) and `ARM64_RELOC_BRANCH26`
 (arm64). Static references use `X86_64_RELOC_SIGNED` (x86_64, against the
 section) or `ARM64_RELOC_ADDEND` + `ARM64_RELOC_PAGE21` / `ARM64_RELOC_PAGEOFF12`
-(arm64, against the local symbols `ltmp1`, the start of `__data`, and `ltmp0`,
-the start of `__text`, for strings and `fn_addr`).
+(arm64, against the local symbol `ltmp1`, the start of `__data`; a string
+literal or `fn_addr` names the function symbol at or before its target plus an
+offset, as clang does).
 
 ### Windows x86_64 / arm64 (COFF `.obj`)
 
