@@ -9389,10 +9389,19 @@ fn gen_expr_node(uint64 node) {
             // passing them in integer registers silently miscompiles any
             // f64-taking callee reached through call_ptr.
             uint64 cp_fkinds = cg_alloc(arg_count * 8 + 8)
+            // #293: which arguments are struct VALUES (their slot then holds
+            // the struct's address); 0xFFFFFFFF = not a struct.
+            uint64 cp_sflags = cg_alloc(arg_count * 8 + 8)
+            uint64 cp_has_struct = 0
             uint64 weval = wca
             uint64 ai = 0
             while weval != 0 {
                 gen_expr(weval)
+                uint64 csfp = cp_sflags + ai * 8
+                uint64 csv = 0xFFFFFFFF
+                if abi_struct_pass_by_val != 0 { csv = expr_is_struct }
+                unsafe { *(csfp as uint64) = csv }
+                if csv != 0xFFFFFFFF { cp_has_struct = 1 }
                 uint64 wfk = expr_is_float
                 uint64 fkp = cp_fkinds + ai * 8
                 unsafe { *(fkp as uint64) = wfk }
@@ -9409,6 +9418,90 @@ fn gen_expr_node(uint64 node) {
                 ai = ai + 1
                 uint32 anxt = ast_next(weval)
                 weval = anxt
+            }
+
+            // #293: pass a struct argument the way a direct call to a legacy
+            // function does (the callee's parameter spill expects it): SysV
+            // INTEGER/SSE eightbytes as one or two scalar arguments, MEMORY
+            // class (> 16 bytes) as the address; Windows x64 <= 8 bytes as the
+            // value, larger as the address. The argument list is rewritten into
+            // a fresh run of slots, so everything below is unchanged and a
+            // call_ptr without struct arguments emits the same bytes as before.
+            if cp_has_struct != 0 {
+                uint64 xn = 0
+                uint64 xa = 0
+                while xa < arg_count {
+                    uint64 xsfp = cp_sflags + xa * 8
+                    uint64 xsi = 0
+                    unsafe { *(xsfp as uint64) -> xsi }
+                    xn = xn + 1
+                    if xsi != 0xFFFFFFFF && target_os != 2 {
+                        if struct_abi_class0(xsi) != 3 && struct_total_size(xsi) > 8 { xn = xn + 1 }
+                    }
+                    xa = xa + 1
+                }
+                if xn > 64 {
+                    uint64 cpe3 = "error: too many call_ptr arguments on the legacy backend (max 64, a by-value struct counts once per eightbyte)\n"
+                    write(2, cpe3, str_len(cpe3))
+                    fatal_exit()
+                }
+                uint64 xbase = cg_slot_off(var_count)
+                uint64 xc = 0
+                while xc < xn { var_count = var_count + 1; xc = xc + 1 }
+                var_frame_size = var_count * 8
+                uint64 xrem = var_frame_size & 15
+                if xrem != 0 { var_frame_size = var_frame_size + 16 - xrem }
+                uint64 xkinds = cg_alloc(xn * 8 + 8)
+                uint64 xj = 0
+                xa = 0
+                while xa < arg_count {
+                    uint64 xsfp2 = cp_sflags + xa * 8
+                    uint64 xsi2 = 0
+                    unsafe { *(xsfp2 as uint64) -> xsi2 }
+                    uint64 xfkp = cp_fkinds + xa * 8
+                    uint64 xfk = 0
+                    unsafe { *(xfkp as uint64) -> xfk }
+                    uint64 xsrc = arg_slots_base + xa * 8
+                    if xsi2 == 0xFFFFFFFF {
+                        emit_load_rax_from_stack(xsrc)
+                        emit_store_rax_to_stack(xbase + xj * 8)
+                        uint64 xkp_xfk = xkinds + xj * 8
+                        unsafe { *(xkp_xfk as uint64) = xfk }
+                        xj = xj + 1
+                    } else {
+                        uint64 xsz = struct_total_size(xsi2)
+                        uint64 xc0 = struct_abi_class0(xsi2)
+                        uint64 by_addr = 0
+                        if target_os == 2 && xsz > 8 { by_addr = 1 }
+                        if target_os != 2 && xc0 == 3 { by_addr = 1 }
+                        emit_load_rax_from_stack(xsrc)
+                        if by_addr == 0 {
+                            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)   // mov rax, [rax]
+                        }
+                        rax_cache = 0
+                        emit_store_rax_to_stack(xbase + xj * 8)
+                        uint64 xk0 = 0
+                        if by_addr == 0 && target_os != 2 && xc0 == 2 { xk0 = 1 }
+                        uint64 xkp_xk0 = xkinds + xj * 8
+                        unsafe { *(xkp_xk0 as uint64) = xk0 }
+                        xj = xj + 1
+                        if by_addr == 0 && target_os != 2 && xsz > 8 {
+                            emit_load_rax_from_stack(xsrc)
+                            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x40); emit_byte(0x08)   // mov rax, [rax+8]
+                            rax_cache = 0
+                            emit_store_rax_to_stack(xbase + xj * 8)
+                            uint64 xk1 = 0
+                            if struct_abi_class1(xsi2) == 2 { xk1 = 1 }
+                            uint64 xkp_xk1 = xkinds + xj * 8
+                        unsafe { *(xkp_xk1 as uint64) = xk1 }
+                            xj = xj + 1
+                        }
+                    }
+                    xa = xa + 1
+                }
+                arg_count = xn
+                arg_slots_base = xbase
+                cp_fkinds = xkinds
             }
 
             // Load args into registers.
