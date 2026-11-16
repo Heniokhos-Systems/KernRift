@@ -11654,6 +11654,9 @@ fn asm_parse_num(uint64 src, uint64 off, uint64 n) -> uint64 {
             if c >= 65 && c <= 70 { d = c - 55 }
         }
         if d >= base { return 0xFFFFFFFFFFFFFFFF }
+        // A1 (#289): refuse the digit that would wrap past 2^64
+        if base == 10 && (v > 1844674407370955161 || (v == 1844674407370955161 && d > 5)) { asm_x86_num_fatal() }
+        if base == 16 && v > 0x0FFFFFFFFFFFFFFF { asm_x86_num_fatal() }
         v = v * base + d
         digits = digits + 1
         i = i + 1
@@ -12066,6 +12069,8 @@ fn asm_emit_x86(uint64 str_tok) {
     uint64 sptr = cg_source + tstart + 1
     uint64 slen = tlen - 2
     if slen == 0 { return }
+    asm_one_insn(str_tok, sptr, slen, 0)    // A1 (#245): the text rules
+    slen = asm_cur_sl                        // trailing blanks trimmed once
 
     // Check for raw hex bytes: "0x0F 0x01 ..."
     uint64 fc = 0
@@ -12261,6 +12266,7 @@ fn asm_emit_x86(uint64 str_tok) {
                     uint64 numoff = m_s + 5
                     uint64 numlen = (slen - 1) - numoff
                     uint64 disp = asm_parse_num(sptr, numoff, numlen)
+                    if disp != 0xFFFFFFFFFFFFFFFF && disp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }   // a disp32 (#282)
                     uint64 m_d = asm_x86_reg(sptr, 4, m_c - 4)
                     if disp != 0xFFFFFFFFFFFFFFFF && m_d != 0xFFFF {
                         uint64 mrex = 0x48
@@ -12424,12 +12430,12 @@ fn asm_emit_x86(uint64 str_tok) {
     if asm_match(sptr, 0, "cld", 3) != 0 && slen == 3 { emit_byte(0xFC); return }
     if asm_match(sptr, 0, "std", 3) != 0 && slen == 3 { emit_byte(0xFD); return }
     // I/O instructions
-    if asm_match(sptr, 0, "in al, dx", 9) != 0 { emit_byte(0xEC); return }
-    if asm_match(sptr, 0, "in ax, dx", 9) != 0 { emit_byte(0x66); emit_byte(0xED); return }
-    if asm_match(sptr, 0, "in eax, dx", 10) != 0 { emit_byte(0xED); return }
-    if asm_match(sptr, 0, "out dx, al", 10) != 0 { emit_byte(0xEE); return }
-    if asm_match(sptr, 0, "out dx, ax", 10) != 0 { emit_byte(0x66); emit_byte(0xEF); return }
-    if asm_match(sptr, 0, "out dx, eax", 11) != 0 { emit_byte(0xEF); return }
+    if asm_match(sptr, 0, "in al, dx", 9) != 0 && asm_rest_blank(sptr, slen, 9) != 0 { emit_byte(0xEC); return }
+    if asm_match(sptr, 0, "in ax, dx", 9) != 0 && asm_rest_blank(sptr, slen, 9) != 0 { emit_byte(0x66); emit_byte(0xED); return }
+    if asm_match(sptr, 0, "in eax, dx", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0xED); return }
+    if asm_match(sptr, 0, "out dx, al", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0xEE); return }
+    if asm_match(sptr, 0, "out dx, ax", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x66); emit_byte(0xEF); return }
+    if asm_match(sptr, 0, "out dx, eax", 11) != 0 && asm_rest_blank(sptr, slen, 11) != 0 { emit_byte(0xEF); return }
     if asm_match(sptr, 0, "inb", 3) != 0 && slen == 3 { emit_byte(0xEC); return }
     if asm_match(sptr, 0, "outb", 4) != 0 && slen == 4 { emit_byte(0xEE); return }
     if asm_match(sptr, 0, "inw", 3) != 0 && slen == 3 { emit_byte(0x66); emit_byte(0xED); return }
@@ -12447,23 +12453,23 @@ fn asm_emit_x86(uint64 str_tok) {
     // handler: the place in a kernel where a reader can least afford to have
     // to decode them. ModRM 11 010 000 selects cr2 in the reg field and rax in
     // the rm field, which is the same shape as the cr3/cr4 rows above.
-    if asm_match(sptr, 0, "mov cr0, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xC0); return }
-    if asm_match(sptr, 0, "mov cr2, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD0); return }
-    if asm_match(sptr, 0, "mov cr3, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD8); return }
-    if asm_match(sptr, 0, "mov cr4, rax", 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xE0); return }
-    if asm_match(sptr, 0, "mov rax, cr0", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xC0); return }
-    if asm_match(sptr, 0, "mov rax, cr2", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD0); return }
-    if asm_match(sptr, 0, "mov rax, cr3", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD8); return }
-    if asm_match(sptr, 0, "mov rax, cr4", 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xE0); return }
+    if asm_match(sptr, 0, "mov cr0, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xC0); return }
+    if asm_match(sptr, 0, "mov cr2, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD0); return }
+    if asm_match(sptr, 0, "mov cr3, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xD8); return }
+    if asm_match(sptr, 0, "mov cr4, rax", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x22); emit_byte(0xE0); return }
+    if asm_match(sptr, 0, "mov rax, cr0", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xC0); return }
+    if asm_match(sptr, 0, "mov rax, cr2", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD0); return }
+    if asm_match(sptr, 0, "mov rax, cr3", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xD8); return }
+    if asm_match(sptr, 0, "mov rax, cr4", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x20); emit_byte(0xE0); return }
     // Privileged instructions
-    if asm_match(sptr, 0, "lgdt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x10); return }
-    if asm_match(sptr, 0, "lidt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x18); return }
+    if asm_match(sptr, 0, "lgdt [rax]", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x10); return }
+    if asm_match(sptr, 0, "lidt [rax]", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x18); return }
     // SIDT, lidt's counterpart: reads the IDTR back. Needed to verify that a
     // table was actually loaded -- without it a test can only check the value
     // the program THINKS it wrote, which a missing lidt would not disturb.
-    if asm_match(sptr, 0, "sidt [rax]", 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x08); return }
-    if asm_match(sptr, 0, "invlpg [rax]", 12) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x38); return }
-    if asm_match(sptr, 0, "ltr ax", 6) != 0 { emit_byte(0x0F); emit_byte(0x00); emit_byte(0xD8); return }
+    if asm_match(sptr, 0, "sidt [rax]", 10) != 0 && asm_rest_blank(sptr, slen, 10) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x08); return }
+    if asm_match(sptr, 0, "invlpg [rax]", 12) != 0 && asm_rest_blank(sptr, slen, 12) != 0 { emit_byte(0x0F); emit_byte(0x01); emit_byte(0x38); return }
+    if asm_match(sptr, 0, "ltr ax", 6) != 0 && asm_rest_blank(sptr, slen, 6) != 0 { emit_byte(0x0F); emit_byte(0x00); emit_byte(0xD8); return }
     // --- GS-relative absolute moves, the per-CPU slot a SYSCALL entry needs ---
     //
     // `mov gs:[<disp>], <reg64>` and `mov <reg64>, gs:[<disp>]`.
@@ -12499,6 +12505,7 @@ fn asm_emit_x86(uint64 str_tok) {
     // the moves above use, with no REX because PUSH defaults to 64-bit operand
     // size in long mode. Taken from GNU as, not the manual.
     if asm_match(sptr, 0, "push gs:[", 9) != 0 {
+        if asm_match(sptr, 9, "-", 1) != 0 { asm_x86_unsupported(sptr, slen, "a negative gs: displacement") }
         uint64 pclose = 9
         while pclose < slen {
             uint64 pc = 0
@@ -12506,8 +12513,9 @@ fn asm_emit_x86(uint64 str_tok) {
             if pc == 93 { break }
             pclose = pclose + 1
         }
-        if pclose < slen {
+        if pclose < slen && asm_rest_blank(sptr, slen, pclose + 1) != 0 {
             uint64 pdisp = asm_parse_num(sptr, 9, pclose - 9)
+            if pdisp != 0xFFFFFFFFFFFFFFFF && pdisp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }
             if pdisp != 0xFFFFFFFFFFFFFFFF {
                 emit_byte(0x65)
                 emit_byte(0xFF)
@@ -12519,6 +12527,7 @@ fn asm_emit_x86(uint64 str_tok) {
         }
     }
     if asm_match(sptr, 0, "mov gs:[", 8) != 0 {
+        if asm_match(sptr, 8, "-", 1) != 0 { asm_x86_unsupported(sptr, slen, "a negative gs: displacement") }
         uint64 gclose = 8
         while gclose < slen {
             uint64 gc = 0
@@ -12528,6 +12537,7 @@ fn asm_emit_x86(uint64 str_tok) {
         }
         if gclose < slen {
             uint64 gdisp = asm_parse_num(sptr, 8, gclose - 8)
+            if gdisp != 0xFFFFFFFFFFFFFFFF && gdisp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }
             // `], ` then the register.
             uint64 gr = asm_x86_reg(sptr, gclose + 3, slen - gclose - 3)
             if gdisp != 0xFFFFFFFFFFFFFFFF && gr != 0xFFFF {
@@ -12555,6 +12565,7 @@ fn asm_emit_x86(uint64 str_tok) {
             uint64 lr = asm_x86_reg(sptr, 4, lcomma - 4)
             // ", gs:[" is six characters, then the displacement to the "]".
             uint64 lopen = lcomma + 6
+            if lopen < slen && load8(sptr + lopen) == 45 { asm_x86_unsupported(sptr, slen, "a negative gs: displacement") }
             uint64 lclose = lopen
             while lclose < slen {
                 uint64 lc2 = 0
@@ -12563,7 +12574,8 @@ fn asm_emit_x86(uint64 str_tok) {
                 lclose = lclose + 1
             }
             uint64 ldisp = asm_parse_num(sptr, lopen, lclose - lopen)
-            if lr != 0xFFFF && lclose < slen && ldisp != 0xFFFFFFFFFFFFFFFF {
+            if ldisp != 0xFFFFFFFFFFFFFFFF && ldisp > 0x7FFFFFFF { asm_x86_disp_fatal(sptr, slen) }
+            if lr != 0xFFFF && lclose < slen && ldisp != 0xFFFFFFFFFFFFFFFF && asm_rest_blank(sptr, slen, lclose + 1) != 0 {
                 uint64 lrex = 0x48
                 if lr >= 8 { lrex = lrex | 0x04 }
                 emit_byte(0x65)
@@ -21856,4 +21868,42 @@ fn asm_a64_fallthrough(uint64 sptr, uint64 slen) {
     while k < mlen && pp < 60 { store8(tm + pp, load8(sptr + k))  pp = pp + 1  k = k + 1 }
     store8(tm + pp, 39)  store8(tm + pp + 1, 0)
     asm_unsupported(sptr, slen, tm, 0)
+}
+
+// ---------------------------------------------------------------------------
+// A1 (#282, #289): the x86_64 located errors. A displacement fed to a disp32
+// is 0..0x7FFFFFFF (the CPU sign-extends it; it used to be truncated to 32
+// bits), and a number that does not fit in 64 bits is refused (it wrapped).
+fn asm_x86_disp_fatal(uint64 sptr, uint64 slen) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "x86_64 asm '", 12)
+    write(2, sptr, slen)
+    uint64 m = "': a displacement is a signed 32-bit value; it must be 0 to 0x7FFFFFFF here (#282)\n"
+    write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+fn asm_x86_num_fatal() {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "x86_64 asm '", 12)
+    write(2, asm_cur_sp, asm_cur_sl)
+    uint64 m = "': the number does not fit in 64 bits (#289)\n"
+    write(2, m, str_len(m))
+    diag_span_of(asm_cur_tok)
+    fatal_exit()
+}
+
+fn asm_x86_unsupported(uint64 sptr, uint64 slen, uint64 what) {
+    diag_loc_head(asm_cur_tok, 0)
+    write(2, "x86_64 asm '", 12)
+    write(2, sptr, slen)
+    write(2, "': ", 3)
+    write(2, what, str_len(what))
+    uint64 m2 = " is not supported by the inline assembler (#245)\n"
+    write(2, m2, str_len(m2))
+    diag_span_of(asm_cur_tok)
+    uint64 h = "  use raw hex bytes for it, e.g. asm { \"0x0F 0x01 0xD0\" }\n"
+    write(2, h, str_len(h))
+    fatal_exit()
 }
