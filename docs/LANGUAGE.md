@@ -3942,7 +3942,9 @@ use relocations `X86_64_RELOC_BRANCH` (x86_64) and `ARM64_RELOC_BRANCH26`
 section) or `ARM64_RELOC_ADDEND` + `ARM64_RELOC_PAGE21` / `ARM64_RELOC_PAGEOFF12`
 (arm64, against the local symbol `ltmp1`, the start of `__data`; a string
 literal or `fn_addr` names the function symbol at or before its target plus an
-offset, as clang does).
+offset, as clang does). The ADDEND is a signed 24-bit field, so a target 4 MiB
+or more past that symbol gets its own local label: `_krd<offset>` every 4 MiB
+of `__data` that is referenced, `_krt<offset>` at a far `__text` target.
 
 ### Windows x86_64 / arm64 (COFF `.obj`)
 

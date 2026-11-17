@@ -21091,21 +21091,6 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mach-O relocatable (MH_OBJECT) emission — macOS .o files
-// Layout:
-//   [0]   Mach header (32 bytes)
-//   [32]  LC_SEGMENT_64 + __text section (152 bytes)
-//   [184] LC_SYMTAB (24 bytes)
-//   [208] LC_DYSYMTAB (80 bytes)
-//   [288] __text content (text_len bytes, padded to 8)
-//   [...]  relocation_info entries (8 * nreloc)
-//   [...]  nlist_64 symbol table (16 * nsyms)
-//   [...]  string table (strings for symbols)
-//
-// Mach-O C ABI prepends '_' to symbol names (_main, _write, ...).
-// Relocations: X86_64_RELOC_BRANCH(2) on x86_64, ARM64_RELOC_BRANCH26(2) on arm64.
-@export
 // #298/#299 (Mach-O arm64): the symbol a __text reference (a string literal or
 // fn_addr) is relocated against: the function symbol at or before `target`,
 // with mo_text_ref_addend = target - that function's offset. Apple's linker
@@ -21166,6 +21151,52 @@ fn macho_a64_text_ref_sym(uint64 target, uint64 nlocal, uint64 main_fn_idx) -> u
     return nloc
 }
 
+// #345 (Mach-O arm64): ARM64_RELOC_ADDEND carries a signed 24-bit addend, so a
+// reference never names a symbol more than MO_ADDEND_SPAN bytes before its
+// target. Past that, the writer adds a local symbol: a __data label at every
+// MO_ADDEND_SPAN boundary a static reference needs (_krd<offset>), and a label
+// at the exact __text target of a far string or fn_addr (_krt<offset>).
+// mo_extra holds (section 1 = __text / 2 = __data, offset) per added symbol.
+static uint64 mo_extra = 0
+static uint64 mo_extra_count = 0
+fn mo_extra_find(uint64 sect, uint64 off) -> uint64 {
+    uint64 i = 0
+    while i < mo_extra_count {
+        uint64 e = mo_extra + i * 16
+        uint64 es = 0
+        unsafe { *(e as uint64) -> es }
+        uint64 e8 = e + 8
+        uint64 eo = 0
+        unsafe { *(e8 as uint64) -> eo }
+        if es == sect && eo == off { return i }
+        i = i + 1
+    }
+    return 0xFFFFFFFF
+}
+fn mo_extra_add(uint64 sect, uint64 off) {
+    if mo_extra_find(sect, off) != 0xFFFFFFFF { return }
+    uint64 e = mo_extra + mo_extra_count * 16
+    unsafe { *(e as uint64) = sect }
+    uint64 e8 = e + 8
+    unsafe { *(e8 as uint64) = off }
+    mo_extra_count = mo_extra_count + 1
+}
+
+// ---------------------------------------------------------------------------
+// Mach-O relocatable (MH_OBJECT) emission — macOS .o files
+// Layout:
+//   [0]   Mach header (32 bytes)
+//   [32]  LC_SEGMENT_64 + __text section (152 bytes)
+//   [184] LC_SYMTAB (24 bytes)
+//   [208] LC_DYSYMTAB (80 bytes)
+//   [288] __text content (text_len bytes, padded to 8)
+//   [...]  relocation_info entries (8 * nreloc)
+//   [...]  nlist_64 symbol table (16 * nsyms)
+//   [...]  string table (strings for symbols)
+//
+// Mach-O C ABI prepends '_' to symbol names (_main, _write, ...).
+// Relocations: X86_64_RELOC_BRANCH(2) on x86_64, ARM64_RELOC_BRANCH26(2) on arm64.
+@export
 fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Save the generated code blob (text + data are already in out_buf).
     uint64 blob_len = out_len
@@ -21226,11 +21257,37 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    // #345: the extra local symbols a far arm64 reference needs (mo_extra_add):
+    // a __data label at each 4 MiB boundary a static reference lies past, a
+    // __text label at a string or fn_addr target 4 MiB or more past the
+    // function symbol before it (or with none before it). The 4 MiB step keeps
+    // every ARM64_RELOC_ADDEND well inside its signed 24 bits.
+    mo_extra_count = 0
+    if arch == 1 {
+        mo_extra = cg_alloc((n_sfix + n_pc) * 16 + 16)
+        uint64 mxi = 0
+        while mxi < n_sfix + n_pc {
+            if mxi < n_sfix {
+                uint64 mxe = static_fixups + mxi * 8 + 4
+                uint32 mxd = 0
+                unsafe { *(mxe as uint32) -> mxd }
+                uint64 wmxd = mxd
+                uint64 mxchunk = wmxd / 0x400000
+                if mxchunk != 0 { mo_extra_add(2, mxchunk * 0x400000) }
+            } else {
+                uint64 mxt = a64_pc_target(mxi - n_sfix)
+                uint64 mxs = macho_a64_text_ref_sym(mxt, 0, 0xFFFFFFFF)
+                if mxs == 0xFFFFFFFF || mo_text_ref_addend >= 0x400000 { mo_extra_add(1, mxt) }
+            }
+            mxi = mxi + 1
+        }
+    }
+
     // Build string table:
     //   idx 0: \0 (null)
     //   idx 1: _<fn_name>\0 for each local/main
     //   idx N: _<extern_name>\0 for each extern
-    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes())
+    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes() + mo_extra_count * 16)
     uint64 strtab_len = 1
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -21334,6 +21391,45 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    // #345: _krt<offset> (a __text label) / _krd<offset> (a __data label),
+    // the offset in eight hex digits; 13 bytes each with the NUL.
+    uint64 mo_extra_str = strtab_len
+    uint64 mxn = 0
+    while mxn < mo_extra_count {
+        uint64 mxne = mo_extra + mxn * 16
+        uint64 mxns = 0
+        unsafe { *(mxne as uint64) -> mxns }
+        uint64 mxne8 = mxne + 8
+        uint64 mxno = 0
+        unsafe { *(mxne8 as uint64) -> mxno }
+        uint64 mxp = strtab_buf + strtab_len
+        uint8 mc_u = 95
+        unsafe { *(mxp as uint8) = mc_u }
+        uint64 mxp1 = mxp + 1
+        uint8 mc_k = 107
+        unsafe { *(mxp1 as uint8) = mc_k }
+        uint64 mxp2 = mxp + 2
+        uint8 mc_r = 114
+        unsafe { *(mxp2 as uint8) = mc_r }
+        uint64 mxp3 = mxp + 3
+        uint8 mc_s = 116
+        if mxns == 2 { mc_s = 100 }
+        unsafe { *(mxp3 as uint8) = mc_s }
+        uint64 mxh = 0
+        while mxh < 8 {
+            uint64 nib = (mxno >> ((7 - mxh) * 4)) & 15
+            uint8 hc = 48 + nib
+            if nib >= 10 { hc = 87 + nib }
+            uint64 mxph = mxp + 4 + mxh
+            unsafe { *(mxph as uint8) = hc }
+            mxh = mxh + 1
+        }
+        uint64 mxp12 = mxp + 12
+        unsafe { *(mxp12 as uint8) = nul }
+        strtab_len = strtab_len + 13
+        mxn = mxn + 1
+    }
+
     // Layout offsets
     uint64 hdr_size = 288  // mach_header + LC_SEGMENT_64 + LC_SYMTAB + LC_DYSYMTAB
     if has_data != 0 { hdr_size = 288 + 80 }
@@ -21363,7 +21459,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         if xfi == main_fn_idx || export_fn_is_exported(wxft) != 0 { nextdef = nextdef + 1 }
         xfi = xfi + 1
     }
-    uint64 nlocal = fn_count - nextdef + n_ltmp
+    uint64 nlocal = fn_count - nextdef + n_ltmp + mo_extra_count
     uint64 ltmp_base = fn_count - nextdef
     uint64 nundef = extern_fn_count
     uint64 total_syms = nlocal + nextdef + nundef
@@ -21530,9 +21626,20 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             uint64 lsym = ltmp_base + rsec
             if rsec == 0 {
                 uint64 tsym = macho_a64_text_ref_sym(rtarget, nlocal, main_fn_idx)
-                if tsym != 0xFFFFFFFF {
+                if tsym != 0xFFFFFFFF && mo_text_ref_addend < 0x400000 {
                     lsym = tsym
                     rtarget = mo_text_ref_addend
+                } else {
+                    // #345: a far (or function-less) __text target: its own label
+                    lsym = ltmp_base + n_ltmp + mo_extra_find(1, rtarget)
+                    rtarget = 0
+                }
+            } else {
+                uint64 rchunk = rtarget / 0x400000
+                if rchunk != 0 {
+                    // #345: a static 4 MiB or more into __data: the label at its 4 MiB boundary
+                    lsym = ltmp_base + n_ltmp + mo_extra_find(2, rchunk * 0x400000)
+                    rtarget = rtarget - rchunk * 0x400000
                 }
             }
             emit_u32_le(rsite)
@@ -21581,6 +21688,22 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u16_le(0)
         if ltn == 0 { emit_u64_le(0) } else { emit_u64_le(section_size) }
         ltn = ltn + 1
+    }
+    // #345: the far-reference labels, right after the ltmp symbols
+    uint64 mxs2 = 0
+    while mxs2 < mo_extra_count {
+        uint64 mxe2 = mo_extra + mxs2 * 16
+        uint64 mxsect = 0
+        unsafe { *(mxe2 as uint64) -> mxsect }
+        uint64 mxe28 = mxe2 + 8
+        uint64 mxoff = 0
+        unsafe { *(mxe28 as uint64) -> mxoff }
+        emit_u32_le(mo_extra_str + mxs2 * 13)
+        emit_byte(0x0E)
+        emit_byte(mxsect)
+        emit_u16_le(0)
+        if mxsect == 2 { emit_u64_le(section_size + mxoff) } else { emit_u64_le(mxoff) }
+        mxs2 = mxs2 + 1
     }
     // 2) Extdef: every @export function, then main
     uint64 efi = 0

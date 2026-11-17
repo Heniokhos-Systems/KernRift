@@ -321,6 +321,7 @@ jobs:
           for t in multi ext strl fa exp; do
             ./build/krc2 --freestanding --arch=arm64 --target=windows --emit=obj $F/$t.kr -o $O/coff-arm64/$t.obj
           done
+          ./build/krc2 --arch=arm64 --target=macos -c $F/far.kr -o $O/macho/far-arm64.o   # #345
           cp $F/*.c $F/*.h $F/refuse_win_arm64_overflow.kr $O/src/
 
       - name: Android x86_64 execution test
@@ -767,7 +768,7 @@ jobs:
 
       # L1: the Mach-O objects of the Linux job, linked here with Xcode's clang
       # and run (x86_64 under Rosetta; natively in cross-platform.yml
-      # test-macos-x64). A signal is a FAIL whatever the want; all 82 rows
+      # test-macos-x64). A signal is a FAIL whatever the want; all 83 rows
       # must PASS.
       - name: Mach-O object rows (#294 #301 #296 #298 #299 + C struct ABI)
         run: |
@@ -791,8 +792,10 @@ jobs:
               row macho_obj_struct_abi_${T}_${m}_$a $a 0 -I$D/src -DMODE=$m -include $D/src/abi_$T.h $D/src/abi_main_macos.c $D/macho/abi_$T-$a.o
             done; done
           done
-          echo "macho_obj rows passed: $N (want 82)"
-          [ $N -eq 82 ] || FAIL=1
+          # #345: a static 9000000 bytes into __data (past the 24-bit ADDEND reach)
+          row macho_obj_far_static_arm64 arm64 93 $D/src/c_macos.c $D/macho/far-arm64.o
+          echo "macho_obj rows passed: $N (want 83)"
+          [ $N -eq 83 ] || FAIL=1
           exit $FAIL
 
       - name: Download krc.krbo + kr runners
