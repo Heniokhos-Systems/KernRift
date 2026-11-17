@@ -1,0 +1,2 @@
+fn f() -> uint64 { f32 a = 1.5f; uint64 c = 1; f32 b = c == 1 ? a : 0.5f; return f32_to_int(b * 2.0f) }
+fn main() { exit(f()) }

@@ -1,0 +1,23 @@
+struct P {
+    uint64 a
+    uint64 b
+}
+struct R {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+static uint64 sink = 0
+fn P.go(P self) -> uint64 { sink = sink + 1; return self.a + 2 }
+fn P.go2(P self, uint64 z) -> uint64 { sink = sink + 1; return z }
+fn P.ok(P self) -> bool { sink = sink + 1; return true }
+fn P.geti(P self) -> int32 { sink = sink + 1; return 3 }
+fn P.mk(P self) -> P { P r; r.a = 1; r.b = 4; return r }
+fn R.rgo(R self) -> uint64 { sink = sink + 1; return 3 }
+fn g(P q) -> uint64 { sink = sink + 1; return q.a + 2 }
+fn g2(uint64 z, P q) -> uint64 { sink = sink + 1; return q.a + 2 }
+fn gr(R q) -> uint64 { sink = sink + 1; return q.a + 2 }
+fn k(uint64 v) -> uint64 { sink = sink + 1; return v }
+fn t<T>(T q) -> uint64 { sink = sink + 1; return 3 }
+fn f() -> uint64 { P p; p.a = 1; p.b = 2; uint64 fp = fn_addr("g"); return call_ptr(fp, p) }
+fn main() { exit(f()) }

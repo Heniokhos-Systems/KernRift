@@ -1,0 +1,7 @@
+fn g(uint64 a) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } return a + 3 }
+@export
+fn f(uint64 a) -> uint64 {
+    uint64 fp = fn_addr("g")
+    uint64 v = call_ptr(fp, a)
+    return v
+}

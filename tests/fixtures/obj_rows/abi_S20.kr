@@ -1,0 +1,46 @@
+struct S20 {
+    uint32 a
+    uint32 b
+    uint32 c
+    uint32 d
+    uint32 e
+}
+extern fn c_arg(S20 q) -> uint64
+extern fn c_ret(uint64 x) -> S20
+@export
+fn k_arg(S20 q) -> uint64 {
+    uint64 s = q.a * 10000 + q.b * 1000 + q.c * 100 + q.d * 10 + q.e * 1
+    q.a = 9
+    return s
+}
+@export
+fn k_ret(uint64 x) -> S20 {
+    S20 r
+    r.a = x + 0
+    r.b = x + 1
+    r.c = x + 2
+    r.d = x + 3
+    r.e = x + 4
+    return r
+}
+@export
+fn f(uint64 z) -> uint64 {
+    S20 t
+    t.a = 1
+    t.b = 2
+    t.c = 3
+    t.d = 4
+    t.e = 5
+    uint64 bad = 0
+    if z == 1 {
+        uint64 v1 = c_arg(t)
+        if v1 != 12345 { bad = bad + 1 }
+        if t.a != 1 { bad = bad + 2 }
+    }
+    if z == 4 {
+        S20 u = c_ret(5)
+        uint64 v2 = u.a * 10000 + u.b * 1000 + u.c * 100 + u.d * 10 + u.e * 1
+        if v2 != 56789 { bad = bad + 4 }
+    }
+    return bad
+}

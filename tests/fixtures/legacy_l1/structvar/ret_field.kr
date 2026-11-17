@@ -1,0 +1,21 @@
+struct In {
+    u64 a
+    u64 b
+}
+struct Out {
+    u64 tag
+    In inner
+}
+fn addr_inner(u64 o) -> u64 {
+    Out w = o
+    return w.inner
+}
+fn main() {
+    Out o = alloc(24)
+    o.tag = 1
+    o.inner.a = 8
+    o.inner.b = 9
+    u64 q = addr_inner(o)
+    In i = q
+    exit(i.a * 10 + i.b)
+}

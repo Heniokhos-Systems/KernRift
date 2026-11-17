@@ -1,0 +1,7 @@
+extern fn cadd(uint64 a) -> uint64
+static uint64 s = 1
+@export
+fn f(uint64 a) -> uint64 {
+    s = s + cadd(a)
+    return s
+}

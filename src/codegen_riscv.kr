@@ -96,8 +96,13 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     //                                        ld "executable stack" warning
     // idx 55: .rela.text\0     (11 bytes) — only if extern_call_count > 0
     // Total: 55 or 66 bytes
+    // Static references (#294): per auipc+addi site one R_RISCV_PCREL_HI20
+    // against the .data section symbol and one R_RISCV_PCREL_LO12_I against
+    // a local label at the auipc.
+    uint64 static_rel_n = 0
+    if data_len > 0 && static_fixup_count > 0 { static_rel_n = static_fixup_count }
     uint64 has_relocs = 0
-    if extern_call_count > 0 { has_relocs = 1 }
+    if extern_call_count > 0 || static_rel_n > 0 { has_relocs = 1 }
     uint64 shstrtab_size = 55
     if has_relocs != 0 { shstrtab_size = 66 }
 
@@ -116,6 +121,7 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // then one per extern function.
     // Elf32_Sym = 16 bytes each
     uint64 sym_count = 1 + fn_count + extern_fn_count
+    if static_rel_n > 0 { sym_count = sym_count + 1 + static_rel_n }
     uint64 symtab_size = sym_count * 16
 
     // Build strtab: copy each function name from source
@@ -193,7 +199,7 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // then: .rela.text (optional, only if externs exist)
     // then: section headers (7 or 8 * 40 bytes)
 
-    uint64 rela_count = extern_call_count
+    uint64 rela_count = extern_call_count + static_rel_n * 2
     uint64 rela_size = rela_count * 12   // Elf32_Rela = 12 bytes
 
     uint64 elf_hdr_size = 52
@@ -295,6 +301,25 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // STB_LOCAL symbols precede STB_GLOBAL (local_count stays 1, and the
     // .symtab sh_info below points one past the null symbol, at the first fn).
     uint64 local_count = 1  // null symbol only (STB_LOCAL by convention)
+    // .data section symbol, then one anonymous label per static site (the
+    // %pcrel_lo anchor); all LOCAL, so they precede the GLOBAL functions.
+    uint64 rv_data_sym = 0
+    if static_rel_n > 0 {
+        emit_u32_le(0); emit_u32_le(0); emit_u32_le(0)
+        emit_byte(0x03); emit_byte(0); emit_u16_le(2)
+        rv_data_sym = local_count
+        local_count = local_count + 1
+        uint64 lbi = 0
+        while lbi < static_rel_n {
+            uint64 lbe = static_fixups + lbi * 8
+            uint32 lb_site = 0
+            unsafe { *(lbe as uint32) -> lb_site }
+            emit_u32_le(0); emit_u32_le(lb_site); emit_u32_le(0)
+            emit_byte(0x00); emit_byte(0); emit_u16_le(1)
+            local_count = local_count + 1
+            lbi = lbi + 1
+        }
+    }
     fi = 0
     while fi < fn_count {
         uint64 no_ptr = name_offsets + fi * 8
@@ -388,7 +413,7 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
     // --- Emit .rela.text section content ---
     if has_relocs != 0 {
         uint64 ri = 0
-        while ri < rela_count {
+        while ri < extern_call_count {
             uint64 re = extern_call_sites + ri * 16
             uint32 rco = 0
             unsafe { *(re as uint32) -> rco }
@@ -408,6 +433,22 @@ fn emit_elf_relocatable_rv32(uint64 text_len, uint64 data_len) {
             // r_addend = 0
             emit_u32_le(0)
             ri = ri + 1
+        }
+        uint64 rsi = 0
+        while rsi < static_rel_n {
+            uint64 rse = static_fixups + rsi * 8
+            uint32 rs_site = 0
+            unsafe { *(rse as uint32) -> rs_site }
+            uint64 rse4 = rse + 4
+            uint32 rs_data = 0
+            unsafe { *(rse4 as uint32) -> rs_data }
+            emit_u32_le(rs_site)
+            emit_u32_le((rv_data_sym << 8) | 23)            // R_RISCV_PCREL_HI20
+            emit_u32_le(rs_data)
+            emit_u32_le(rs_site + 4)
+            emit_u32_le(((rv_data_sym + 1 + rsi) << 8) | 24) // R_RISCV_PCREL_LO12_I -> label at the auipc
+            emit_u32_le(0)
+            rsi = rsi + 1
         }
     }
 

@@ -1,0 +1,11 @@
+struct I {
+    f32 x
+    uint64 y
+}
+struct O {
+    uint64 k
+    I inn
+}
+fn I.set(I self) { self.x = 2.5 }
+fn f() -> uint64 { I i; i.set(); return f32_to_int(i.x) }
+fn main() { exit(f()) }

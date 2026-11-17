@@ -1,0 +1,8 @@
+struct R {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+fn mk(uint64 x) -> R { uint64 q = 0; while q < 1 { q = q + 1 } R r; r.a = x; r.b = x + 1; r.c = x + 2; return r }
+fn f() -> uint64 { R u = mk(5); return u.a * 100 + u.b * 10 + u.c }
+fn main() { exit(f() % 256) }

@@ -101,7 +101,8 @@ zero. Remainder: `7 % 2 == 1`.
 (`for i 0..10` also parses).
 
 **Loops**: `while cond { ... }`, `for i in a..b { ... }`, and
-`loop { ... }` (an infinite loop — sugar for `while true`). Use `break`
+`loop { ... }` (an infinite loop; a function ending in one needs no final
+`return`). Use `break`
 to exit a loop early and `continue` to skip to the next iteration
 (`continue` works in every loop form, including `for`).
 

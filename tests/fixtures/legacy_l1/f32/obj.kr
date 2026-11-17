@@ -1,0 +1,14 @@
+struct V {
+    f32 x
+    f64 y
+}
+static f32 s = 2.5
+@export
+fn f(uint64 a) -> uint64 {
+    V v
+    v.x = 2.5
+    v.y = 1.0
+    f32 n = -s
+    f32 t = s + v.x - n
+    return f32_to_int(t) + a - 10
+}

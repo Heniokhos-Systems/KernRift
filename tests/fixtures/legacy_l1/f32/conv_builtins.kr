@@ -1,0 +1,8 @@
+fn f() -> uint64 {
+    f64 d = 2.5
+    f32 a = f64_to_f32(d)
+    f64 e = f32_to_f64(a)
+    f32 c = int_to_f32(3)
+    return f32_to_int(a) * 100 + f64_to_int(e * 2.0) * 10 + f32_to_int(c)
+}
+fn main() { exit(f() - 200) }

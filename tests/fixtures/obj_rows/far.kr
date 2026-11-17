@@ -1,0 +1,10 @@
+// L1 #345: a static 9000000 bytes into __data, past the signed 24-bit
+// ARM64_RELOC_ADDEND reach. With c_*.c (f(5) twice): 8 and 13 -> 93.
+static uint8[9000000] big
+static uint64 after = 0
+@export
+fn f(uint64 a) -> uint64 {
+    after = after + a
+    big[8999999] = 3
+    return after + big[8999999]
+}

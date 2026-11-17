@@ -242,7 +242,7 @@ return_stmt = "return" expr?
 
 if_stmt     = "if" expr block ("else" (if_stmt | block))?
 while_stmt  = "while" expr block
-loop_stmt   = "loop" block                                  (* desugars to while 1 == 1 *)
+loop_stmt   = "loop" block                                  (* an infinite loop; ends by break/return *)
 for_stmt    = "for" IDENT "in"? expr (".." | "..=") expr block
             (* `in` is optional — both `for i 0..10` and `for i in 0..10` parse.
                `..=` is the inclusive form: the loop visits `end` as well.

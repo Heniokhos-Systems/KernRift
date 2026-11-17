@@ -1,0 +1,3 @@
+fn gf(f64 x, uint64 k) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } f64 y = x * 4.0; return f64_to_int(y) + k }
+fn f() -> uint64 { f64 v = 2.5; uint64 r = gf(v, 2); return r }
+fn main() { exit(f()) }

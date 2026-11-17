@@ -1,0 +1,19 @@
+struct P {
+    uint64 a
+    uint64 b
+}
+struct Q {
+    uint64 x
+}
+struct R {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+struct F {
+    f64 u
+    f64 v
+}
+fn g(f64 a1, f64 a2, f64 a3, f64 a4, f64 a5, f64 a6, f64 a7, uint64 k) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } f64 s = a1 + a7; return f64_to_int(s) + k }
+fn f() -> uint64 { f64 o = 1.0; f64 z = 0.0; f64 t = 3.0; uint64 fp = fn_addr("g"); uint64 v = call_ptr(fp, o, z, z, z, z, z, t, 5); return v }
+fn main() { exit(f()) }

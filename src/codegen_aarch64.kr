@@ -963,7 +963,241 @@ fn emit_a64_static_store(uint64 data_offset) {
 // AArch64 expression codegen — result in x0
 // ---------------------------------------------------------------------------
 
+// #293: call_ptr with float or by-value struct arguments, AAPCS64 the way a
+// direct call to a legacy function passes them: an HFA's members in d/s
+// registers, a struct of <= 16 bytes as one or two x-register eightbytes, a
+// larger struct as its address; floats in d0-d7. Integer and float arguments
+// count separately; those that find no register go to the stack in order.
+// The `call_ptr` token of the call being lowered, for the located refusal below.
+static uint64 a64_cp_tok = 0
+fn a64_call_ptr_aapcs(uint64 ptr_slot, uint64 arg_slots_base, uint64 arg_count, uint64 fkp, uint64 sfp) {
+    // Pass 1: expand into (slot, is_float) pairs in fresh frame slots.
+    uint64 xn = 0
+    uint64 a = 0
+    while a < arg_count {
+        uint64 sp_ = sfp + a * 8
+        uint64 si = 0
+        unsafe { *(sp_ as uint64) -> si }
+        if si == 0xFFFFFFFF { xn = xn + 1 } else {
+            uint64 fl = struct_abi_flags(si)
+            if (fl & 1) != 0 { xn = xn + ((fl >> 1) & 3) + 1 }
+            else if struct_total_size(si) > 16 { xn = xn + 1 }
+            else if struct_total_size(si) > 8 { xn = xn + 2 }
+            else { xn = xn + 1 }
+        }
+        a = a + 1
+    }
+    if xn > 64 {
+        uint64 e1 = "error: too many call_ptr arguments on the legacy backend (max 64, a by-value struct counts once per register it occupies)\n"
+        write(2, e1, str_len(e1))
+        fatal_exit()
+    }
+    uint64 xbase = cg_slot_off(var_count)
+    uint64 c = 0
+    while c < xn { var_count = var_count + 1; c = c + 1 }
+    var_frame_size = var_count * 8
+    uint64 rem = var_frame_size & 15
+    if rem != 0 { var_frame_size = var_frame_size + 16 - rem }
+    uint64 xfl = cg_alloc(xn * 8 + 8)
+    uint64 xst = cg_alloc(xn * 8 + 8)     // #295: 1 = this entry goes on the stack
+    uint64 sg = 0
+    uint64 sv = 0
+    uint64 j = 0
+    a = 0
+    while a < arg_count {
+        uint64 sp2 = sfp + a * 8
+        uint64 si2 = 0
+        unsafe { *(sp2 as uint64) -> si2 }
+        uint64 fp2 = fkp + a * 8
+        uint64 fk2 = 0
+        unsafe { *(fp2 as uint64) -> fk2 }
+        uint64 src = arg_slots_base + a * 8
+        uint64 j0 = j
+        uint64 st = 0
+        if si2 == 0xFFFFFFFF {
+            if fk2 != 0 { if sv < 8 { sv = sv + 1 } else { st = 1 } } else { if sg < 8 { sg = sg + 1 } else { st = 1 } }
+            emit_a64_load_x0(src)
+            emit_a64_store_x0(xbase + j * 8)
+            uint64 isf = 0
+            if fk2 != 0 { isf = 1 }
+            uint64 xp = xfl + j * 8
+            unsafe { *(xp as uint64) = isf }
+            j = j + 1
+        } else {
+            uint64 fl2 = struct_abi_flags(si2)
+            uint64 sz2 = struct_total_size(si2)
+            if (fl2 & 1) != 0 {
+                uint64 hc = ((fl2 >> 1) & 3) + 1
+                uint64 ht = (fl2 >> 3) & 3
+                if sv + hc > 8 {
+                    // AAPCS64 C.3: the whole HFA on the stack, NSRN = 8; its
+                    // memory image in 8-byte slots
+                    st = 1
+                    sv = 8
+                    hc = (sz2 + 7) / 8
+                    ht = 1
+                } else { sv = sv + hc }
+                uint64 h = 0
+                while h < hc {
+                    emit_a64_load_x0(src)
+                    if ht == 1 {
+                        emit_a64_ldr(0, 0, h * 8)
+                    } else {
+                        emit_a64(0xB9400000 | (h << 10))      // ldr w0, [x0, #4h]
+                    }
+                    emit_a64_store_x0(xbase + j * 8)
+                    uint64 one = 1
+                    uint64 xp1 = xfl + j * 8
+                    unsafe { *(xp1 as uint64) = one }
+                    j = j + 1
+                    h = h + 1
+                }
+            } else if sz2 > 16 {
+                if sg < 8 { sg = sg + 1 } else { st = 1 }
+                legacy_copy_struct_arg_a64(src, si2)          // #303: caller-owned copy
+                emit_a64_load_x0(src)
+                emit_a64_store_x0(xbase + j * 8)
+                uint64 z0 = 0
+                uint64 xp2 = xfl + j * 8
+                unsafe { *(xp2 as uint64) = z0 }
+                j = j + 1
+            } else {
+                uint64 kk = (sz2 + 7) / 8
+                if sg + kk > 8 { st = 1  sg = 8 } else { sg = sg + kk }   // AAPCS64 C.13
+                emit_a64_load_x0(src)
+                emit_a64_ldr(0, 0, 0)
+                emit_a64_store_x0(xbase + j * 8)
+                uint64 z1 = 0
+                uint64 xp3 = xfl + j * 8
+                unsafe { *(xp3 as uint64) = z1 }
+                j = j + 1
+                if sz2 > 8 {
+                    emit_a64_load_x0(src)
+                    emit_a64_ldr(0, 0, 8)
+                    emit_a64_store_x0(xbase + j * 8)
+                    uint64 z2 = 0
+                    uint64 xp4 = xfl + j * 8
+                    unsafe { *(xp4 as uint64) = z2 }
+                    j = j + 1
+                }
+            }
+        }
+        while j0 < j {
+            uint64 stp = xst + j0 * 8
+            unsafe { *(stp as uint64) = st }
+            j0 = j0 + 1
+        }
+        a = a + 1
+    }
+    // Pass 2: assign registers; collect the overflow in order.
+    uint64 ovf = cg_alloc(xn * 8 + 8)
+    uint64 novf = 0
+    uint64 gi = 0
+    uint64 vi = 0
+    uint64 gregs = cg_alloc(8 * 8 + 8)     // slot per x register, 0xFFFFFFFF = unused
+    uint64 q = 0
+    while q < xn {
+        uint64 qp = xfl + q * 8
+        uint64 qf = 0
+        unsafe { *(qp as uint64) -> qf }
+        uint64 qslot = xbase + q * 8
+        uint64 qsp = xst + q * 8
+        uint64 qst = 0
+        unsafe { *(qsp as uint64) -> qst }
+        if qst != 0 {
+            uint64 op0 = ovf + novf * 8
+            unsafe { *(op0 as uint64) = qslot }
+            novf = novf + 1
+        } else if qf != 0 && vi < 8 {
+            emit_a64_load_dN(vi, qslot)
+            vi = vi + 1
+        } else if qf == 0 && gi < 8 {
+            uint64 gp = gregs + gi * 8
+            unsafe { *(gp as uint64) = qslot }
+            gi = gi + 1
+        } else {
+            uint64 op = ovf + novf * 8
+            unsafe { *(op as uint64) = qslot }
+            novf = novf + 1
+        }
+        q = q + 1
+    }
+    uint64 stack_bytes = cg_a64_stack_area(novf)
+    if target_os == 2 && stack_bytes > cg_a64_call_area(arg_count) {
+        diag_fatal_at(a64_cp_tok, "call_ptr: by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy")
+    }
+    if stack_bytes > 0 {
+        uw_sp_site_set("G4")
+        emit_a64_sp_word(0xD1000000 | (stack_bytes << 10) | (31 << 5) | 31)
+        uint64 oi = 0
+        while oi < novf {
+            uint64 op2 = ovf + oi * 8
+            uint64 os = 0
+            unsafe { *(op2 as uint64) -> os }
+            emit_a64_ldr(10, 31, a64_var_base + os + cg_win_moved(stack_bytes))
+            emit_a64_str(10, 31, oi * 8)
+            oi = oi + 1
+        }
+    }
+    uint64 adj = 0
+    if stack_bytes > 0 { adj = cg_win_moved(stack_bytes) }
+    uint64 r = gi
+    while r > 0 {
+        r = r - 1
+        uint64 gp2 = gregs + r * 8
+        uint64 gs = 0
+        unsafe { *(gp2 as uint64) -> gs }
+        emit_a64_ldr(r, 31, a64_var_base + gs + adj)
+    }
+    emit_a64_ldr(9, 31, a64_var_base + ptr_slot + adj)
+    emit_a64(0xD63F0120)                   // blr x9
+    if stack_bytes > 0 {
+        uw_sp_site_set("G4"); emit_a64_sp_word(0x91000000 | (stack_bytes << 10) | (31 << 5) | 31)
+    }
+}
+
+// #302: convert the float in d0/s0 from kind `from` to kind `to`
+// (expr_is_float_a64 values: 1 = f64, 2 = f32; anything else = no-op).
+fn a64_fcoerce(uint64 from, uint64 to) {
+    if from == 1 && to == 2 { emit_a64(0x1E624000) }   // fcvt s0, d0
+    if from == 2 && to == 1 { emit_a64(0x1E22C000) }   // fcvt d0, s0
+}
+
+// #303: replace the struct address in frame slot `slot` by the address of a
+// fresh caller-owned copy of the struct.
+fn legacy_copy_struct_arg_a64(uint64 slot, uint64 si) {
+    uint64 sz = struct_total_size(si)
+    uint64 n = (sz + 7) / 8
+    uint64 area = cg_slot_off(var_count)
+    uint64 c = 0
+    while c < n { var_count = var_count + 1; c = c + 1 }
+    var_frame_size = var_count * 8
+    uint64 rem = var_frame_size & 15
+    if rem != 0 { var_frame_size = var_frame_size + 16 - rem }
+    emit_a64_load_x0(slot)
+    emit_a64_mov(9, 0)
+    uint64 k = 0
+    while k < n {
+        emit_a64_ldr(10, 9, k * 8)
+        emit_a64_str(10, 31, a64_var_base + area + k * 8)
+        k = k + 1
+    }
+    emit_a64_add_imm(0, 31, a64_var_base + area)
+    emit_a64_store_x0(slot)
+}
+
+// See gen_expr (codegen.kr): a Call is struct-valued only when its callee
+// is declared to return a struct (#248).
 fn gen_expr_a64(uint64 node) {
+    gen_expr_a64_node(node)
+    if node != 0 && ast_kind(node) == 35 {
+        uint32 cs_tok = ast_data1(node)
+        uint64 wcs_tok = cs_tok
+        if fn_ret_struct_lookup(wcs_tok) == 0xFFFFFFFF { expr_is_struct_a64 = 0xFFFFFFFF }
+    }
+}
+
+fn gen_expr_a64_node(uint64 node) {
     expr_is_struct_a64 = 0xFFFFFFFF
     // Same defined default the x86_64 legacy backend gives expr_is_float, and
     // for the same defect: the arms that never assign this flag (a string
@@ -1056,8 +1290,10 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_cmp(0, 31)
             emit_a64_cset(0, 0)
         } else if wok == 31 {
-            // - negate: neg x0, x0
-            emit_a64_neg(0, 0)
+            // - negate: neg x0, x0 -- fneg for a float (#302)
+            if expr_is_float_a64 == 1 { emit_a64(0x1E614000) }        // fneg d0, d0
+            else if expr_is_float_a64 == 2 { emit_a64(0x1E214000) }   // fneg s0, s0
+            else { emit_a64_neg(0, 0) }
         } else if wok == 26 {
             // ~ bitwise NOT: mvn x0, x0
             emit_a64_mvn(0, 0)
@@ -1672,6 +1908,13 @@ fn gen_expr_a64(uint64 node) {
                     emit_a64_static_lea(soff)
                 } else {
                     emit_a64_static_load(soff)
+                    // #302: an f32/f64 static's value is a float (in d0/s0); an
+                    // f16 static stays a u64 bit pattern, like every f16 value
+                    uint64 sfk_la = static_fkind_of(wait_tok)
+                    if sfk_la == 1 || sfk_la == 2 {
+                        emit_a64_x0_bits_to_float(sfk_la)
+                        expr_is_float_a64 = sfk_la
+                    }
                 }
                 // A file-scope static struct is a struct VALUE at its own
                 // address, exactly like a local struct variable.
@@ -1854,18 +2097,19 @@ fn gen_expr_a64(uint64 node) {
             uint32 rhs_idx = ast_data2(node)
             uint64 wrhs = rhs_idx
             gen_expr_a64(wrhs)
-            // RHS in d0/s0 → move to d1/s1
-            if lhs_is_float_b == 2 {
-                emit_a64(0x1E204001) // fmov s1, s0
-            } else {
-                emit_a64(0x1E604001) // fmov d1, d0
-            }
+            // RHS in d0/s0 → d1/s1 (all 64 bits: an f64 RHS must survive, #302)
+            uint64 rhs_fk_b = expr_is_float_a64
+            emit_a64(0x1E604001) // fmov d1, d0
             // Reload LHS into d0/s0
             if lhs_is_float_b == 2 {
                 emit_a64_load_s0(binop_temp)
             } else {
                 emit_a64_load_d0(binop_temp)
             }
+            // #302: mixed f32/f64 widens the f32 side (as the IR does)
+            uint64 fal_b = lhs_is_float_b
+            if lhs_is_float_b == 2 && rhs_fk_b == 1 { emit_a64(0x1E22C000)  fal_b = 1 }   // fcvt d0, s0
+            if lhs_is_float_b == 1 && rhs_fk_b == 2 { emit_a64(0x1E22C021) }              // fcvt d1, s1
             // d0 = LHS, d1 = RHS (or s0/s1 for f32)
             uint32 op_tok_fb = ast_data1(node)
             uint64 wop_fb = op_tok_fb
@@ -1874,7 +2118,7 @@ fn gen_expr_a64(uint64 node) {
             unsafe { *(pfb as uint32) -> op_kind_fb }
             uint64 wopk_fb_a = op_kind_fb
             wopk_fb_a = float_binop_op_kind(wopk_fb_a)
-            if lhs_is_float_b == 2 {
+            if fal_b == 2 {
                 if wopk_fb_a == 30 { emit_a64(0x1E212800) } // fadd s0, s0, s1
                 if wopk_fb_a == 31 { emit_a64(0x1E213800) } // fsub s0, s0, s1
                 if wopk_fb_a == 22 { emit_a64(0x1E210800) } // fmul s0, s0, s1
@@ -1885,7 +2129,7 @@ fn gen_expr_a64(uint64 node) {
                 if wopk_fb_a == 22 { emit_a64(0x1E610800) } // fmul d0, d0, d1
                 if wopk_fb_a == 32 { emit_a64(0x1E611800) } // fdiv d0, d0, d1
             }
-            expr_is_float_a64 = lhs_is_float_b
+            expr_is_float_a64 = fal_b
             return
         }
 
@@ -2141,14 +2385,19 @@ fn gen_expr_a64(uint64 node) {
             uint32 rhs_idx = ast_data2(node)
             uint64 wrhs = rhs_idx
             gen_expr_a64(wrhs)
-            // RHS in d0/s0 → move to d1/s1
+            // RHS in d0/s0 → d1/s1; mixed f32/f64 compares in f64 (#302)
+            uint64 rhs_fk_c = expr_is_float_a64
+            emit_a64(0x1E604001) // fmov d1, d0
             if lhs_is_float_c == 2 {
-                emit_a64(0x1E204001) // fmov s1, s0
                 emit_a64_load_s0(cmp_temp)
+            } else {
+                emit_a64_load_d0(cmp_temp)
+            }
+            if lhs_is_float_c == 2 && rhs_fk_c != 1 {
                 emit_a64(0x1E212000) // fcmp s0, s1
             } else {
-                emit_a64(0x1E604001) // fmov d1, d0
-                emit_a64_load_d0(cmp_temp)
+                if lhs_is_float_c == 2 { emit_a64(0x1E22C000) }   // fcvt d0, s0
+                if rhs_fk_c == 2 { emit_a64(0x1E22C021) }         // fcvt d1, s1
                 emit_a64(0x1E612000) // fcmp d0, d1
             }
             // fcmp sets NZCV. Use same condition codes as integer unsigned:
@@ -3429,14 +3678,36 @@ fn gen_expr_a64(uint64 node) {
             emit_a64_store_x0(ptr_slot)
 
             // Evaluate call args
+            // #293: record float-ness and by-value struct-ness of every argument.
+            uint64 cpa_fk = cg_alloc(arg_count * 8 + 8)
+            uint64 cpa_sf = cg_alloc(arg_count * 8 + 8)
+            uint64 cpa_special = 0
             uint64 weval = wca
             uint64 ai = 0
             while weval != 0 {
                 gen_expr_a64(weval)
-                emit_a64_store_x0(arg_slots_base + ai * 8)
+                uint64 cfk = expr_is_float_a64
+                uint64 csf = 0xFFFFFFFF
+                if abi_struct_pass_by_val != 0 { csf = expr_is_struct_a64 }
+                if cfk != 0 {
+                    emit_a64_store_d0(arg_slots_base + ai * 8)
+                    cpa_special = 1
+                } else {
+                    emit_a64_store_x0(arg_slots_base + ai * 8)
+                }
+                if csf != 0xFFFFFFFF { cpa_special = 1 }
+                uint64 cfkp = cpa_fk + ai * 8
+                unsafe { *(cfkp as uint64) = cfk }
+                uint64 csfp = cpa_sf + ai * 8
+                unsafe { *(csfp as uint64) = csf }
                 ai = ai + 1
                 uint32 anxt = ast_next(weval)
                 weval = anxt
+            }
+            if cpa_special != 0 {
+                a64_cp_tok = ast_data1(node)
+                a64_call_ptr_aapcs(ptr_slot, arg_slots_base, arg_count, cpa_fk, cpa_sf)
+                return
             }
 
             // Load args into x0-x7
@@ -4847,7 +5118,180 @@ fn gen_expr_a64(uint64 node) {
             uint64 self_ptr_flag_a = 0xFFFFFFFF
             unsafe { *(arg_struct_flags_a as uint64) = self_ptr_flag_a }
         }
+        cg_clear_scalar_param_struct_flags(callee_tok, arg_struct_flags_a, arg_count)   // #312
 
+        // #303: AAPCS64 B.4 -- a composite of more than 16 bytes (not an HFA) is
+        // passed as a pointer to a CALLER-OWNED COPY, which the callee may
+        // modify. Make that copy here (the callee's own copy stays).
+        if abi_struct_pass_by_val != 0 {
+            uint64 a3 = 0
+            while a3 < arg_count {
+                uint64 a3sf = 0
+                unsafe { *(arg_struct_flags_a + a3 * 8 as uint64) -> a3sf }
+                if a3sf != 0xFFFFFFFF && struct_total_size(a3sf) > 16 && (struct_abi_flags(a3sf) & 1) == 0 {
+                    legacy_copy_struct_arg_a64(arg_slots_base + a3 * 8, a3sf)
+                }
+                a3 = a3 + 1
+            }
+        }
+
+        // #295: AAPCS64 C.13/C.3 -- a composite that does not fit in the
+        // registers still free goes whole on the stack and closes that
+        // register class (NGRN/NSRN = 8). The loader below assigns "next
+        // register"; in that case the arguments are rewritten into
+        // register-sized entries, each marked register or stack.
+        uint64 a5_forced = 0
+        if abi_struct_pass_by_val != 0 {
+            uint64 a5_need = 0
+            uint64 a5_any = 0
+            uint64 a5_gi = 0
+            uint64 a5_vi = 0
+            uint64 a5_a = 0
+            while a5_a < arg_count {
+                uint64 a5_sf = 0
+                unsafe { *(arg_struct_flags_a + a5_a * 8 as uint64) -> a5_sf }
+                uint64 a5_ff = 0
+                unsafe { *(arg_float_flags_a + a5_a * 8 as uint64) -> a5_ff }
+                if a5_sf != 0xFFFFFFFF {
+                    a5_any = 1
+                    uint64 a5_fl = struct_abi_flags(a5_sf)
+                    uint64 a5_sz = struct_total_size(a5_sf)
+                    if (a5_fl & 1) != 0 {
+                        uint64 a5_hn = ((a5_fl >> 1) & 3) + 1
+                        if a5_vi + a5_hn > 8 { a5_need = 1  a5_vi = 8 } else { a5_vi = a5_vi + a5_hn }
+                    } else if a5_sz > 16 {
+                        a5_gi = a5_gi + 1
+                    } else {
+                        uint64 a5_k = (a5_sz + 7) / 8
+                        if a5_gi + a5_k > 8 { a5_need = 1  a5_gi = 8 } else { a5_gi = a5_gi + a5_k }
+                    }
+                } else if a5_ff != 0 {
+                    a5_vi = a5_vi + 1
+                } else {
+                    a5_gi = a5_gi + 1
+                }
+                a5_a = a5_a + 1
+            }
+            if a5_any != 0 && (a5_gi > 8 || a5_vi > 8) { a5_need = 1 }
+            if a5_need != 0 {
+                uint64 a5_xn = 0
+                a5_a = 0
+                while a5_a < arg_count {
+                    uint64 a5_sf2 = 0
+                    unsafe { *(arg_struct_flags_a + a5_a * 8 as uint64) -> a5_sf2 }
+                    if a5_sf2 == 0xFFFFFFFF { a5_xn = a5_xn + 1 } else {
+                        uint64 a5_fl2 = struct_abi_flags(a5_sf2)
+                        if (a5_fl2 & 1) != 0 { a5_xn = a5_xn + ((a5_fl2 >> 1) & 3) + 1 }
+                        else if struct_total_size(a5_sf2) > 16 { a5_xn = a5_xn + 1 }
+                        else { a5_xn = a5_xn + (struct_total_size(a5_sf2) + 7) / 8 }
+                    }
+                    a5_a = a5_a + 1
+                }
+                if a5_xn > 64 {
+                    uint64 a5_e = "error: too many call arguments (max 64, a by-value struct counts once per register it occupies)\n"
+                    write(2, a5_e, str_len(a5_e))
+                    fatal_exit()
+                }
+                uint64 a5_base = cg_slot_off(var_count)
+                uint64 a5_c = 0
+                while a5_c < a5_xn { var_count = var_count + 1; a5_c = a5_c + 1 }
+                var_frame_size = var_count * 8
+                uint64 a5_rem = var_frame_size & 15
+                if a5_rem != 0 { var_frame_size = var_frame_size + 16 - a5_rem }
+                uint64 a5_kind = cg_alloc(a5_xn * 8 + 8)
+                a5_forced = cg_alloc(a5_xn * 8 + 8)
+                uint64 a5_j = 0
+                uint64 a5_g = 0
+                uint64 a5_v = 0
+                uint64 a5_nstack = 0
+                a5_a = 0
+                while a5_a < arg_count {
+                    uint64 a5_s3 = 0
+                    unsafe { *(arg_struct_flags_a + a5_a * 8 as uint64) -> a5_s3 }
+                    uint64 a5_f3 = 0
+                    unsafe { *(arg_float_flags_a + a5_a * 8 as uint64) -> a5_f3 }
+                    uint64 a5_src = arg_slots_base + a5_a * 8
+                    uint64 a5_j0 = a5_j
+                    uint64 a5_st = 0
+                    if a5_s3 == 0xFFFFFFFF || (struct_abi_flags(a5_s3) & 1) == 0 && struct_total_size(a5_s3) > 16 {
+                        // scalar, or a > 16-byte struct passed by address
+                        emit_a64_load_x0(a5_src)
+                        emit_a64_store_x0(a5_base + a5_j * 8)
+                        uint64 a5_k3 = 0
+                        if a5_s3 == 0xFFFFFFFF && a5_f3 != 0 { a5_k3 = 1 }
+                        uint64 a5_kp = a5_kind + a5_j * 8
+                        unsafe { *(a5_kp as uint64) = a5_k3 }
+                        if a5_k3 != 0 { if a5_v < 8 { a5_v = a5_v + 1 } else { a5_st = 1 } }
+                        else { if a5_g < 8 { a5_g = a5_g + 1 } else { a5_st = 1 } }
+                        a5_j = a5_j + 1
+                    } else {
+                        uint64 a5_fl3 = struct_abi_flags(a5_s3)
+                        if (a5_fl3 & 1) != 0 {
+                            uint64 a5_hn3 = ((a5_fl3 >> 1) & 3) + 1
+                            uint64 a5_ht3 = (a5_fl3 >> 3) & 3
+                            if a5_v + a5_hn3 > 8 { a5_st = 1  a5_v = 8 } else { a5_v = a5_v + a5_hn3 }
+                            uint64 a5_h = 0
+                            uint64 a5_hcount = a5_hn3
+                            if a5_st != 0 {
+                                // on the stack the HFA is its own memory image, 8-byte slots
+                                a5_hcount = (struct_total_size(a5_s3) + 7) / 8
+                            }
+                            while a5_h < a5_hcount {
+                                emit_a64_load_x0(a5_src)
+                                if a5_st != 0 || a5_ht3 == 1 {
+                                    emit_a64_ldr(0, 0, a5_h * 8)
+                                } else {
+                                    emit_a64(0xB9400000 | (a5_h << 10))      // ldr w0, [x0, #4h]
+                                }
+                                emit_a64_store_x0(a5_base + a5_j * 8)
+                                uint64 a5_one = 1
+                                if a5_st != 0 { a5_one = 0 }
+                                uint64 a5_kp2 = a5_kind + a5_j * 8
+                                unsafe { *(a5_kp2 as uint64) = a5_one }
+                                a5_j = a5_j + 1
+                                a5_h = a5_h + 1
+                            }
+                        } else {
+                            uint64 a5_k4 = (struct_total_size(a5_s3) + 7) / 8
+                            if a5_g + a5_k4 > 8 { a5_st = 1  a5_g = 8 } else { a5_g = a5_g + a5_k4 }
+                            uint64 a5_e8 = 0
+                            while a5_e8 < a5_k4 {
+                                emit_a64_load_x0(a5_src)
+                                emit_a64_ldr(0, 0, a5_e8 * 8)
+                                emit_a64_store_x0(a5_base + a5_j * 8)
+                                uint64 a5_z = 0
+                                uint64 a5_kp3 = a5_kind + a5_j * 8
+                                unsafe { *(a5_kp3 as uint64) = a5_z }
+                                a5_j = a5_j + 1
+                                a5_e8 = a5_e8 + 1
+                            }
+                        }
+                    }
+                    while a5_j0 < a5_j {
+                        uint64 a5_fp = a5_forced + a5_j0 * 8
+                        unsafe { *(a5_fp as uint64) = a5_st }
+                        if a5_st != 0 { a5_nstack = a5_nstack + 1 }
+                        a5_j0 = a5_j0 + 1
+                    }
+                    a5_a = a5_a + 1
+                }
+                if target_os == 2 && cg_a64_stack_area(a5_nstack) > cg_a64_call_area(arg_count) {
+                    diag_fatal_at(ast_data1(node), "by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy")
+                }
+                uint64 a5_w = 0
+                while a5_w < a5_xn {
+                    uint64 a5_kv = 0
+                    uint64 a5_kp4 = a5_kind + a5_w * 8
+                    unsafe { *(a5_kp4 as uint64) -> a5_kv }
+                    unsafe { *(arg_float_flags_a + a5_w * 8 as uint64) = a5_kv }
+                    uint64 a5_none = 0xFFFFFFFF
+                    unsafe { *(arg_struct_flags_a + a5_w * 8 as uint64) = a5_none }
+                    a5_w = a5_w + 1
+                }
+                arg_count = a5_xn
+                arg_slots_base = a5_base
+            }
+        }
         // Load args into registers from temp slots
         // AAPCS64: int args → x0-x7 (independent counter)
         //          float args → d0-d7 (independent counter)
@@ -4858,7 +5302,7 @@ fn gen_expr_a64(uint64 node) {
             uint64 ff_addr_a = arg_float_flags_a + fi_a * 8
             uint64 ff_val_a = 0
             unsafe { *(ff_addr_a as uint64) -> ff_val_a }
-            if ff_val_a != 0 && call_float_idx < 8 {
+            if ff_val_a != 0 && call_float_idx < 8 && cg_arg_forced_stack(a5_forced, fi_a) == 0 {
                 emit_a64_load_dN(call_float_idx, arg_slots_base + fi_a * 8)
                 call_float_idx = call_float_idx + 1
             } else if ff_val_a == 0 {
@@ -4899,7 +5343,7 @@ fn gen_expr_a64(uint64 node) {
             uint64 fi_addr_a = arg_float_flags_a + ii_a * 8
             uint64 fi_val_a = 0
             unsafe { *(fi_addr_a as uint64) -> fi_val_a }
-            if fi_val_a == 0 {
+            if fi_val_a == 0 && cg_arg_forced_stack(a5_forced, ii_a) == 0 {
                 // Check if this is a struct arg
                 uint64 saf_addr_c = arg_struct_flags_a + ii_a * 8
                 uint64 saf_val_c = 0
@@ -4959,7 +5403,7 @@ fn gen_expr_a64(uint64 node) {
                 uint64 ri_addr = arg_float_flags_a + ri_a * 8
                 uint64 ri_val = 0
                 unsafe { *(ri_addr as uint64) -> ri_val }
-                if ri_val == 0 {
+                if ri_val == 0 && cg_arg_forced_stack(a5_forced, ri_a) == 0 {
                     // Check if first int arg is a struct — reload eightbyte 0
                     uint64 ri_saf = arg_struct_flags_a + ri_a * 8
                     uint64 ri_sv = 0
@@ -5020,11 +5464,13 @@ fn gen_expr_a64(uint64 node) {
             uint64 oasv_a = 0
             unsafe { *(oas_a as uint64) -> oasv_a }
             if oasv_a != 0xFFFFFFFF && abi_struct_pass_by_val != 0 { ovf_has_struct_a = 1 }
-            uint64 on_stack_a = 0
-            if oafv_a != 0 {
-                if ovf_f_a < 8 { ovf_f_a = ovf_f_a + 1 } else { on_stack_a = 1 }
-            } else {
-                if ovf_i_a < 8 { ovf_i_a = ovf_i_a + 1 } else { on_stack_a = 1 }
+            uint64 on_stack_a = cg_arg_forced_stack(a5_forced, oa_a)
+            if on_stack_a == 0 {
+                if oafv_a != 0 {
+                    if ovf_f_a < 8 { ovf_f_a = ovf_f_a + 1 } else { on_stack_a = 1 }
+                } else {
+                    if ovf_i_a < 8 { ovf_i_a = ovf_i_a + 1 } else { on_stack_a = 1 }
+                }
             }
             if on_stack_a != 0 {
                 uint64 ovp_a = ovf_idx_a + ovf_n_a * 8
@@ -5231,6 +5677,7 @@ fn gen_stmt_a64(uint64 node) {
             if arem2 != 0 { var_frame_size = var_frame_size + 16 - arem2 }
             uint64 ptr_offset = var_declare(name_tok)
             arr_elem_register(name_tok, elem_size_v)
+            arr_fkind_set_last(legacy_fkind_of_type(vardecl_resolved_kind(node)))   // #305
             arr_count_set_last(arr_size)
             emit_a64_add_imm(0, 31, a64_var_base + arr_offset)
             emit_a64_store_x0(ptr_offset)
@@ -5309,6 +5756,7 @@ fn gen_stmt_a64(uint64 node) {
         if wic != 0 {
             gen_expr_a64(wic)
             if is_float_type(wtype_a) != 0 {
+                a64_fcoerce(expr_is_float_a64, legacy_fkind_of_type(wtype_a))   // #302
                 if is_f32_type(wtype_a) != 0 {
                     emit_a64_store_s0(offset)
                 } else {
@@ -5330,6 +5778,8 @@ fn gen_stmt_a64(uint64 node) {
         uint32 val_child = ast_child(node)
         uint64 wvc = val_child
         gen_expr_a64(wvc)
+        // #312 (assign half): see the x86_64 twin.
+        if expr_is_struct_a64 != 0xFFFFFFFF && struct_var_lookup(name_tok) == 0xFFFFFFFF { expr_is_struct_a64 = 0xFFFFFFFF }
         // Struct assignment: copy bytes for value semantics
         if expr_is_struct_a64 != 0xFFFFFFFF {
             uint64 src_si_a = expr_is_struct_a64
@@ -5361,6 +5811,7 @@ fn gen_stmt_a64(uint64 node) {
             // Check if this variable is float-typed
             uint64 vtype_as = var_type_lookup(name_tok)
             if is_float_type(vtype_as) != 0 {
+                a64_fcoerce(expr_is_float_a64, legacy_fkind_of_type(vtype_as))   // #302
                 if is_f32_type(vtype_as) != 0 {
                     emit_a64_store_s0(offset)
                 } else {
@@ -5372,6 +5823,12 @@ fn gen_stmt_a64(uint64 node) {
         } else {
             uint64 soff = static_lookup(name_tok)
             if soff != 0xFFFFFFFF {
+                // #302: a float static stores its declared kind's bits
+                uint64 sfk_as = static_fkind_of(name_tok)
+                if sfk_as != 0 && expr_is_float_a64 != 0 {
+                    a64_fcoerce(expr_is_float_a64, sfk_as)
+                    emit_a64_float_bits_to_x0(sfk_as)
+                }
                 emit_a64_static_store(soff)
             }
         }
@@ -5419,6 +5876,9 @@ fn gen_stmt_a64(uint64 node) {
             emit_a64_ldr(0, 31, a64_var_base + rt2a_ar)
         } else if wec != 0 {
             gen_expr_a64(wec)
+            // #312: a struct-typed value in a function that does not return a
+            // struct is its address (x0 already holds it).
+            if expr_is_struct_a64 != 0xFFFFFFFF && cg_cur_ret_struct == 0 { expr_is_struct_a64 = 0xFFFFFFFF }
             // Struct return: load eightbytes or copy via sret
             if expr_is_struct_a64 != 0xFFFFFFFF {
                 uint64 ret_si_ar = expr_is_struct_a64
@@ -5846,6 +6306,15 @@ fn gen_stmt_a64(uint64 node) {
             if soff != 0xFFFFFFFF {
                 // A static: refused if it is a const or a whole array/struct (#206/#207).
                 static_write_check(dest_tok)
+                // #302: an f64 load into an f32 static is narrowed (and an f32
+                // load into an f64 static widened), as `s = <value>` is. A raw
+                // integer load keeps its bits.
+                uint64 sfk_pla = static_fkind_of(dest_tok)
+                if (sfk_pla == 1 || sfk_pla == 2) && (wpl_fk_a == 1 || wpl_fk_a == 2) && sfk_pla != wpl_fk_a {
+                    emit_a64_x0_bits_to_float(wpl_fk_a)
+                    a64_fcoerce(wpl_fk_a, sfk_pla)
+                    emit_a64_float_bits_to_x0(sfk_pla)
+                }
                 emit_a64_static_store(soff)
                 return
             }
@@ -5890,6 +6359,9 @@ fn gen_stmt_a64(uint64 node) {
             gen_expr_a64(wa)
             emit_a64_store_x0(compound_temp_slot)
             gen_expr_a64(wv)
+            uint32 ps_d3a = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fka = ps_d3a & 15
+            if (ps_fka == 1 || ps_fka == 2) && expr_is_float_a64 != 0 { a64_fcoerce(expr_is_float_a64, ps_fka)  expr_is_float_a64 = ps_fka }
             emit_a64_float_bits_to_x0(expr_is_float_a64)
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(compound_temp_slot)
@@ -5897,6 +6369,9 @@ fn gen_stmt_a64(uint64 node) {
             gen_expr_a64(wa)
             emit_a64_store_x0(ps_addr_slot_a)
             gen_expr_a64(wv)
+            uint32 ps_d3a = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fka = ps_d3a & 15
+            if (ps_fka == 1 || ps_fka == 2) && expr_is_float_a64 != 0 { a64_fcoerce(expr_is_float_a64, ps_fka)  expr_is_float_a64 = ps_fka }
             emit_a64_float_bits_to_x0(expr_is_float_a64)
             emit_a64_store_x0(ps_val_slot_a)
             emit_a64_load_x0(ps_addr_slot_a)
@@ -5944,6 +6419,11 @@ fn gen_stmt_a64(uint64 node) {
                 gen_expr_a64(wi)
                 emit_a64_store_x0(compound_temp_slot)
                 gen_expr_a64(wrhs)
+                uint64 ia_efk_a = arr_fkind_lookup(ast_data1(node))      // #305
+                if ia_efk_a != 0 && expr_is_float_a64 != 0 {
+                    a64_fcoerce(expr_is_float_a64, ia_efk_a)
+                    emit_a64_float_bits_to_x0(ia_efk_a)
+                }
                 emit_a64_store_x0(ia_val_slot_a)
                 emit_a64_load_x0(compound_temp_slot)
                 emit_a64_store_x0(ia_idx_slot_a)
@@ -5951,6 +6431,11 @@ fn gen_stmt_a64(uint64 node) {
                 gen_expr_a64(wi)
                 emit_a64_store_x0(ia_idx_slot_a)
                 gen_expr_a64(wrhs)
+                uint64 ia_efk_a = arr_fkind_lookup(ast_data1(node))      // #305
+                if ia_efk_a != 0 && expr_is_float_a64 != 0 {
+                    a64_fcoerce(expr_is_float_a64, ia_efk_a)
+                    emit_a64_float_bits_to_x0(ia_efk_a)
+                }
                 emit_a64_store_x0(ia_val_slot_a)
             }
             uint32 arr_tok = ast_data1(node)
@@ -6085,6 +6570,7 @@ fn gen_stmt_a64(uint64 node) {
                     // expression and can reach temp_slot_0.
                     uint64 nfw_slot_a = alloc_scratch_slot()
                     gen_expr_a64(wval)
+                    uint64 nfw_vfk_a = expr_is_float_a64    // #302: the value's float kind
                     if expr_is_float_a64 == 1 {
                         // fmov x0, d0
                         emit_a64(0x9E660000)
@@ -6104,6 +6590,15 @@ fn gen_stmt_a64(uint64 node) {
                         }
                         emit_a64_mov(10, 0)
                         emit_a64_load_x0(nfw_slot_a)
+                        // #302: convert the parked float bits to the field's kind
+                        uint64 nfw_ftk_a = struct_field_type_kind_by_tok(nsi_wa, field_tok)
+                        uint64 nfw_ffk_a = 0
+                        if nfw_ftk_a < 256 { nfw_ffk_a = legacy_fkind_of_type(nfw_ftk_a) }
+                        if nfw_ffk_a != 0 && nfw_vfk_a != 0 && nfw_ffk_a != nfw_vfk_a {
+                            emit_a64_x0_bits_to_float(nfw_vfk_a)
+                            a64_fcoerce(nfw_vfk_a, nfw_ffk_a)
+                            emit_a64_float_bits_to_x0(nfw_ffk_a)
+                        }
                         if nfsz_wa == 1 { emit_a64_strb(0, 10, 0) }
                         else if nfsz_wa == 2 { emit_a64_strh(0, 10, 0) }
                         else if nfsz_wa == 4 { emit_a64_str32(0, 10, 0) }
@@ -6154,6 +6649,7 @@ fn gen_stmt_a64(uint64 node) {
                 // Check if field is a float type
                 uint64 fftk_w = struct_field_type_kind_by_tok(si, field_tok)
                 if fftk_w == 96 {
+                    a64_fcoerce(expr_is_float_a64, 1)   // #302: narrow/widen to the field
                     // f64 field: value is in d0, save to temp, compute addr, store
                     emit_a64_store_d0(temp_slot_0)
                     uint64 foff = struct_field_offset(si, field_tok)
@@ -6166,6 +6662,7 @@ fn gen_stmt_a64(uint64 node) {
                     return
                 }
                 if fftk_w == 95 {
+                    a64_fcoerce(expr_is_float_a64, 2)   // #302: narrow/widen to the field
                     // f32 field: value is in s0, save to temp, compute addr, store
                     emit_a64_store_s0(temp_slot_0)
                     uint64 foff = struct_field_offset(si, field_tok)
@@ -6372,7 +6869,19 @@ fn gen_function_a64(uint64 fn_node) {
     uint64 is_extern_a = ann_flags & 8
 
     // Extern declarations have no body — skip codegen.
-    if is_extern_a != 0 { return }
+    // R24: an extern's STRUCT return type must be known at its call sites
+    // (fn_ret_struct_lookup), or the caller treats rax/x0 as the struct's
+    // address. Float returns are registered by the type-check pre-pass and
+    // survive; the struct table is rebuilt here, so register it before leaving.
+    if is_extern_a != 0 {
+        uint32 ext_rt = ast_data2(fn_node)
+        uint64 wext_rt = ext_rt
+        if wext_rt != 0 {
+            uint64 ext_si = struct_lookup(wext_rt)
+            if ext_si != 0xFFFFFFFF { fn_ret_struct_register(name_tok, ext_si) }
+        }
+        return
+    }
     uint32 body_check_a = ast_data3(fn_node)
     if body_check_a == 0 { return }
     a64_leg_cs_setup(fn_node, is_naked)  // #226/#235: x21-x28 slots, keep the frame record
@@ -6424,6 +6933,7 @@ fn gen_function_a64(uint64 fn_node) {
     if is_export_a != 0 { export_fn_register(name_tok) }
 
     // Register float return type if applicable
+    cg_cur_ret_struct = 0                                  // #312
     uint32 ret_type_tok_a = ast_data2(fn_node)
     uint64 wrt_a = ret_type_tok_a
     if wrt_a != 0 {
@@ -6433,6 +6943,7 @@ fn gen_function_a64(uint64 fn_node) {
         // Register struct return type if applicable
         uint64 ret_si_a = struct_lookup(wrt_a)
         if ret_si_a != 0xFFFFFFFF {
+            cg_cur_ret_struct = 1                          // #312
             fn_ret_struct_register(name_tok, ret_si_a)
         }
     }
@@ -6686,7 +7197,56 @@ fn gen_function_a64(uint64 fn_node) {
                     // Check if this is an HFA struct — spill from d/s regs
                     uint64 sflags_c = struct_abi_flags(param_si_spill_a)
                     uint64 is_hfa_c = sflags_c & 1
+                    // #295: a composite that does not fit in the registers still
+                    // free arrived whole on the stack (its memory image, 8-byte
+                    // slots) and closed that register class.
+                    uint64 a5_ovf = 0
                     if is_hfa_c != 0 {
+                        if float_pidx_a + ((sflags_c >> 1) & 3) + 1 > 8 { a5_ovf = 1 }
+                    } else if sv_ssize_a > 16 {
+                        if int_pidx_a >= 8 { a5_ovf = 2 }
+                    } else {
+                        if int_pidx_a + sv_sslots_a > 8 { a5_ovf = 1 }
+                    }
+                    if a5_ovf == 2 {
+                        uint64 a5pl_1 = out_len
+                        emit_a64(0xF9400000 | (31 << 5) | 0)
+                        if stack_pidx_a >= 64 {
+                            cap_overflow("too many stack parameters", 64, 1)
+                            fatal_exit()
+                        }
+                        uint64 a5pe_1 = a64_overflow_patches + stack_pidx_a * 8
+                        uint32 a5pl32_1 = a5pl_1
+                        unsafe { *(a5pe_1 as uint32) = a5pl32_1 }
+                        a64_overflow_patch_count = stack_pidx_a + 1
+                        stack_pidx_a = stack_pidx_a + 1
+                        emit_a64_mov(9, 0)
+                        int_pidx_a = int_pidx_a + 1
+                        uint64 a5q = 0
+                        while a5q < sv_sslots_a {
+                            emit_a64_ldr(10, 9, a5q * 8)
+                            emit_a64_str(10, 31, a64_var_base + struct_area_a + a5q * 8)
+                            a5q = a5q + 1
+                        }
+                    } else if a5_ovf == 1 {
+                        if is_hfa_c != 0 { float_pidx_a = 8 } else { int_pidx_a = 8 }
+                        uint64 a5e = 0
+                        while a5e < sv_sslots_a {
+                            uint64 a5pl_2 = out_len
+                            emit_a64(0xF9400000 | (31 << 5) | 0)
+                            if stack_pidx_a >= 64 {
+                                cap_overflow("too many stack parameters", 64, 1)
+                                fatal_exit()
+                            }
+                            uint64 a5pe_2 = a64_overflow_patches + stack_pidx_a * 8
+                            uint32 a5pl32_2 = a5pl_2
+                            unsafe { *(a5pe_2 as uint32) = a5pl32_2 }
+                            a64_overflow_patch_count = stack_pidx_a + 1
+                            stack_pidx_a = stack_pidx_a + 1
+                            emit_a64_str(0, 31, a64_var_base + struct_area_a + a5e * 8)
+                            a5e = a5e + 1
+                        }
+                    } else if is_hfa_c != 0 {
                         uint64 hfa_count_c = ((sflags_c >> 1) & 3) + 1
                         uint64 hfa_type_c = (sflags_c >> 3) & 3
                         uint64 field_size_c = 4
@@ -7044,7 +7604,53 @@ fn resolve_fixups_a64() {
 }
 
 // Resolve fn_addr fixups for ARM64: ADRP+ADD → patch to function address
+// #298/#299: every ADRP+ADD pair the arm64 resolvers patch inside .text
+// (string literals, fn_addr), recorded as (site, target offset in the blob)
+// so an object writer can emit relocations for them instead of trusting the
+// baked page arithmetic, which assumes .text lands page-aligned.
+static uint64 a64_pc_tab = 0
+static uint64 a64_pc_n = 0
+static uint64 a64_pc_cap = 0
+fn a64_pc_reset() { a64_pc_n = 0 }
+fn a64_pc_record(uint64 site, uint64 target) {
+    if a64_pc_n >= a64_pc_cap {
+        uint64 ncap = a64_pc_cap * 2
+        if ncap < 256 { ncap = 256 }
+        uint64 nt = cg_alloc(ncap * 16)
+        uint64 k = 0
+        while k < a64_pc_n * 2 {
+            uint64 sp = a64_pc_tab + k * 8
+            uint64 v = 0
+            unsafe { *(sp as uint64) -> v }
+            uint64 dp = nt + k * 8
+            unsafe { *(dp as uint64) = v }
+            k = k + 1
+        }
+        a64_pc_tab = nt
+        a64_pc_cap = ncap
+    }
+    uint64 e = a64_pc_tab + a64_pc_n * 16
+    unsafe { *(e as uint64) = site }
+    uint64 e8 = e + 8
+    unsafe { *(e8 as uint64) = target }
+    a64_pc_n = a64_pc_n + 1
+}
+fn a64_pc_count() -> uint64 { return a64_pc_n }
+fn a64_pc_site(uint64 i) -> uint64 {
+    uint64 e = a64_pc_tab + i * 16
+    uint64 v = 0
+    unsafe { *(e as uint64) -> v }
+    return v
+}
+fn a64_pc_target(uint64 i) -> uint64 {
+    uint64 e = a64_pc_tab + i * 16 + 8
+    uint64 v = 0
+    unsafe { *(e as uint64) -> v }
+    return v
+}
+
 fn resolve_fnaddr_fixups_a64() {
+    a64_pc_reset()
     uint64 i = 0
     while i < fnaddr_fixup_count {
         uint64 fentry = fnaddr_fixup_table + i * 8
@@ -7090,6 +7696,7 @@ fn resolve_fnaddr_fixups_a64() {
                     unsafe { *(fe4_2 as uint32) -> foff }
                     target_off = foff
                     found = 1
+                    a64_pc_record(patch_off, target_off)
                 }
             }
             fi = fi + 1
@@ -7230,6 +7837,7 @@ fn resolve_string_fixups_a64(uint64 str_data_start) {
         unsafe { *(fe4 as uint32) -> str_off }
         uint64 wso = str_off
         uint64 wco = code_off
+        a64_pc_record(wco, str_data_start + wso)
         if target_os == 2 || target_os == 3 {
             // PE/Android: patch ADRP + ADD with PC-relative offsets
             uint64 code_va = a64_compute_va(wco)

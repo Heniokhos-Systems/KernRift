@@ -1,0 +1,16 @@
+struct N {
+    uint64 v
+    uint64 w
+}
+struct H {
+    uint64 k
+}
+fn H.addr_of(H self, uint64 p) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } return load64(p) + self.k }
+fn main() {
+    N n
+    n.v = 30
+    n.w = 4
+    H h
+    h.k = 4
+    exit(h.addr_of(n))
+}

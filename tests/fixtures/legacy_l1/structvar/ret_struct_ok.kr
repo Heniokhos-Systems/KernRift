@@ -1,0 +1,12 @@
+struct P {
+    u64 a
+    u64 b
+}
+struct B {
+    u64 a
+    u64 b
+    u64 c
+}
+fn mp(u64 x) -> P { P r; r.a = x; r.b = x + 1; return r }
+fn mb(u64 x) -> B { B r; r.a = x; r.b = x + 1; r.c = x + 2; return r }
+fn main() { P p = mp(1); B b = mb(3); exit(p.a + p.b * 2 + b.c * 10) }

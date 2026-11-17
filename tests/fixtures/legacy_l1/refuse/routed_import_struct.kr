@@ -1,0 +1,6 @@
+struct S16 {
+    uint64 a
+    uint64 b
+}
+extern fn GetStdHandle(uint64 h) -> S16
+fn main() { S16 s = GetStdHandle(1); exit(s.a) }

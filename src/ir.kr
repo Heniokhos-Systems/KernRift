@@ -3419,7 +3419,28 @@ fn ir_lower_expr(uint64 node) -> uint64 {
             uint64 wca = call_arg
             uint64 cp_count = 0
             while wca != 0 && cp_count < 64 {
+                // #293: a struct argument is BY VALUE here too -- pass a
+                // pointer to a fresh copy, exactly as a direct call does
+                // (the IR callee's parameter is that pointer).
+                ir_fa_struct_idx = 0xFFFFFFFF
                 uint64 av = ir_lower_expr(wca)
+                uint32 cak = ast_kind(wca)
+                uint64 cs_si = 0xFFFFFFFF
+                if cak == 32 {
+                    uint32 catk = ast_data1(wca)
+                    cs_si = struct_var_lookup(catk)
+                }
+                if cak == 36 || cak == 37 { cs_si = ir_fa_struct_idx }
+                if cs_si != 0xFFFFFFFF {
+                    uint64 cssize = struct_total_size(cs_si)
+                    uint64 ccopy_v = ir_new_vreg()
+                    ir_emit(IR_ALLOC, ccopy_v, 0, 0, cssize, ir_current_bb)
+                    uint64 csz_v = ir_new_vreg()
+                    ir_emit(IR_CONST, csz_v, 0, 0, cssize, ir_current_bb)
+                    ir_emit(IR_MEMCPY, 0, ccopy_v, av, csz_v, ir_current_bb)
+                    av = ccopy_v
+                }
+                ir_fa_struct_idx = 0xFFFFFFFF
                 uint64 avp = cp_arg_vregs + cp_count * 8
                 unsafe { *(avp as uint64) = av }
                 cp_count = cp_count + 1
@@ -4515,6 +4536,7 @@ fn ir_lower_stmt(uint64 node) {
             // Register element size so array indexing can scale correctly
             arr_elem_register(name_tok, elem_size_v)
             arr_count_set_last(arr_size)
+            arr_fkind_set_last(legacy_fkind_of_type(vardecl_resolved_kind(node)))   // #305
             return
         }
         // Check for struct variable declaration
@@ -5412,6 +5434,22 @@ fn ir_lower_stmt(uint64 node) {
             } else {
                 addr_v = ir_new_vreg()
                 ir_emit(IR_ADD, addr_v, base_v, idx_v, 0, ir_current_bb)
+            }
+            // #305: an f64 value stored into an f32 element is narrowed (and the
+            // reverse widened), as every other float store already is.
+            uint64 ia_efk_i = ir_fkind_from_decl(arr_fkind_lookup(warrt))
+            uint64 ia_vfk_i = ir_vreg_fkind_get(val_v)
+            if ia_efk_i == 2 && ia_vfk_i == 1 {
+                uint64 ia_nv = ir_new_vreg()
+                ir_emit(IR_F64TOF32, ia_nv, val_v, 0, 0, ir_current_bb)
+                ir_vreg_fkind_set(ia_nv, 2)
+                val_v = ia_nv
+            }
+            if ia_efk_i == 1 && ia_vfk_i == 2 {
+                uint64 ia_wv = ir_new_vreg()
+                ir_emit(IR_F32TOF64, ia_wv, val_v, 0, 0, ir_current_bb)
+                ir_vreg_fkind_set(ia_wv, 1)
+                val_v = ia_wv
             }
             // Store element with correct width
             ir_emit(IR_STORE, elem_sz, addr_v, val_v, 0, ir_current_bb)

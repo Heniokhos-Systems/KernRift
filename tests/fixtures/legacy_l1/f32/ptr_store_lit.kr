@@ -1,0 +1,2 @@
+fn f() -> uint64 { uint64 p = alloc(16); unsafe { *(p as f32) = 2.5 } f32 w = 0.0f; unsafe { *(p as f32) -> w } return f32_to_int(w) }
+fn main() { exit(f()) }

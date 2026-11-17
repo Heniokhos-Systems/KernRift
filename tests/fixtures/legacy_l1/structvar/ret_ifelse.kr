@@ -1,0 +1,16 @@
+struct Node {
+    u64 value
+    u64 next
+}
+fn pick(u64 k) -> u64 {
+    Node a = alloc(16)
+    Node b = alloc(16)
+    a.value = 3
+    b.value = 4
+    if k == 0 { return a } else { return b }
+}
+fn main() {
+    Node x = pick(0)
+    Node y = pick(1)
+    exit(x.value * 10 + y.value)
+}
