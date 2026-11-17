@@ -109,6 +109,20 @@ arch_runner() {
     [ -n "$ARCH_RUNNER" ] && { ARCH_NORUN=""; return 0; }
     return 1
 }
+# arch_execs A: whether THIS kernel runs an --arch=A Linux binary by itself,
+# as execve() from a running program does: A is the host's arch, or a
+# binfmt_misc handler for its qemu-user binary is enabled. A row whose
+# program runs ANOTHER program (the kr runner exec()s the slice it extracted)
+# needs this, not just arch_runner: qemu-user runs the first program, but the
+# kernel has to run the second, and without a handler that exec fails (exit
+# 127). CI installs qemu-user without binfmt handlers (#272), which is how
+# these rows were found; a developer host with qemu-user-binfmt has them.
+arch_execs() {
+    local q
+    [ "$1" = "$RUN_ARCH" ] && return 0
+    case $1 in arm64) q=qemu-aarch64 ;; x86_64) q=qemu-x86_64 ;; *) return 1 ;; esac
+    [ "$(head -1 "/proc/sys/fs/binfmt_misc/$q" 2> /dev/null)" = enabled ]
+}
 # krc_raw <args...>: the compiler under test with NO flags injected. `make
 # test`'s $KRC is a wrapper that always adds --arch=, and since C1 (#234) an
 # --arch= next to --targets= is refused rather than silently dropped, so every
@@ -40477,6 +40491,10 @@ fi
 PEU_QA2="$(qemu_bin aarch64)"
 if ! command -v python3 > /dev/null 2>&1; then pe_row_skip krbo_slices_selftest "no python3"
 elif [ -z "$PEU_QA2" ]; then pe_row_skip krbo_slices_selftest "no qemu-aarch64"
+elif ! arch_execs arm64; then
+    # the arm64 runner, under qemu, exec()s the arm64 slice: the kernel must
+    # run it (an arm64 host, or a qemu-aarch64 binfmt handler)
+    pe_row_skip krbo_slices_selftest "the arm64 runner exec()s the arm64 slice: needs an arm64 host or an enabled qemu-aarch64 binfmt handler"
 else
     PEU_WHY=""
     printf 'fn main() -> uint32 {\n    uint64 s = 0\n    uint64 i = 0\n    while i < 10 { s = s + i * i  i = i + 1 }\n    println(s)\n    println("slices")\n    return 23\n}\n' > "$T10_D/peu_fat.kr"
@@ -42944,9 +42962,13 @@ fi
 # c1_f244_run_arm64 (#244): an arm64-only asm program fat-built for
 # --targets=linux-arm64 alone runs -- through an arm64 build of the kr runner
 # (src/runner.kr + src/bcj.kr), natively on an arm64 host, else under qemu.
+# The runner exec()s the slice, so on another arch's host the kernel must run
+# arm64 binaries itself (arch_execs): qemu-user runs the runner, not its exec.
 TOTAL=$((TOTAL + 1))
 if ! arch_runner arm64; then
     skip_row c1_f244_run_arm64 "$ARCH_NORUN"
+elif ! arch_execs arm64; then
+    skip_row c1_f244_run_arm64 "the arm64 runner exec()s the arm64 slice: needs an arm64 host or an enabled qemu-aarch64 binfmt handler"
 else
     c1_fresh
     cat "$DIR/../src/runner.kr" "$DIR/../src/bcj.kr" > "$C1_D/kr.kr"
