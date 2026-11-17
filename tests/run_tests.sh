@@ -11142,6 +11142,60 @@ for L1_A in x86_64 arm64; do
     if [ -z "$L1_W" ]; then l1_ok obj_macho_link_$L1_A "statics resolve into __data, the string and fn_addr into __text, _f links (runtime: CI)"
     else l1_bad obj_macho_link_$L1_A "$L1_W"; fi
 done
+# obj_macho_far_refs_arm64 (#345): ARM64_RELOC_ADDEND holds a signed 24-bit
+# addend, so a reference 8 MiB or more past its symbol resolved elsewhere. Two
+# objects linked by ld64.lld with the hosted C caller: far.kr's static 9000000
+# bytes into __data, and a "hello" placed after a 9000000-byte string literal
+# (more than 8 MiB past f's start). Every reference f makes must resolve: the
+# static to __data + 9000000, the string to the bytes `hello`. Red (main@A1
+# and L1 before #345): targets outside every section.
+TOTAL=$((TOTAL + 1))
+if ! command -v ld64.lld > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1 || ! command -v llvm-objcopy > /dev/null 2>&1 \
+   || ! command -v clang > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    skip_row obj_macho_far_refs_arm64 "needs ld64.lld, llvm-objdump, llvm-objcopy, clang and python3"
+else
+    L1_W=""
+    python3 -c "print('@export\nfn f(uint64 a) -> uint64 {\n    uint64 p = \"' + 'a' * 9000000 + '\"\n    uint64 q = \"hello\"\n    return load8(p) - 97 + load8(q + 1)\n}')" > $L1_D/farstr.kr
+    rm -f $L1_D/cm.o
+    clang --target=arm64-apple-macos11 -O1 -c "$L1_OR/c_macos.c" -o $L1_D/cm.o > /dev/null 2>&1 || L1_W="the C caller does not build;"
+    for L1_S in data:"$L1_OR/far.kr" str:$L1_D/farstr.kr; do
+        L1_N=${L1_S%%:*}; L1_F=${L1_S#*:}
+        rm -f $L1_D/m.o $L1_D/mm
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 --target=macos -c "$L1_F" -o $L1_D/m.o > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_N: krc failed;"; continue
+        fi
+        if ! ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -e _main $L1_D/cm.o $L1_D/m.o -o $L1_D/mm > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_N: link failed;"; continue
+        fi
+        python3 -B "$DIR/helpers/a64_adrp_targets.py" --list $L1_D/mm _f > $L1_D/t 2>&1
+        L1_O=$(python3 -B - $L1_D/mm $L1_D/t $L1_N <<'L1PY'
+import re, subprocess, sys
+img, lst, kind = sys.argv[1:4]
+secs = {}
+for l in subprocess.run(['llvm-objdump', '-h', img], capture_output=True, text=True).stdout.splitlines():
+    m = re.match(r'\s*\d+\s+(\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)', l)
+    if m: secs[m.group(1)] = int(m.group(3), 16)
+tg = [(int(m.group(1), 16), m.group(2)) for m in re.finditer(r'-> 0x([0-9a-f]+) in (\S+)', open(lst).read())]
+if not tg: print('no references decoded'); sys.exit()
+if kind == 'data':
+    bad = [hex(t) for t, s in tg if s != '__data']
+    if bad: print('outside __data: ' + ' '.join(bad)); sys.exit()
+    if secs['__data'] + 9000000 not in [t for t, s in tg]: print('no reference to __data + 9000000'); sys.exit()
+else:
+    subprocess.run(['llvm-objcopy', '--dump-section', '__TEXT,__text=' + img + '.text', img], capture_output=True)
+    b = open(img + '.text', 'rb').read()
+    want = secs['__text'] + b.find(b'hello')
+    bad = [hex(t) for t, s in tg if s != '__text']
+    if bad: print('outside __text: ' + ' '.join(bad)); sys.exit()
+    if want not in [t for t, s in tg]: print('no reference to the bytes hello (0x%x)' % want); sys.exit()
+print('ok')
+L1PY
+)
+        [ "$L1_O" = ok ] || L1_W="$L1_W $L1_N: $L1_O;"
+    done
+    if [ -z "$L1_W" ]; then l1_ok obj_macho_far_refs_arm64 "a static 9000000 bytes into __data and a string 9 MB past f resolve exactly (runtime: CI macho_obj_far_static_arm64)"
+    else l1_bad obj_macho_far_refs_arm64 "$L1_W"; fi
+fi
 # Control (green at base): a Mach-O object without statics, arm64 references
 # or @export functions keeps its single __text section.
 TOTAL=$((TOTAL + 1))
