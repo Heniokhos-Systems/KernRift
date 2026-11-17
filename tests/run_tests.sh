@@ -40991,7 +40991,11 @@ PEUMKEOF
             || PEU_WHY="$PEU_WHY the codegen.kr diff is not the mutant's one edit (6 lines removed);"
         python3 -B "$DIR/windows/m2b_mutant.py" "$PEU_M/src/src" > /dev/null 2>&1 && PEU_WHY="$PEU_WHY a second application did not refuse;"
         (cd "$PEU_M/src" && cat $PEU_SRCS | grep -v '^import "' > "$PEU_M/krc_m.kr")
-        if ! ( ulimit -v 4000000; timeout 120 $T10_KRC --arch=x86_64 "$PEU_M/krc_m.kr" -o "$PEU_M/krc_m" ) > "$PEU_M/build.log" 2>&1; then
+        # the mutant compiler is built for THIS host (RUN_ARCH), then run here:
+        # its x86_64 Windows backend is in every build of it. It was built
+        # --arch=x86_64 and so ran on the arm64 CI job only through a
+        # qemu-x86_64 binfmt handler, which CI no longer installs (#272).
+        if ! ( ulimit -v 4000000; timeout 120 $T10_KRC --arch=$RUN_ARCH "$PEU_M/krc_m.kr" -o "$PEU_M/krc_m" ) > "$PEU_M/build.log" 2>&1; then
             PEU_WHY="$PEU_WHY the mutant compiler does not build: $(grep -m1 error "$PEU_M/build.log" | cut -c1-120);"
         else
             for PEU_C in mutant real; do
