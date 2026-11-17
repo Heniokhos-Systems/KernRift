@@ -1,0 +1,3 @@
+fn h() -> f32 { uint64 r = 0; while r < 1 { r = r + 1 } f32 q = 2.5f; return q }
+fn f() -> uint64 { f32 v = h(); return f32_to_int(v) }
+fn main() { exit(f()) }

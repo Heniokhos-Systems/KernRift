@@ -1,0 +1,5 @@
+fn loc(uint32 a) -> uint32 { uint32 r = 0; while r < 1 { r = r + 1 } return a + 1 }
+@export
+fn f(uint32 a) -> uint32 {
+    return loc(a) - 5
+}

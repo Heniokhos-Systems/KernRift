@@ -12,6 +12,10 @@
 #       only the overflow traps and the gen_stmt bounds trap).
 #   X14i, X15p, X15d, X15q, A4p, A4q, A4d: the C7 leaves and the asm-input
 #       group are separate functions, so (b) checks each one by name.
+#   G4  has two entries since L1 (#293): a call_ptr with an f64 or by-value
+#       struct argument is placed by a64_call_ptr_aapcs, which reports G4 too.
+#   L2-L8, L11, G1-G4, G7: gen_expr / gen_expr_a64 are wrappers since L1
+#       (#248); their bodies are gen_expr_node / gen_expr_a64_node.
 #   G6  is `classified`: a hosted arm64 legacy main writes no SP today; it is
 #       SP-moving by rule (spec 2.5.1), with no site to pair.
 #   X1..X15, L1..L10, A1..A5, G1..G5: every Windows-reachable raw encoding is
@@ -42,16 +46,16 @@ X15q|x64-ir|ir.kr|c7_x86_emit_quote_leaf|-|moving|op 114: the quote leaf's 0x100
 X16|x64-ir|ir.kr|ir_emit_call_arg_group|-|excluded|@naked only (ir.kr:8753); naked bodies that move RSP are refused (spec 4.3)
 X17|x64-ir|ir.kr|ir_emit_x86_function|-|excluded|prologue/epilogue
 L1|x64-legacy|codegen.kr|emit_win_alloc_stack|-|folded|IAT builtins: 48 alloc sites (gen_expr 43, gen_stmt 1, gen_function 3, and emit_win_std_fd_prestep 1: the std-fd GetStdHandle pre-step of win-file-errors, 0x20, inside its builtin's cg_win_builtin_area entry); win-file-errors' emit_win_rsp_lea addresses frame slots with final, cg_slot_off-biased offsets and adds no cg_win_out_bias
-L2|x64-legacy|codegen.kr|gen_expr|-|folded|call_ptr Windows sub rsp,32+8*overflow and the shared cleanup
-L3|x64-legacy|codegen.kr|gen_expr|-|folded|every named call on Windows: sub/add rsp,win_stack
-L4|x64-legacy|codegen.kr|gen_expr|-|folded|exec_process_argv 0x4D0, exec_process 0xD0, ExitProcess
-L5|x64-legacy|codegen.kr|gen_expr|-|folded|time_ns Windows sub/add 0x30
-L6|x64-legacy|codegen.kr|gen_expr|-|folded|--debug traps: ExitProcess 0x20 (bounds, overflow, load/store null checks; and gen_stmt bounds)
-L7|x64-legacy|codegen.kr|gen_expr|-|moving|println GetStdHandle push rdi/rcx, pops
-L8|x64-legacy|codegen.kr|gen_expr|-|moving|f-string digit loop push rdx / pop rcx
+L2|x64-legacy|codegen.kr|gen_expr_node|-|folded|call_ptr Windows sub rsp,32+8*overflow and the shared cleanup
+L3|x64-legacy|codegen.kr|gen_expr_node|-|folded|every named call on Windows: sub/add rsp,win_stack
+L4|x64-legacy|codegen.kr|gen_expr_node|-|folded|exec_process_argv 0x4D0, exec_process 0xD0, ExitProcess
+L5|x64-legacy|codegen.kr|gen_expr_node|-|folded|time_ns Windows sub/add 0x30
+L6|x64-legacy|codegen.kr|gen_expr_node|-|folded|--debug traps: ExitProcess 0x20 (bounds, overflow, load/store null checks; and gen_stmt bounds)
+L7|x64-legacy|codegen.kr|gen_expr_node|-|moving|println GetStdHandle push rdi/rcx, pops
+L8|x64-legacy|codegen.kr|gen_expr_node|-|moving|f-string digit loop push rdx / pop rcx
 L9|x64-legacy|codegen.kr|gen_stmt|-|moving|asm blocks (the node reports once)
 L10|x64-legacy|codegen.kr|gen_function|-|moving|hosted main GetCommandLineA / ExitProcess areas
-L11|x64-legacy|codegen.kr|gen_expr|-|excluded|Linux/macOS only: file_size push/pop, execve argv, time_ns, SysV named-call and call_ptr stack arguments
+L11|x64-legacy|codegen.kr|gen_expr_node|-|excluded|Linux/macOS only: file_size push/pop, execve argv, time_ns, SysV named-call and call_ptr stack arguments
 L12|x64-legacy|codegen.kr|gen_function|-|excluded|prologue/epilogue
 A1|arm64-ir|ir_aarch64.kr|ir_emit_arm64_win_syscall|-|moving|op 52: sub/add sp,#16
 A2|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|113|moving|op 113 IR_EXEC 0xD0
@@ -64,11 +68,12 @@ A5|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|96|moving|op 96 IR_ASM_BLOCK (repor
 A6|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|131|neutral|op 131 emits nothing on Windows (#159); --debug divide guards write no SP (#158)
 A7|arm64-ir|ir_aarch64.kr|ir_emit_arm64_insn|50|neutral|stack arguments are frame-resident (IR_ARG); op 50/87 move no SP
 A8|arm64-ir|ir_aarch64.kr|ir_emit_arm64_function|-|excluded|prologue/epilogue (uw_sp_frame around the Windows helpers)
-G1|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|exec_process_argv 0x4E0, exec_process 0xE0
-G2|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|time_ns Windows sub/add sp,#16
-G3|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|named call with more than 8 arguments
-G4|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|folded|call_ptr with more than 8 arguments
+G1|arm64-legacy|codegen_aarch64.kr|gen_expr_a64_node|-|folded|exec_process_argv 0x4E0, exec_process 0xE0
+G2|arm64-legacy|codegen_aarch64.kr|gen_expr_a64_node|-|folded|time_ns Windows sub/add sp,#16
+G3|arm64-legacy|codegen_aarch64.kr|gen_expr_a64_node|-|folded|named call with more than 8 arguments
+G4|arm64-legacy|codegen_aarch64.kr|gen_expr_a64_node|-|folded|call_ptr with more than 8 arguments
+G4|arm64-legacy|codegen_aarch64.kr|a64_call_ptr_aapcs|-|folded|call_ptr with an f64 or by-value struct argument (#293, AAPCS64 placement): sub/add sp for its stack arguments; on Windows refused past the pre-scan area
 G5|arm64-legacy|codegen_aarch64.kr|gen_stmt_a64|-|moving|asm blocks (the node reports once)
 G6|arm64-legacy|codegen_aarch64.kr|gen_function_a64|-|classified|hosted main: no SP write today; classified SP-moving (spec 2.5.1)
-G7|arm64-legacy|codegen_aarch64.kr|gen_expr_a64|-|excluded|Linux/macOS only: execve, time_ns
+G7|arm64-legacy|codegen_aarch64.kr|gen_expr_a64_node|-|excluded|Linux/macOS only: execve, time_ns
 G8|arm64-legacy|codegen_aarch64.kr|gen_function_a64|-|excluded|prologue/epilogue patches

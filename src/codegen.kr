@@ -1786,6 +1786,10 @@ static uint64 var_type_count = 0
 // out-param triples in its DER parser for exactly that reason and carried the
 // packing until the underlying bug was found.
 static uint64 cg_current_fn_tok = 0
+// #312: 1 when the function being generated is declared to return a struct.
+// A `return e` whose e is struct-typed only returns the struct BY VALUE then;
+// in a `-> u64` function a struct variable's value is its address.
+static uint64 cg_cur_ret_struct = 0
 
 fn cg_set_current_fn(uint64 tok) { cg_current_fn_tok = tok }
 
@@ -2443,6 +2447,31 @@ fn struct_classify_abi(uint64 struct_idx) {
     uint64 flags_addr = base + 10
     uint16 fl16 = flags
     unsafe { *(flags_addr as uint16) = fl16 }
+}
+
+// #309: how a struct is RETURNED. Windows x64: 1/2/4/8 bytes in rax (whatever
+// the field types), anything else through a hidden pointer the caller passes
+// in rcx (returned in rax) -- reported as 3 like SysV MEMORY. Elsewhere the
+// SysV classification decides.
+// #315 (L1 part): Win64 passes a struct BY VALUE only when its size is 1, 2,
+// 4 or 8 bytes; any other size goes as a pointer to a caller-owned copy.
+fn cg_win_struct_by_val(uint64 si) -> uint64 {
+    uint64 sz = struct_total_size(si)
+    if sz == 1 || sz == 2 || sz == 4 || sz == 8 { return 1 }
+    return 0
+}
+
+fn cg_ret_class0(uint64 si) -> uint64 {
+    if target_os == 2 {
+        uint64 sz = struct_total_size(si)
+        if sz == 1 || sz == 2 || sz == 4 || sz == 8 { return 1 }
+        return 3
+    }
+    return struct_abi_class0(si)
+}
+fn cg_ret_class1(uint64 si) -> uint64 {
+    if target_os == 2 { return 0 }
+    return struct_abi_class1(si)
 }
 
 fn struct_abi_class0(uint64 struct_idx) -> uint64 {
@@ -3293,6 +3322,9 @@ fn arr_elem_register(uint64 name_tok, uint64 elem_size) {
     uint64 e4 = entry + 4
     uint32 es = elem_size
     unsafe { *(e4 as uint32) = es }
+    uint64 e12z = entry + 12
+    uint32 zfk = 0
+    unsafe { *(e12z as uint32) = zfk }
     // Default count = 0 means "unknown / unchecked" for bounds.
     uint64 e8 = entry + 8
     uint32 zero32 = 0
@@ -3310,6 +3342,34 @@ fn arr_count_set_last(uint64 count) {
     uint64 e8 = entry + 8
     uint32 c32 = count
     unsafe { *(e8 as uint32) = c32 }
+}
+
+// #305: the float kind (1 = f64, 2 = f32, 0 = not float) of the elements of the
+// array declared last / of `name_tok` (local first, then a static array).
+fn arr_fkind_set_last(uint64 fk) {
+    if arr_elem_count == 0 { return }
+    uint64 entry = arr_elem_table + (arr_elem_count - 1) * 16
+    uint64 e12 = entry + 12
+    uint32 f32v = fk
+    unsafe { *(e12 as uint32) = f32v }
+}
+fn arr_fkind_lookup(uint64 name_tok) -> uint64 {
+    uint64 i = arr_elem_count
+    while i > 0 {
+        i = i - 1
+        uint64 entry = arr_elem_table + i * 16
+        uint32 nt = 0
+        unsafe { *(entry as uint32) -> nt }
+        uint64 wnt = nt
+        if tok_text_eq(wnt, name_tok) != 0 {
+            uint64 e12 = entry + 12
+            uint32 fk = 0
+            unsafe { *(e12 as uint32) -> fk }
+            uint64 wfk = fk
+            return wfk
+        }
+    }
+    return static_fkind_of(name_tok)
 }
 
 // Look up an array's element size. Checks local (per-function) array
@@ -3418,6 +3478,106 @@ fn emit_static_store(uint64 data_offset) {
     unsafe { *(fe4 as uint32) = dp }
     static_fixup_count = static_fixup_count + 1
     emit_u32_le(0)
+}
+
+// #295: 1 when argument i of the rewritten SysV argument list must go on the
+// stack because its struct did not fit in the remaining registers.
+fn cg_arg_forced_stack(uint64 tbl, uint64 i) -> uint64 {
+    if tbl == 0 { return 0 }
+    uint64 p = tbl + i * 8
+    uint64 v = 0
+    unsafe { *(p as uint64) -> v }
+    return v
+}
+
+// #295: the int / SSE registers a by-value struct takes under SysV (MEMORY
+// class: its address, one int register). Returns ni | (ns << 8).
+fn cg_sysv_struct_regs(uint64 si) -> uint64 {
+    uint64 c0 = struct_abi_class0(si)
+    uint64 c1 = struct_abi_class1(si)
+    uint64 sz = struct_total_size(si)
+    uint64 ni = 0
+    uint64 ns = 0
+    if c0 == 3 { return 0x10000 }        // #306: MEMORY class -- on the stack, by value, no register
+    if c0 == 1 { ni = 1 }
+    if c0 == 2 { ns = 1 }
+    if sz > 8 {
+        if c1 == 1 { ni = ni + 1 }
+        if c1 == 2 { ns = ns + 1 }
+    }
+    return ni | (ns << 8)
+}
+
+// #302: convert the float in xmm0 from kind `from` to kind `to`
+// (expr_is_float values: 1 = f64, 2 = f32; anything else = no-op).
+fn legacy_fcoerce(uint64 from, uint64 to) {
+    if from == 1 && to == 2 {
+        emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)   // cvtsd2ss xmm0, xmm0
+    }
+    if from == 2 && to == 1 {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)   // cvtss2sd xmm0, xmm0
+    }
+}
+
+// #302: a binary float operation / compare with LHS in xmm0 (kind lk) and
+// RHS in xmm1 (kind rk). Mixed f32/f64 widens the f32 side, as the IR does;
+// returns the kind the operation runs in.
+fn legacy_falign(uint64 lk, uint64 rk) -> uint64 {
+    if lk == 2 && rk == 1 {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC0)   // cvtss2sd xmm0, xmm0
+        return 1
+    }
+    if lk == 1 && rk == 2 {
+        emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5A); emit_byte(0xC9)   // cvtss2sd xmm1, xmm1
+        return 1
+    }
+    return lk
+}
+
+// #302: the kind (1 = f64, 2 = f32, 0 = not float) of a declared type kind.
+fn legacy_fkind_of_type(uint64 tk) -> uint64 {
+    if is_float_type(tk) == 0 { return 0 }
+    if is_f32_type(tk) != 0 { return 2 }
+    return 1
+}
+
+// #302: the float kind of field `field_tok` of the struct variable `obj_tok`
+// (0 when not a float field or not a known struct variable).
+fn legacy_field_fkind(uint64 obj_tok, uint64 field_tok) -> uint64 {
+    uint64 si = struct_var_lookup(obj_tok)
+    if si == 0xFFFFFFFF { return 0 }
+    uint64 tk = struct_field_type_kind_by_tok(si, field_tok)
+    if tk >= 256 { return 0 }
+    return legacy_fkind_of_type(tk)
+}
+
+// #303: replace the struct address in frame slot `slot` by the address of a
+// fresh copy of the struct (a caller-owned temporary, Win64 / AAPCS64 B.4).
+fn legacy_copy_struct_arg_x86(uint64 slot, uint64 si) {
+    uint64 sz = struct_total_size(si)
+    uint64 n = (sz + 7) / 8
+    uint64 area = cg_slot_off(var_count)
+    uint64 c = 0
+    while c < n { var_count = var_count + 1; c = c + 1 }
+    var_frame_size = var_count * 8
+    uint64 rem = var_frame_size & 15
+    if rem != 0 { var_frame_size = var_frame_size + 16 - rem }
+    emit_load_rax_from_stack(slot)
+    emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1)            // mov rcx, rax
+    uint64 k = 0
+    while k < n {
+        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x81); emit_u32_le(k * 8)   // mov rax, [rcx + 8k]
+        rax_cache = 0
+        emit_store_rax_to_stack(area + k * 8)
+        k = k + 1
+    }
+    if area < 128 {
+        emit_byte(0x48); emit_byte(0x8D); emit_byte(0x44); emit_byte(0x24); uint8 a8 = area; emit_byte(a8)
+    } else {
+        emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84); emit_byte(0x24); emit_u32_le(area)
+    }
+    rax_cache = 0
+    emit_store_rax_to_stack(slot)
 }
 
 // Resolve all static RIP-relative fixups. Call after all code is emitted.
@@ -3969,6 +4129,18 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
     // Like every per-slice refusal, it fires only for a slice that ships
     // (fat_slice_ships, main.kr): `--targets=linux-x64` must not be refused
     // by the discarded win-x64 slice. The decl is routed either way.
+    // #307: a struct parameter or return would need the Win64 by-value rules
+    // the routed call path does not implement; no table import takes one.
+    uint64 rw_stok = decl_struct_abi_tok(fn_node)
+    if rw_stok != 0 && fat_slice_ships() != 0 {
+        diag_loc_head(rw_stok, 0)
+        write(2, "routed Windows import '", 23)
+        write(2, cg_source + tok_text_start(wrn), tok_text_len(wrn))
+        uint64 rs_msg = "' has a struct parameter or return type; routed Windows imports take integer/pointer arguments only (#307)\n"
+        write(2, rs_msg, str_len(rs_msg))
+        diag_span_of(rw_stok)
+        fatal_exit()
+    }
     if rw_float != 0 && fat_slice_ships() != 0 {
         diag_loc_head(wrn, 0)
         write(2, "routed Windows import '", 23)
@@ -3979,6 +4151,60 @@ fn decl_is_routed_win_import(uint64 fn_node) -> uint64 {
         fatal_exit()
     }
     return 1
+}
+
+// #307: the type token of the first struct-typed parameter, else of a struct
+// return type, of FnDecl `fn_node`; 0 when it has neither.
+fn decl_struct_abi_tok(uint64 fn_node) -> uint64 {
+    uint32 dp = ast_child(fn_node)
+    uint64 wdp = dp
+    while wdp != 0 {
+        if ast_kind(wdp) == 3 {
+            uint32 dpt = ast_data1(wdp)
+            uint64 wdpt = dpt
+            if wdpt != 0 && struct_lookup(wdpt) != 0xFFFFFFFF { return wdpt }
+        }
+        uint32 dpn = ast_next(wdp)
+        wdp = dpn
+    }
+    uint32 drt = ast_data2(fn_node)
+    uint64 wdrt = drt
+    if wdrt != 0 && struct_lookup(wdrt) != 0xFFFFFFFF { return wdrt }
+    return 0
+}
+
+// #307: a riscv32 object (`-c` / `--emit=obj`, IR backend) passes structs by
+// KernRift's own convention (a pointer to a copy), not the ILP32 C ABI. Refuse
+// the functions C reaches on purpose -- an `extern fn` and an `@export` fn --
+// when one takes or returns a struct, instead of miscompiling the C side.
+// Planned for v2.11.2 (full ILP32 struct lowering).
+fn refuse_rv32_obj_struct_abi(uint64 mod_node) {
+    uint32 rc = ast_child(mod_node)
+    uint64 wrc = rc
+    while wrc != 0 {
+        if ast_kind(wrc) == 2 {
+            uint32 rfl = ast_data4(wrc)
+            if (rfl & 12) != 0 {
+                uint64 rtok = decl_struct_abi_tok(wrc)
+                if rtok != 0 {
+                    uint32 rname = ast_data1(wrc)
+                    uint64 wrname = rname
+                    diag_loc_head(rtok, 0)
+                    uint64 rm1 = "fn '"
+                    if (rfl & 8) != 0 { rm1 = "extern fn '" }
+                    write(2, rm1, str_len(rm1))
+                    write(2, cg_source + tok_text_start(wrname), tok_text_len(wrname))
+                    uint64 rm2 = "' takes or returns a struct by value; riscv32 objects do not follow the\n  ILP32 C ABI for struct arguments and returns yet (#307, planned for v2.11.2).\n  Pass a pointer to the struct instead.\n"
+                    if (rfl & 8) == 0 { rm2 = "' is @export and takes or returns a struct by value; riscv32 objects do not\n  follow the ILP32 C ABI for struct arguments and returns yet (#307, planned for\n  v2.11.2). Pass a pointer to the struct instead.\n" }
+                    write(2, rm2, str_len(rm2))
+                    diag_span_of(rtok)
+                    fatal_exit()
+                }
+            }
+        }
+        uint32 rnx = ast_next(wrc)
+        wrc = rnx
+    }
 }
 
 // Record an extern call site for later relocation emission.
@@ -5143,7 +5369,11 @@ fn cg_win_ps_call(uint64 node) {
         return
     }
     // a named call (a user function, an extern or routed import)
-    if cg_win_ps_arm == 0 { cg_win_ps_need(cg_win_call_area(argc)) }
+    if cg_win_ps_arm == 0 {
+        uint64 ps_rs = fn_ret_struct_lookup(t)
+        if ps_rs != 0xFFFFFFFF && cg_ret_class0(ps_rs) == 3 { argc = argc + 1 }   // #309: hidden rcx
+        cg_win_ps_need(cg_win_call_area(argc))
+    }
     else { cg_win_ps_need(cg_a64_call_area(argc)) }
 }
 
@@ -5771,8 +6001,21 @@ fn emit_compare(uint64 op_tok_kind) {
 // ---------------------------------------------------------------------------
 
 // Generate code for an expression. Result is in %rax.
+// A Call's value is a struct only when the called function is declared to
+// return one (#248). Every arm of gen_expr_node that evaluates arguments --
+// user calls and builtins alike -- leaves behind the flag of its LAST
+// argument; this is the one place that drops it.
 @export
 fn gen_expr(uint64 node) {
+    gen_expr_node(node)
+    if node != 0 && ast_kind(node) == 35 {
+        uint32 cs_tok = ast_data1(node)
+        uint64 wcs_tok = cs_tok
+        if fn_ret_struct_lookup(wcs_tok) == 0xFFFFFFFF { expr_is_struct = 0xFFFFFFFF }
+    }
+}
+
+fn gen_expr_node(uint64 node) {
     // Invalidate rax cache — gen_expr will put a new value in rax
     rax_invalidate()
     expr_is_struct = 0xFFFFFFFF
@@ -5892,8 +6135,16 @@ fn gen_expr(uint64 node) {
             emit_byte(0x0F); emit_byte(0x94); emit_byte(0xC0)
             emit_byte(0x0F); emit_byte(0xB6); emit_byte(0xC0)
         } else if wok == 31 {
-            // - negate: neg rax
-            emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD8)
+            if expr_is_float == 1 || expr_is_float == 2 {
+                // #302: flip the sign bit of the float (bit 63 / bit 31)
+                emit_float_bits_to_rax(expr_is_float)
+                emit_byte(0x48); emit_byte(0x0F); emit_byte(0xBA); emit_byte(0xF8)
+                if expr_is_float == 1 { emit_byte(0x3F) } else { emit_byte(0x1F) }   // btc rax, 63 / 31
+                emit_rax_bits_to_xmm0(expr_is_float)
+                rax_cache = 0
+            } else {
+                emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD8)
+            }
         } else if wok == 26 {
             // ~ bitwise NOT: not rax
             emit_byte(0x48); emit_byte(0xF7); emit_byte(0xD0)
@@ -6779,6 +7030,13 @@ fn gen_expr(uint64 node) {
                     emit_static_lea(soff)
                 } else {
                     emit_static_load(soff)
+                    // #302: an f32/f64 static's value is a float (in xmm0); an
+                    // f16 static stays a u64 bit pattern, like every f16 value
+                    uint64 sfk_l = static_fkind_of(wident_tok)
+                    if sfk_l == 1 || sfk_l == 2 {
+                        emit_rax_bits_to_xmm0(sfk_l)
+                        expr_is_float = sfk_l
+                    }
                 }
                 // A file-scope static struct is a struct VALUE at its own
                 // address, exactly like a local struct variable — say so, or
@@ -6937,6 +7195,7 @@ fn gen_expr(uint64 node) {
                     } else {
                         emit_load_xmm0_f64(ft0)
                     }
+                    uint64 fal_ft0 = legacy_falign(lhs_is_float, rhs_is_float)   // #302
                     uint32 op_tok_fb = ast_data1(node)
                     uint64 wop_fb = op_tok_fb
                     uint64 pfb = cg_tokens + wop_fb * 16
@@ -6944,7 +7203,7 @@ fn gen_expr(uint64 node) {
                     unsafe { *(pfb as uint32) -> op_kind_fb }
                     uint64 wopk_fb = op_kind_fb
                     wopk_fb = float_binop_op_kind(wopk_fb)
-                    if lhs_is_float == 2 {
+                    if fal_ft0 == 2 {
                         if wopk_fb == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) } // addss
                         if wopk_fb == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) } // subss
                         if wopk_fb == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulss
@@ -6955,7 +7214,7 @@ fn gen_expr(uint64 node) {
                         if wopk_fb == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) } // mulsd
                         if wopk_fb == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) } // divsd
                     }
-                    expr_is_float = lhs_is_float
+                    expr_is_float = fal_ft0
                     return
                 }
             } else {
@@ -6991,6 +7250,7 @@ fn gen_expr(uint64 node) {
                     } else {
                         emit_load_xmm0_f64(ft1)
                     }
+                    uint64 fal_ft1 = legacy_falign(lhs_is_float, rhs_is_float2)   // #302
                     uint32 op_tok_fc = ast_data1(node)
                     uint64 wop_fc = op_tok_fc
                     uint64 pfc = cg_tokens + wop_fc * 16
@@ -6998,7 +7258,7 @@ fn gen_expr(uint64 node) {
                     unsafe { *(pfc as uint32) -> op_kind_fc }
                     uint64 wopk_fc = op_kind_fc
                     wopk_fc = float_binop_op_kind(wopk_fc)
-                    if lhs_is_float == 2 {
+                    if fal_ft1 == 2 {
                         if wopk_fc == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
                         if wopk_fc == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
                         if wopk_fc == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
@@ -7009,7 +7269,7 @@ fn gen_expr(uint64 node) {
                         if wopk_fc == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
                         if wopk_fc == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     }
-                    expr_is_float = lhs_is_float
+                    expr_is_float = fal_ft1
                     return
                 }
             } else {
@@ -7047,6 +7307,7 @@ fn gen_expr(uint64 node) {
                     } else {
                         emit_load_xmm0_f64(binop_temp)
                     }
+                    uint64 fal_binop_temp = legacy_falign(lhs_is_float, rhs_is_float3)   // #302
                     uint32 op_tok_fd = ast_data1(node)
                     uint64 wop_fd = op_tok_fd
                     uint64 pfd = cg_tokens + wop_fd * 16
@@ -7054,7 +7315,7 @@ fn gen_expr(uint64 node) {
                     unsafe { *(pfd as uint32) -> op_kind_fd }
                     uint64 wopk_fd = op_kind_fd
                     wopk_fd = float_binop_op_kind(wopk_fd)
-                    if lhs_is_float == 2 {
+                    if fal_binop_temp == 2 {
                         if wopk_fd == 30 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x58); emit_byte(0xC1) }
                         if wopk_fd == 31 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x5C); emit_byte(0xC1) }
                         if wopk_fd == 22 { emit_byte(0xF3); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
@@ -7065,7 +7326,7 @@ fn gen_expr(uint64 node) {
                         if wopk_fd == 22 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x59); emit_byte(0xC1) }
                         if wopk_fd == 32 { emit_byte(0xF2); emit_byte(0x0F); emit_byte(0x5E); emit_byte(0xC1) }
                     }
-                    expr_is_float = lhs_is_float
+                    expr_is_float = fal_binop_temp
                     return
                 }
             } else {
@@ -7579,8 +7840,9 @@ fn gen_expr(uint64 node) {
                 } else {
                     emit_load_xmm0_f64(fcmp_temp_s)
                 }
+                uint64 fal_fcmp_temp_s = legacy_falign(lhs_is_float_s, expr_is_float)   // #302
                 // ucomisd xmm0, xmm1: 66 0F 2E C1  (ucomiss: 0F 2E C1)
-                if lhs_is_float_s == 2 {
+                if fal_fcmp_temp_s == 2 {
                     emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
                 } else {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
@@ -7624,8 +7886,9 @@ fn gen_expr(uint64 node) {
                 } else {
                     emit_load_xmm0_f64(fcmp_temp_r)
                 }
+                uint64 fal_fcmp_temp_r = legacy_falign(lhs_is_float_r, expr_is_float)   // #302
                 // ucomisd xmm0, xmm1: 66 0F 2E C1  (ucomiss: 0F 2E C1)
-                if lhs_is_float_r == 2 {
+                if fal_fcmp_temp_r == 2 {
                     emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
                 } else {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
@@ -7672,8 +7935,9 @@ fn gen_expr(uint64 node) {
                 } else {
                     emit_load_xmm0_f64(cmp_temp)
                 }
+                uint64 fal_cmp_temp = legacy_falign(lhs_is_float_k, expr_is_float)   // #302
                 // ucomisd xmm0, xmm1: 66 0F 2E C1  (ucomiss: 0F 2E C1)
-                if lhs_is_float_k == 2 {
+                if fal_cmp_temp == 2 {
                     emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
                 } else {
                     emit_byte(0x66); emit_byte(0x0F); emit_byte(0x2E); emit_byte(0xC1)
@@ -9376,10 +9640,19 @@ fn gen_expr(uint64 node) {
             // passing them in integer registers silently miscompiles any
             // f64-taking callee reached through call_ptr.
             uint64 cp_fkinds = cg_alloc(arg_count * 8 + 8)
+            // #293: which arguments are struct VALUES (their slot then holds
+            // the struct's address); 0xFFFFFFFF = not a struct.
+            uint64 cp_sflags = cg_alloc(arg_count * 8 + 8)
+            uint64 cp_has_struct = 0
             uint64 weval = wca
             uint64 ai = 0
             while weval != 0 {
                 gen_expr(weval)
+                uint64 csfp = cp_sflags + ai * 8
+                uint64 csv = 0xFFFFFFFF
+                if abi_struct_pass_by_val != 0 { csv = expr_is_struct }
+                unsafe { *(csfp as uint64) = csv }
+                if csv != 0xFFFFFFFF { cp_has_struct = 1 }
                 uint64 wfk = expr_is_float
                 uint64 fkp = cp_fkinds + ai * 8
                 unsafe { *(fkp as uint64) = wfk }
@@ -9396,6 +9669,134 @@ fn gen_expr(uint64 node) {
                 ai = ai + 1
                 uint32 anxt = ast_next(weval)
                 weval = anxt
+            }
+
+            // #293: pass a struct argument the way a direct call to a legacy
+            // function does (the callee's parameter spill expects it): SysV
+            // INTEGER/SSE eightbytes as one or two scalar arguments, MEMORY
+            // class (> 16 bytes) as the address; Windows x64 <= 8 bytes as the
+            // value, larger as the address. The argument list is rewritten into
+            // a fresh run of slots, so everything below is unchanged and a
+            // call_ptr without struct arguments emits the same bytes as before.
+            uint64 cp_forced = 0
+            if cp_has_struct != 0 {
+                uint64 xn = 0
+                uint64 xa = 0
+                while xa < arg_count {
+                    uint64 xsfp = cp_sflags + xa * 8
+                    uint64 xsi = 0
+                    unsafe { *(xsfp as uint64) -> xsi }
+                    xn = xn + 1
+                    if xsi != 0xFFFFFFFF && target_os != 2 {
+                        if struct_abi_class0(xsi) != 3 && struct_total_size(xsi) > 8 { xn = xn + 1 }
+                        if struct_abi_class0(xsi) == 3 { xn = xn + (struct_total_size(xsi) + 7) / 8 - 1 }   // #306
+                    }
+                    xa = xa + 1
+                }
+                if xn > 64 {
+                    uint64 cpe3 = "error: too many call_ptr arguments on the legacy backend (max 64, a by-value struct counts once per eightbyte)\n"
+                    write(2, cpe3, str_len(cpe3))
+                    fatal_exit()
+                }
+                uint64 xbase = cg_slot_off(var_count)
+                uint64 xc = 0
+                while xc < xn { var_count = var_count + 1; xc = xc + 1 }
+                var_frame_size = var_count * 8
+                uint64 xrem = var_frame_size & 15
+                if xrem != 0 { var_frame_size = var_frame_size + 16 - xrem }
+                uint64 xkinds = cg_alloc(xn * 8 + 8)
+                cp_forced = cg_alloc(xn * 8 + 8)
+                uint64 cpg = 0
+                uint64 cpf = 0
+                uint64 xj = 0
+                xa = 0
+                while xa < arg_count {
+                    uint64 xsfp2 = cp_sflags + xa * 8
+                    uint64 xsi2 = 0
+                    unsafe { *(xsfp2 as uint64) -> xsi2 }
+                    uint64 xfkp = cp_fkinds + xa * 8
+                    uint64 xfk = 0
+                    unsafe { *(xfkp as uint64) -> xfk }
+                    uint64 xsrc = arg_slots_base + xa * 8
+                    // #295: a struct whose eightbytes do not all fit in the
+                    // registers still free goes whole on the stack (SysV).
+                    uint64 xforce = 0
+                    if xsi2 != 0xFFFFFFFF && target_os != 2 && struct_abi_class0(xsi2) == 3 {
+                        xforce = 1                                     // #306: MEMORY class, by value on the stack
+                    } else if xsi2 != 0xFFFFFFFF && target_os != 2 {
+                        uint64 xrr = cg_sysv_struct_regs(xsi2)
+                        if cpg + (xrr & 0xFF) > 6 || cpf + (xrr >> 8) > 8 { xforce = 1 } else { cpg = cpg + (xrr & 0xFF); cpf = cpf + (xrr >> 8) }
+                    } else if xfk != 0 {
+                        cpf = cpf + 1
+                    } else {
+                        cpg = cpg + 1
+                    }
+                    uint64 xfj0 = xj
+                    if xsi2 == 0xFFFFFFFF {
+                        emit_load_rax_from_stack(xsrc)
+                        emit_store_rax_to_stack(xbase + xj * 8)
+                        uint64 xkp_xfk = xkinds + xj * 8
+                        unsafe { *(xkp_xfk as uint64) = xfk }
+                        xj = xj + 1
+                    } else {
+                        uint64 xsz = struct_total_size(xsi2)
+                        uint64 xc0 = struct_abi_class0(xsi2)
+                        uint64 by_addr = 0
+                        if target_os == 2 && cg_win_struct_by_val(xsi2) == 0 {     // #315
+                            by_addr = 1
+                            legacy_copy_struct_arg_x86(xsrc, xsi2)    // #303: caller-owned copy
+                        }
+                        if target_os != 2 && xc0 == 3 {
+                            // #306: every eightbyte, in order, to the stack
+                            uint64 xmq = 0
+                            while xmq < (xsz + 7) / 8 {
+                                emit_load_rax_from_stack(xsrc)
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(xmq * 8)
+                                rax_cache = 0
+                                emit_store_rax_to_stack(xbase + xj * 8)
+                                uint64 xz0 = 0
+                                uint64 xkp_m = xkinds + xj * 8
+                                unsafe { *(xkp_m as uint64) = xz0 }
+                                xj = xj + 1
+                                xmq = xmq + 1
+                            }
+                            by_addr = 2
+                        }
+                        if by_addr != 2 {
+                        emit_load_rax_from_stack(xsrc)
+                        if by_addr == 0 {
+                            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)   // mov rax, [rax]
+                        }
+                        rax_cache = 0
+                        emit_store_rax_to_stack(xbase + xj * 8)
+                        uint64 xk0 = 0
+                        if by_addr == 0 && target_os != 2 && xc0 == 2 { xk0 = 1 }
+                        uint64 xkp_xk0 = xkinds + xj * 8
+                        unsafe { *(xkp_xk0 as uint64) = xk0 }
+                        xj = xj + 1
+                        if by_addr == 0 && target_os != 2 && xsz > 8 {
+                            emit_load_rax_from_stack(xsrc)
+                            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x40); emit_byte(0x08)   // mov rax, [rax+8]
+                            rax_cache = 0
+                            emit_store_rax_to_stack(xbase + xj * 8)
+                            uint64 xk1 = 0
+                            if struct_abi_class1(xsi2) == 2 { xk1 = 1 }
+                            uint64 xkp_xk1 = xkinds + xj * 8
+                        unsafe { *(xkp_xk1 as uint64) = xk1 }
+                            xj = xj + 1
+                        }
+                        }
+                    }
+                    while xfj0 < xj {
+                        uint64 xfcp = cp_forced + xfj0 * 8
+                        unsafe { *(xfcp as uint64) = xforce }
+                        xfj0 = xfj0 + 1
+                    }
+                    xa = xa + 1
+                }
+                arg_count = xn
+                arg_slots_base = xbase
+                cp_fkinds = xkinds
             }
 
             // Load args into registers.
@@ -9482,7 +9883,10 @@ fn gen_expr(uint64 node) {
                     unsafe { *(cfkp as uint64) -> cfk }
                     uint64 iip = cp_iidx + ci * 8
                     uint64 fip = cp_fidx + ci * 8
-                    if cfk != 0 {
+                    if cg_arg_forced_stack(cp_forced, ci) != 0 {
+                        unsafe { *(iip as uint64) = 0xFFFFFFFFFFFFFFFF }
+                        unsafe { *(fip as uint64) = 0xFFFFFFFFFFFFFFFF }
+                    } else if cfk != 0 {
                         unsafe { *(fip as uint64) = nflt }
                         unsafe { *(iip as uint64) = 0xFFFFFFFFFFFFFFFF }
                         nflt = nflt + 1
@@ -9504,7 +9908,7 @@ fn gen_expr(uint64 node) {
                         uint64 sfip = cp_fidx + si * 8
                         uint64 sfi = 0
                         unsafe { *(sfip as uint64) -> sfi }
-                        if sfi < 6 {
+                        if sfi < 8 {
                             if sfk == 2 {
                                 emit_load_xmmN_f32(sfi, ssoff)
                             } else {
@@ -9541,7 +9945,7 @@ fn gen_expr(uint64 node) {
                         uint64 qfip = cp_fidx + cq * 8
                         uint64 qfi = 0
                         unsafe { *(qfip as uint64) -> qfi }
-                        if qfi >= 6 { q_stack = 1 }
+                        if qfi >= 8 { q_stack = 1 }
                     } else {
                         uint64 qiip = cp_iidx + cq * 8
                         uint64 qii = 0
@@ -11084,6 +11488,22 @@ fn gen_expr(uint64 node) {
             uint64 self_ptr_flag = 0xFFFFFFFF
             unsafe { *(arg_struct_flags as uint64) = self_ptr_flag }
         }
+        cg_clear_scalar_param_struct_flags(callee_tok, arg_struct_flags, arg_count)   // #312
+
+        // #303: Win64 passes a struct of more than 8 bytes as a pointer to a
+        // CALLER-OWNED COPY, which the callee may modify. Make that copy here
+        // (the callee's own copy stays: harmless, and C callers pass a copy).
+        if target_os == 2 && abi_struct_pass_by_val != 0 {
+            uint64 w3 = 0
+            while w3 < arg_count {
+                uint64 w3sf = 0
+                unsafe { *(arg_struct_flags + w3 * 8 as uint64) -> w3sf }
+                if w3sf != 0xFFFFFFFF && cg_win_struct_by_val(w3sf) == 0 {        // #315
+                    legacy_copy_struct_arg_x86(arg_slots_base + w3 * 8, w3sf)
+                }
+                w3 = w3 + 1
+            }
+        }
 
         // Load args into registers from temp slots
         // SysV: int args → rdi, rsi, rdx, rcx, r8, r9 (independent counter)
@@ -11095,7 +11515,7 @@ fn gen_expr(uint64 node) {
         uint64 caller_sret_area = 0
         uint64 caller_sret_check = fn_ret_struct_lookup(callee_tok)
         if caller_sret_check != 0xFFFFFFFF {
-            uint64 caller_sret_c0_chk = struct_abi_class0(caller_sret_check)
+            uint64 caller_sret_c0_chk = cg_ret_class0(caller_sret_check)      // #309
             if caller_sret_c0_chk == 3 {
                 caller_sret_needed = 1
                 // Allocate stack space for the return value
@@ -11110,6 +11530,45 @@ fn gen_expr(uint64 node) {
             }
         }
 
+        // #309: Win64 passes the result pointer as the FIRST positional
+        // argument (rcx); the visible arguments shift right by one.
+        if target_os == 2 && caller_sret_needed != 0 {
+            if arg_count >= 64 {
+                write(2, "error: too many call arguments (max 64)\n", 40)
+                fatal_exit()
+            }
+            uint64 wsr_base = cg_slot_off(var_count)
+            uint64 wsr_c = 0
+            while wsr_c < arg_count + 1 { var_count = var_count + 1; wsr_c = wsr_c + 1 }
+            var_frame_size = var_count * 8
+            uint64 wsr_rem = var_frame_size & 15
+            if wsr_rem != 0 { var_frame_size = var_frame_size + 16 - wsr_rem }
+            uint64 wsr_i = arg_count
+            while wsr_i > 0 {
+                wsr_i = wsr_i - 1
+                emit_load_rax_from_stack(arg_slots_base + wsr_i * 8)
+                emit_store_rax_to_stack(wsr_base + wsr_i * 8 + 8)
+                uint64 wsr_ff = 0
+                unsafe { *(arg_float_flags + wsr_i * 8 as uint64) -> wsr_ff }
+                unsafe { *(arg_float_flags + wsr_i * 8 + 8 as uint64) = wsr_ff }
+                uint64 wsr_sf = 0
+                unsafe { *(arg_struct_flags + wsr_i * 8 as uint64) -> wsr_sf }
+                unsafe { *(arg_struct_flags + wsr_i * 8 + 8 as uint64) = wsr_sf }
+            }
+            // lea rax, [rsp + caller_sret_area]
+            emit_byte(0x48); emit_byte(0x8D); emit_byte(0x84)
+            emit_byte(0x24); emit_u32_le(caller_sret_area)
+            rax_cache = 0
+            emit_store_rax_to_stack(wsr_base)
+            uint64 wsr_z = 0
+            unsafe { *(arg_float_flags as uint64) = wsr_z }
+            uint64 wsr_n = 0xFFFFFFFF
+            unsafe { *(arg_struct_flags as uint64) = wsr_n }
+            arg_count = arg_count + 1
+            arg_slots_base = wsr_base
+        }
+
+        uint64 l1_forced = 0
         uint64 win_stack = 0
         if target_os == 2 {
             // Windows x64: shadow space (32 bytes min) + overflow args
@@ -11134,6 +11593,13 @@ fn gen_expr(uint64 node) {
             while oi < arg_count {
                 // Load from temp slot (shifted by win_stack)
                 emit_load_rax_from_stack(arg_slots_base + oi * 8 + win_stack)
+                // #295: a struct of <= 8 bytes is passed by VALUE in its slot.
+                uint64 wosf = 0
+                unsafe { *(arg_struct_flags + oi * 8 as uint64) -> wosf }
+                if wosf != 0xFFFFFFFF && abi_struct_pass_by_val != 0 && cg_win_struct_by_val(wosf) != 0 {
+                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)   // mov rax, [rax]
+                    rax_cache = 0
+                }
                 // Store to [rsp + 32 + (oi-4)*8]
                 uint64 soff = 32 + (oi - 4) * 8
                 if soff < 128 {
@@ -11164,8 +11630,7 @@ fn gen_expr(uint64 node) {
                     uint64 wsaf3 = 0
                     unsafe { *(arg_struct_flags + 3 * 8 as uint64) -> wsaf3 }
                     if wsaf3 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws3 = struct_total_size(wsaf3)
-                        if ws3 <= 8 {
+                        if cg_win_struct_by_val(wsaf3) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
                         }
@@ -11188,8 +11653,7 @@ fn gen_expr(uint64 node) {
                     uint64 wsaf2 = 0
                     unsafe { *(arg_struct_flags + 2 * 8 as uint64) -> wsaf2 }
                     if wsaf2 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws2 = struct_total_size(wsaf2)
-                        if ws2 <= 8 {
+                        if cg_win_struct_by_val(wsaf2) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
                         }
@@ -11211,8 +11675,7 @@ fn gen_expr(uint64 node) {
                     uint64 wsaf1 = 0
                     unsafe { *(arg_struct_flags + 1 * 8 as uint64) -> wsaf1 }
                     if wsaf1 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws1 = struct_total_size(wsaf1)
-                        if ws1 <= 8 {
+                        if cg_win_struct_by_val(wsaf1) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
                         }
@@ -11234,8 +11697,7 @@ fn gen_expr(uint64 node) {
                     uint64 wsaf0 = 0
                     unsafe { *(arg_struct_flags as uint64) -> wsaf0 }
                     if wsaf0 != 0xFFFFFFFF && abi_struct_pass_by_val != 0 {
-                        uint64 ws0 = struct_total_size(wsaf0)
-                        if ws0 <= 8 {
+                        if cg_win_struct_by_val(wsaf0) != 0 {     // #315
                             // mov rax, [rax]
                             emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
                         }
@@ -11245,6 +11707,130 @@ fn gen_expr(uint64 node) {
             }
         } else {
             // SysV calling convention: separate int/float register allocation
+            // #295: a by-value struct that does not fit in the registers still
+            // free is passed whole on the stack (its eightbytes, in argument
+            // order) while later arguments keep using registers. The loader
+            // below only knows "next register", so in that case the argument
+            // list is rewritten into eightbytes with a per-entry stack mark.
+            if abi_struct_pass_by_val != 0 {
+                uint64 xs_gi = caller_sret_needed
+                uint64 xs_fi = 0
+                uint64 xs_need = 0
+                uint64 xs_any = 0
+                uint64 xs_a = 0
+                while xs_a < arg_count {
+                    uint64 xs_sf = 0
+                    unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xs_sf }
+                    uint64 xs_ff = 0
+                    unsafe { *(arg_float_flags + xs_a * 8 as uint64) -> xs_ff }
+                    if xs_sf != 0xFFFFFFFF {
+                        xs_any = 1
+                        uint64 xs_r = cg_sysv_struct_regs(xs_sf)
+                        if (xs_r & 0x10000) != 0 { xs_need = 1 }        // #306: MEMORY class goes on the stack
+                        uint64 xs_ni = xs_r & 0xFF
+                        uint64 xs_ns = (xs_r >> 8) & 0xFF
+                        if xs_gi + xs_ni > 6 || xs_fi + xs_ns > 8 { xs_need = 1 } else { xs_gi = xs_gi + xs_ni; xs_fi = xs_fi + xs_ns }
+                    } else if xs_ff != 0 {
+                        xs_fi = xs_fi + 1
+                    } else {
+                        xs_gi = xs_gi + 1
+                    }
+                    xs_a = xs_a + 1
+                }
+                if xs_any != 0 && (xs_gi > 6 || xs_fi > 8) { xs_need = 1 }
+                if xs_need != 0 {
+                    uint64 xn = 0
+                    xs_a = 0
+                    while xs_a < arg_count {
+                        uint64 xc_sf = 0
+                        unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xc_sf }
+                        if xc_sf != 0xFFFFFFFF {
+                            xn = xn + (struct_total_size(xc_sf) + 7) / 8
+                        } else {
+                            xn = xn + 1
+                        }
+                        xs_a = xs_a + 1
+                    }
+                    if xn > 64 {
+                        uint64 xe = "error: too many call arguments (max 64, a by-value struct counts once per eightbyte)\n"
+                        write(2, xe, str_len(xe))
+                        fatal_exit()
+                    }
+                    uint64 xbase = cg_slot_off(var_count)
+                    uint64 xcn = 0
+                    while xcn < xn { var_count = var_count + 1; xcn = xcn + 1 }
+                    var_frame_size = var_count * 8
+                    uint64 xrem = var_frame_size & 15
+                    if xrem != 0 { var_frame_size = var_frame_size + 16 - xrem }
+                    uint64 xff = cg_alloc(xn * 8 + 8)
+                    l1_forced = cg_alloc(xn * 8 + 8)
+                    uint64 xj = 0
+                    uint64 pg = caller_sret_needed
+                    uint64 pf = 0
+                    xs_a = 0
+                    while xs_a < arg_count {
+                        uint64 xe_sf = 0
+                        unsafe { *(arg_struct_flags + xs_a * 8 as uint64) -> xe_sf }
+                        uint64 xe_ff = 0
+                        unsafe { *(arg_float_flags + xs_a * 8 as uint64) -> xe_ff }
+                        uint64 xsrc = arg_slots_base + xs_a * 8
+                        if xe_sf != 0xFFFFFFFF {
+                            uint64 xr = cg_sysv_struct_regs(xe_sf)
+                            uint64 xni = xr & 0xFF
+                            uint64 xns = (xr >> 8) & 0xFF
+                            uint64 xforce = 0
+                            if (xr & 0x10000) != 0 { xforce = 1 }              // #306: MEMORY class, by value on the stack
+                            else if pg + xni > 6 || pf + xns > 8 { xforce = 1 } else { pg = pg + xni; pf = pf + xns }
+                            uint64 xsl = (struct_total_size(xe_sf) + 7) / 8
+                            uint64 xk = 0
+                            while xk < xsl {
+                                emit_load_rax_from_stack(xsrc)
+                                if xk == 0 {
+                                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x00)
+                                } else {
+                                    emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(xk * 8)
+                                }
+                                rax_cache = 0
+                                emit_store_rax_to_stack(xbase + xj * 8)
+                                uint64 xcls = struct_abi_class0(xe_sf)
+                                if xk == 1 { xcls = struct_abi_class1(xe_sf) }
+                                if (xr & 0x10000) != 0 { xcls = 1 }
+                                uint64 xfv = 0
+                                if xcls == 2 { xfv = 1 }
+                                uint64 xfp = xff + xj * 8
+                                unsafe { *(xfp as uint64) = xfv }
+                                uint64 xfp2 = l1_forced + xj * 8
+                                unsafe { *(xfp2 as uint64) = xforce }
+                                xj = xj + 1
+                                xk = xk + 1
+                            }
+                        } else {
+                            emit_load_rax_from_stack(xsrc)
+                            emit_store_rax_to_stack(xbase + xj * 8)
+                            uint64 xfp3 = xff + xj * 8
+                            unsafe { *(xfp3 as uint64) = xe_ff }
+                            uint64 zf = 0
+                            uint64 xfp4 = l1_forced + xj * 8
+                            unsafe { *(xfp4 as uint64) = zf }
+                            if xe_ff != 0 { pf = pf + 1 } else { pg = pg + 1 }
+                            xj = xj + 1
+                        }
+                        xs_a = xs_a + 1
+                    }
+                    uint64 xw = 0
+                    while xw < xn {
+                        uint64 xfv2 = 0
+                        uint64 xfp5 = xff + xw * 8
+                        unsafe { *(xfp5 as uint64) -> xfv2 }
+                        unsafe { *(arg_float_flags + xw * 8 as uint64) = xfv2 }
+                        uint64 nonev = 0xFFFFFFFF
+                        unsafe { *(arg_struct_flags + xw * 8 as uint64) = nonev }
+                        xw = xw + 1
+                    }
+                    arg_count = xn
+                    arg_slots_base = xbase
+                }
+            }
             // First pass: load float args into xmm registers
             uint64 call_float_idx = 0
             uint64 fi = 0
@@ -11252,7 +11838,7 @@ fn gen_expr(uint64 node) {
                 uint64 ff_addr = arg_float_flags + fi * 8
                 uint64 ff_val = 0
                 unsafe { *(ff_addr as uint64) -> ff_val }
-                if ff_val != 0 && call_float_idx < 8 {
+                if ff_val != 0 && call_float_idx < 8 && cg_arg_forced_stack(l1_forced, fi) == 0 {
                     emit_load_xmmN_f64(call_float_idx, arg_slots_base + fi * 8)
                     call_float_idx = call_float_idx + 1
                 }
@@ -11272,6 +11858,7 @@ fn gen_expr(uint64 node) {
                     emit_byte(0x24); emit_u32_le(caller_sret_area)
                 }
                 emit_mov_rdi_rax()
+                rax_cache = 0        // R26: rax now holds the sret address, not an argument slot
                 call_int_idx = 1
             }
             uint64 ii = 0
@@ -11279,7 +11866,7 @@ fn gen_expr(uint64 node) {
                 uint64 fi_addr = arg_float_flags + ii * 8
                 uint64 fi_val = 0
                 unsafe { *(fi_addr as uint64) -> fi_val }
-                if fi_val == 0 {
+                if fi_val == 0 && cg_arg_forced_stack(l1_forced, ii) == 0 {
                     // Check if this is a struct arg
                     uint64 saf_addr = arg_struct_flags + ii * 8
                     uint64 saf_val = 0
@@ -11426,11 +12013,13 @@ fn gen_expr(uint64 node) {
             uint64 oasv = 0
             unsafe { *(oas as uint64) -> oasv }
             if oasv != 0xFFFFFFFF && abi_struct_pass_by_val != 0 { ovf_has_struct = 1 }
-            uint64 on_stack = 0
-            if oafv != 0 {
-                if ovf_f < 8 { ovf_f = ovf_f + 1 } else { on_stack = 1 }
-            } else {
-                if ovf_i < 6 { ovf_i = ovf_i + 1 } else { on_stack = 1 }
+            uint64 on_stack = cg_arg_forced_stack(l1_forced, oa)
+            if on_stack == 0 {
+                if oafv != 0 {
+                    if ovf_f < 8 { ovf_f = ovf_f + 1 } else { on_stack = 1 }
+                } else {
+                    if ovf_i < 6 { ovf_i = ovf_i + 1 } else { on_stack = 1 }
+                }
             }
             if on_stack != 0 {
                 uint64 ovp = ovf_idx + ovf_n * 8
@@ -11513,7 +12102,7 @@ fn gen_expr(uint64 node) {
         // Check if callee returns a struct
         uint64 ret_struct_si = fn_ret_struct_lookup(callee_tok)
         if ret_struct_si != 0xFFFFFFFF {
-            uint64 rc0 = struct_abi_class0(ret_struct_si)
+            uint64 rc0 = cg_ret_class0(ret_struct_si)                         // #309
             if rc0 == 3 {
                 // MEMORY class: data was written into caller_sret_area by callee
                 // via the hidden sret pointer.  Point rax at that area.
@@ -11535,7 +12124,7 @@ fn gen_expr(uint64 node) {
                 var_frame_size = var_count * 8
                 uint64 rsrem = var_frame_size & 15
                 if rsrem != 0 { var_frame_size = var_frame_size + 16 - rsrem }
-                uint64 rc1 = struct_abi_class1(ret_struct_si)
+                uint64 rc1 = cg_ret_class1(ret_struct_si)
                 // Eightbyte 0: store from rax or xmm0
                 if rc0 == 1 {
                     emit_store_rax_to_stack(ret_soff)
@@ -13652,6 +14241,7 @@ fn gen_stmt(uint64 node) {
             // Record per-element size for correct index scaling later
             arr_elem_register(name_tok, elem_size_v)
             arr_count_set_last(arr_size)
+            arr_fkind_set_last(legacy_fkind_of_type(vardecl_resolved_kind(node)))   // #305
             // lea rax, [rsp + arr_offset]
             emit_byte(0x48)
             emit_byte(0x8D)
@@ -13790,6 +14380,7 @@ fn gen_stmt(uint64 node) {
         if wic != 0 {
             gen_expr(wic)
             if is_float_type(wtype) != 0 {
+                legacy_fcoerce(expr_is_float, legacy_fkind_of_type(wtype))   // #302
                 if is_f32_type(wtype) != 0 {
                     emit_store_xmm0_f32(offset)
                 } else {
@@ -13883,6 +14474,7 @@ fn gen_stmt(uint64 node) {
                     // temp_slot_0.
                     uint64 nfw_slot = alloc_scratch_slot()
                     gen_expr(wval)
+                    uint64 nfw_vfk = expr_is_float          // #302: the value's float kind
                     if expr_is_float == 1 {
                         emit_byte(0x66); emit_byte(0x48); emit_byte(0x0F)
                         emit_byte(0x7E); emit_byte(0xC0)
@@ -13904,6 +14496,16 @@ fn gen_stmt(uint64 node) {
                         }
                         emit_byte(0x48); emit_byte(0x89); emit_byte(0xC1) // mov rcx, rax
                         emit_load_rax_from_stack(nfw_slot)
+                        // #302: convert the parked float bits to the field's kind
+                        uint64 nfw_ftk = struct_field_type_kind_by_tok(nsi_w, field_tok)
+                        uint64 nfw_ffk = 0
+                        if nfw_ftk < 256 { nfw_ffk = legacy_fkind_of_type(nfw_ftk) }
+                        if nfw_ffk != 0 && nfw_vfk != 0 && nfw_ffk != nfw_vfk {
+                            emit_rax_bits_to_xmm0(nfw_vfk)
+                            legacy_fcoerce(nfw_vfk, nfw_ffk)
+                            emit_float_bits_to_rax(nfw_ffk)
+                            rax_cache = 0
+                        }
                         if nfsz_w == 1 {
                             emit_byte(0x88); emit_byte(0x01)
                         } else if nfsz_w == 2 {
@@ -13960,6 +14562,11 @@ fn gen_stmt(uint64 node) {
             }
             // Evaluate value
             gen_expr(wval)
+            uint64 ffk_m = legacy_field_fkind(obj_tok, field_tok)   // #302: narrow/widen to the field
+            if ffk_m != 0 && expr_is_float != 0 {
+                legacy_fcoerce(expr_is_float, ffk_m)
+                expr_is_float = ffk_m
+            }
             if expr_is_float == 1 {
                 // f64: move xmm0 bits into rax so rax-based store path works
                 // movq rax, xmm0: 66 48 0F 7E C0
@@ -14010,6 +14617,9 @@ fn gen_stmt(uint64 node) {
         uint32 val_child = ast_child(node)
         uint64 wvc = val_child
         gen_expr(wvc)
+        // #312 (assign half): only a struct DESTINATION takes a byte copy; into a
+        // scalar (`u64 p; p = s`, a static `g = s`) the struct's address is stored.
+        if expr_is_struct != 0xFFFFFFFF && struct_var_lookup(name_tok) == 0xFFFFFFFF { expr_is_struct = 0xFFFFFFFF }
         // Struct assignment: copy bytes for value semantics
         if expr_is_struct != 0xFFFFFFFF {
             uint64 src_si = expr_is_struct
@@ -14056,6 +14666,7 @@ fn gen_stmt(uint64 node) {
         if offset != 0xFFFFFFFF {
             uint64 vtype_a = var_type_lookup(name_tok)
             if is_float_type(vtype_a) != 0 {
+                legacy_fcoerce(expr_is_float, legacy_fkind_of_type(vtype_a))   // #302
                 if is_f32_type(vtype_a) != 0 {
                     emit_store_xmm0_f32(offset)
                 } else {
@@ -14067,6 +14678,12 @@ fn gen_stmt(uint64 node) {
         } else {
             uint64 soff = static_lookup(name_tok)
             if soff != 0xFFFFFFFF {
+                // #302: a float static stores its declared kind's bits
+                uint64 sfk_a = static_fkind_of(name_tok)
+                if sfk_a != 0 && expr_is_float != 0 {
+                    legacy_fcoerce(expr_is_float, sfk_a)
+                    emit_float_bits_to_rax(sfk_a)
+                }
                 emit_static_store(soff)
             }
         }
@@ -14128,11 +14745,14 @@ fn gen_stmt(uint64 node) {
         }
         // If returning a struct, load eightbytes into rax/rdx or xmm0/xmm1,
         // or copy to sret buffer for MEMORY class (>16 bytes).
+        // #312: only when the function RETURNS a struct; otherwise rax already
+        // holds the struct's address, which is the scalar being returned.
+        if expr_is_struct != 0xFFFFFFFF && cg_cur_ret_struct == 0 { expr_is_struct = 0xFFFFFFFF }
         if expr_is_struct != 0xFFFFFFFF {
             uint64 ret_si = expr_is_struct
             uint64 ret_size = struct_total_size(ret_si)
-            uint64 ret_c0 = struct_abi_class0(ret_si)
-            uint64 ret_c1 = struct_abi_class1(ret_si)
+            uint64 ret_c0 = cg_ret_class0(ret_si)                             // #309
+            uint64 ret_c1 = cg_ret_class1(ret_si)
             // rax = pointer to struct data
             emit_store_rax_to_stack(temp_slot_0)
             if ret_c0 == 3 {
@@ -14140,7 +14760,7 @@ fn gen_stmt(uint64 node) {
                 // temp_slot_0 = source pointer (from gen_expr)
                 // sret_slot = destination pointer (caller-supplied sret address)
                 uint64 qi = 0
-                uint64 qslots = (ret_size + 7) / 8
+                uint64 qslots = ret_size / 8        // #315: whole qwords, then an exact tail
                 while qi < qslots {
                     // Load source qword: mov rcx, [src + qi*8]
                     emit_load_rax_from_stack(temp_slot_0)
@@ -14167,6 +14787,25 @@ fn gen_stmt(uint64 node) {
                     }
                     qi = qi + 1
                 }
+                // #315: the tail (4/2/1 bytes) -- never write past the caller's
+                // result object (its size need not be a multiple of 8).
+                uint64 qt_off = qslots * 8
+                uint64 qt_rem = ret_size - qt_off
+                while qt_rem > 0 {
+                    uint64 qt_w = 1
+                    if qt_rem >= 4 { qt_w = 4 } else if qt_rem >= 2 { qt_w = 2 }
+                    emit_load_rax_from_stack(temp_slot_0)
+                    if qt_w == 2 { emit_byte(0x66) }
+                    if qt_w == 1 { emit_byte(0x8A) } else { emit_byte(0x8B) }
+                    emit_byte(0x88); emit_u32_le(qt_off)            // mov cl/cx/ecx, [rax+off]
+                    emit_load_rax_from_stack(sret_slot)
+                    if qt_w == 2 { emit_byte(0x66) }
+                    if qt_w == 1 { emit_byte(0x88) } else { emit_byte(0x89) }
+                    emit_byte(0x88); emit_u32_le(qt_off)            // mov [rax+off], cl/cx/ecx
+                    qt_off = qt_off + qt_w
+                    qt_rem = qt_rem - qt_w
+                }
+                rax_cache = 0
                 // Return sret pointer in rax (C ABI requirement)
                 emit_load_rax_from_stack(sret_slot)
             }
@@ -14592,6 +15231,12 @@ fn gen_stmt(uint64 node) {
                 gen_expr(wi)
                 emit_store_rax_to_stack(compound_temp_slot)
                 gen_expr(wrhs)
+                uint64 ia_efk = arr_fkind_lookup(ast_data1(node))        // #305: narrow/widen to the element
+                if ia_efk != 0 && expr_is_float != 0 {
+                    legacy_fcoerce(expr_is_float, ia_efk)
+                    emit_float_bits_to_rax(ia_efk)
+                    rax_cache = 0
+                }
                 emit_store_rax_to_stack(ia_val_slot)
                 emit_load_rax_from_stack(compound_temp_slot)
             } else {
@@ -14600,6 +15245,12 @@ fn gen_stmt(uint64 node) {
                 emit_store_rax_to_stack(ia_idx_slot)
                 // Evaluate value → park it
                 gen_expr(wrhs)
+                uint64 ia_efk = arr_fkind_lookup(ast_data1(node))        // #305: narrow/widen to the element
+                if ia_efk != 0 && expr_is_float != 0 {
+                    legacy_fcoerce(expr_is_float, ia_efk)
+                    emit_float_bits_to_rax(ia_efk)
+                    rax_cache = 0
+                }
                 emit_store_rax_to_stack(ia_val_slot)
                 // Reload the index: the bounds check below reads it in rax
                 emit_load_rax_from_stack(ia_idx_slot)
@@ -14753,6 +15404,16 @@ fn gen_stmt(uint64 node) {
             if soff != 0xFFFFFFFF {
                 // A static: refused if it is a const or a whole array/struct (#206/#207).
                 static_write_check(dest_tok)
+                // #302: an f64 load into an f32 static is narrowed (and an f32
+                // load into an f64 static widened), as `s = <value>` is. The
+                // static is read back as a float now, so its bits must be its
+                // own kind's. A raw integer load keeps its bits.
+                uint64 sfk_pl = static_fkind_of(dest_tok)
+                if (sfk_pl == 1 || sfk_pl == 2) && (wpl_fk == 1 || wpl_fk == 2) && sfk_pl != wpl_fk {
+                    emit_rax_bits_to_xmm0(wpl_fk)
+                    legacy_fcoerce(wpl_fk, sfk_pl)
+                    emit_float_bits_to_rax(sfk_pl)
+                }
                 emit_static_store(soff)
                 return
             }
@@ -14801,6 +15462,9 @@ fn gen_stmt(uint64 node) {
             gen_expr(wa)
             emit_store_rax_to_stack(compound_temp_slot)
             gen_expr(wv)
+            uint32 ps_d3x = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fkx = ps_d3x & 15
+            if (ps_fkx == 1 || ps_fkx == 2) && expr_is_float != 0 { legacy_fcoerce(expr_is_float, ps_fkx)  expr_is_float = ps_fkx }
             emit_float_bits_to_rax(expr_is_float)
             emit_store_rax_to_stack(ps_val_slot)
             emit_load_rax_from_stack(compound_temp_slot)
@@ -14810,6 +15474,9 @@ fn gen_stmt(uint64 node) {
             emit_store_rax_to_stack(ps_addr_slot)
             // Evaluate value → park it
             gen_expr(wv)
+            uint32 ps_d3x = ast_data3(node)                 // #302: narrow/widen to the store's float kind
+            uint64 ps_fkx = ps_d3x & 15
+            if (ps_fkx == 1 || ps_fkx == 2) && expr_is_float != 0 { legacy_fcoerce(expr_is_float, ps_fkx)  expr_is_float = ps_fkx }
             emit_float_bits_to_rax(expr_is_float)
             emit_store_rax_to_stack(ps_val_slot)
             // Reload the address so the tail below still finds it in rax
@@ -15099,7 +15766,19 @@ fn gen_function(uint64 fn_node) {
 
     // Extern declarations have no body — skip codegen entirely. The linker
     // will resolve the symbol in the final binary.
-    if is_extern != 0 { return }
+    // R24: an extern's STRUCT return type must be known at its call sites
+    // (fn_ret_struct_lookup), or the caller treats rax/x0 as the struct's
+    // address. Float returns are registered by the type-check pre-pass and
+    // survive; the struct table is rebuilt here, so register it before leaving.
+    if is_extern != 0 {
+        uint32 ext_rt = ast_data2(fn_node)
+        uint64 wext_rt = ext_rt
+        if wext_rt != 0 {
+            uint64 ext_si = struct_lookup(wext_rt)
+            if ext_si != 0xFFFFFFFF { fn_ret_struct_register(name_tok, ext_si) }
+        }
+        return
+    }
     uint32 body_check = ast_data3(fn_node)
     if body_check == 0 { return }
     cg_win_prescan(fn_node, 0)           // #143 option C (spec 2.5.7): OUT and the SP-fixed verdict
@@ -15153,6 +15832,7 @@ fn gen_function(uint64 fn_node) {
     if is_export != 0 { export_fn_register(name_tok) }
 
     // Register float return type if applicable
+    cg_cur_ret_struct = 0                                  // #312
     uint32 ret_type_tok = ast_data2(fn_node)
     uint64 wrt = ret_type_tok
     if wrt != 0 {
@@ -15161,6 +15841,7 @@ fn gen_function(uint64 fn_node) {
         if ret_kind == 95 { fn_ret_float_register(name_tok, 2) }
         // Register struct return type if applicable
         uint64 ret_si = struct_lookup(wrt)
+        if ret_si != 0xFFFFFFFF { cg_cur_ret_struct = 1 }
         if ret_si != 0xFFFFFFFF {
             fn_ret_struct_register(name_tok, ret_si)
         }
@@ -15171,7 +15852,7 @@ fn gen_function(uint64 fn_node) {
     if wrt != 0 {
         uint64 sret_si = struct_lookup(wrt)
         if sret_si != 0xFFFFFFFF {
-            uint64 sret_c0 = struct_abi_class0(sret_si)
+            uint64 sret_c0 = cg_ret_class0(sret_si)                           // #309
             if sret_c0 == 3 {
                 // Reserve a stack slot for the sret pointer
                 sret_slot = cg_slot_off(var_count)
@@ -15503,8 +16184,57 @@ fn gen_function(uint64 fn_node) {
                     // Spill eightbytes from registers into contiguous struct area
                     uint64 sv_c0 = struct_abi_class0(param_si_spill)
                     uint64 sv_c1 = struct_abi_class1(param_si_spill)
+                    // #295: a struct that does not fit in the registers still free
+                    // arrived whole on the stack, its eightbytes in order.
+                    uint64 sv_r = cg_sysv_struct_regs(param_si_spill)
+                    uint64 sv_ovf = 0
+                    if int_pidx + (sv_r & 0xFF) > 6 || float_pidx + ((sv_r >> 8) & 0xFF) > 8 { sv_ovf = 1 }
+                    if (sv_r & 0x10000) != 0 { sv_ovf = 1 }             // #306: MEMORY class arrives by value on the stack
+                    if sv_ovf != 0 {
+                        if sv_c0 == 99 {
+                            if stack_pidx >= 64 {
+                                write(2, "error: too many stack parameters (max 64)\n", 42)
+                                fatal_exit()
+                            }
+                            emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84); emit_byte(0x24)
+                            uint64 ovpl_1 = out_len
+                            emit_u32_le(0)
+                            uint64 ovpe_1 = overflow_patches + (stack_pidx) * 8
+                            uint32 ovpl32_1 = ovpl_1
+                            unsafe { *(ovpe_1 as uint32) = ovpl32_1 }
+                            if overflow_patch_count < (stack_pidx) + 1 { overflow_patch_count = (stack_pidx) + 1 }
+                            stack_pidx = stack_pidx + 1
+                            emit_store_rax_to_stack(temp_slot_0)
+                            uint64 oq = 0
+                            while oq < sv_sslots {
+                                emit_load_rax_from_stack(temp_slot_0)
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(oq * 8)
+                                rax_cache = 0
+                                emit_store_rax_to_stack(struct_area + oq * 8)
+                                oq = oq + 1
+                            }
+                        } else {
+                            uint64 oe = 0
+                            while oe < sv_sslots {
+                                if stack_pidx >= 64 {
+                                    write(2, "error: too many stack parameters (max 64)\n", 42)
+                                    fatal_exit()
+                                }
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84); emit_byte(0x24)
+                                uint64 ovpl_2 = out_len
+                                emit_u32_le(0)
+                                uint64 ovpe_2 = overflow_patches + (stack_pidx) * 8
+                                uint32 ovpl32_2 = ovpl_2
+                                unsafe { *(ovpe_2 as uint32) = ovpl32_2 }
+                                if overflow_patch_count < (stack_pidx) + 1 { overflow_patch_count = (stack_pidx) + 1 }
+                                stack_pidx = stack_pidx + 1
+                                emit_store_rax_to_stack(struct_area + oe * 8)
+                                oe = oe + 1
+                            }
+                        }
+                    }
 
-                    if sv_c0 == 1 {
+                    if sv_ovf == 0 && sv_c0 == 1 {
                         // INTEGER eightbyte 0: spill from current int register to [rsp+struct_area]
                         if struct_area < 128 {
                             uint8 sa8 = struct_area
@@ -15561,7 +16291,7 @@ fn gen_function(uint64 fn_node) {
                         int_pidx = int_pidx + 1
                     }
 
-                    if sv_c1 == 1 && sv_ssize > 8 {
+                    if sv_ovf == 0 && sv_c1 == 1 && sv_ssize > 8 {
                         // INTEGER eightbyte 1: spill from NEXT int register to [rsp+struct_area+8]
                         uint64 sa2 = struct_area + 8
                         if sa2 < 128 {
@@ -15620,13 +16350,13 @@ fn gen_function(uint64 fn_node) {
                     }
 
                     // SSE eightbyte 0: spill from xmmN to [rsp + struct_area]
-                    if sv_c0 == 2 {
+                    if sv_ovf == 0 && sv_c0 == 2 {
                         emit_store_xmmN_f64(float_pidx, struct_area)
                         float_pidx = float_pidx + 1
                     }
 
                     // SSE eightbyte 1: spill from xmmN to [rsp + struct_area + 8]
-                    if sv_c1 == 2 && sv_ssize > 8 {
+                    if sv_ovf == 0 && sv_c1 == 2 && sv_ssize > 8 {
                         uint64 sv_sa2 = struct_area + 8
                         emit_store_xmmN_f64(float_pidx, sv_sa2)
                         float_pidx = float_pidx + 1
@@ -15634,7 +16364,7 @@ fn gen_function(uint64 fn_node) {
 
                     // MEMORY class: register holds a pointer to struct data
                     // Copy struct bytes from pointer to local stack area
-                    if sv_c0 == 3 {
+                    if sv_ovf == 0 && sv_c0 == 3 {
                         // Spill the pointer register to temp_slot_0
                         if int_pidx == 0 {
                             // mov rax, rdi (48 89 F8)
@@ -15710,7 +16440,35 @@ fn gen_function(uint64 fn_node) {
                     if wv_rem != 0 { var_frame_size = var_frame_size + 16 - wv_rem }
 
                     // Spill register value to struct area
-                    if wv_ssize <= 8 {
+                    if pidx >= 4 {
+                        // #295: the 5th+ argument arrived in its stack slot: the
+                        // value (<= 8 bytes) or the address of the struct.
+                        if pidx - 4 >= 64 {
+                            write(2, "error: too many stack parameters (max 64)\n", 42)
+                            fatal_exit()
+                        }
+                        emit_byte(0x48); emit_byte(0x8B); emit_byte(0x84); emit_byte(0x24)
+                        uint64 ovpl_3 = out_len
+                        emit_u32_le(0)
+                        uint64 ovpe_3 = overflow_patches + (pidx - 4) * 8
+                        uint32 ovpl32_3 = ovpl_3
+                        unsafe { *(ovpe_3 as uint32) = ovpl32_3 }
+                        if overflow_patch_count < (pidx - 4) + 1 { overflow_patch_count = (pidx - 4) + 1 }
+                        stack_pidx = stack_pidx + 1
+                        if cg_win_struct_by_val(param_si_spill) != 0 {      // #315
+                            emit_store_rax_to_stack(wv_struct_area)
+                        } else {
+                            emit_store_rax_to_stack(temp_slot_0)
+                            uint64 woq = 0
+                            while woq < wv_sslots {
+                                emit_load_rax_from_stack(temp_slot_0)
+                                emit_byte(0x48); emit_byte(0x8B); emit_byte(0x80); emit_u32_le(woq * 8)
+                                rax_cache = 0
+                                emit_store_rax_to_stack(wv_struct_area + woq * 8)
+                                woq = woq + 1
+                            }
+                        }
+                    } else if cg_win_struct_by_val(param_si_spill) != 0 {      // #315
                         if wv_struct_area < 128 {
                             uint8 wsa8 = wv_struct_area
                             if pidx == 0 {
@@ -15825,6 +16583,13 @@ fn gen_function(uint64 fn_node) {
                         emit_store_regN_to_stack(0x48, 0, poff)
                     }
                     float_pidx = float_pidx + 1
+                } else if param_is_float != 0 && target_os == 2 && pidx < 4 {
+                    // #297: Windows x64 passes the Nth float argument in xmmN
+                    // (positional). The GPR of the same position is NOT
+                    // defined for a non-varargs call -- the legacy direct-call
+                    // loader happens to fill both, call_ptr and C callers fill
+                    // only xmmN.
+                    emit_store_xmmN_f64(pidx, poff)
                 } else if target_os == 2 {
                     // Windows calling convention (positional, no change)
                     if pidx == 0 {
@@ -16473,6 +17238,34 @@ fn dce_register_fn(uint64 name_tok, uint64 fn_node) {
     uint32 nd = fn_node
     unsafe { *(e4 as uint32) = nd }
     dce_fn_map_count = dce_fn_map_count + 1
+}
+
+// #312 (argument twin): a struct VARIABLE passed to a SCALAR parameter
+// (`fn f(u64 p)`, `f(s)`) passes the struct's address -- the value a struct
+// variable has as a scalar, and what the IR passes. Clear the struct flag of
+// every argument whose parameter in the callee's declaration is not a struct,
+// so the by-value paths (SysV eightbytes, #306 stack copy, #303 copies, AAPCS64
+// loads) leave it alone. Method calls are left to their own self handling (a
+// method name may be shared, so its declaration is not looked up by name).
+fn cg_clear_scalar_param_struct_flags(uint64 callee_tok, uint64 flags, uint64 argc) {
+    uint64 cn = dce_lookup_fn(callee_tok)          // #314: fn names (methods too) are global
+    if cn == 0 { return }
+    uint32 cp = ast_child(cn)
+    uint64 wcp = cp
+    uint64 ci = 0
+    while wcp != 0 && ci < argc {
+        if ast_kind(wcp) == 3 {
+            uint32 cpt = ast_data1(wcp)
+            uint64 wcpt = cpt
+            if wcpt != 0 && struct_lookup(wcpt) == 0xFFFFFFFF {
+                uint64 none_f = 0xFFFFFFFF
+                unsafe { *(flags + ci * 8 as uint64) = none_f }
+            }
+            ci = ci + 1
+        }
+        uint32 cpn = ast_next(wcp)
+        wcp = cpn
+    }
 }
 
 // Look up function AST node by name token
@@ -19724,8 +20517,21 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     //                                        ld "executable stack" warning
     // idx 55: .rela.text\0     (11 bytes) — only if extern_call_count > 0
     // Total: 55 or 66 bytes
+    // Static-variable references become relocations against the .data
+    // section symbol (#294): x86_64 one R_X86_64_PC32 per site, arm64 an
+    // ADRP (ADR_PREL_PG_HI21) + its ADD/LDR/STR (ADD_ABS_LO12_NC /
+    // LDST64_ABS_LO12_NC) pair per site.
+    uint64 static_rel_n = 0
+    if data_len > 0 && static_fixup_count > 0 {
+        static_rel_n = static_fixup_count
+        if arch == 1 { static_rel_n = static_fixup_count * 2 }
+    }
+    // #298/#299: arm64 string-literal and fn_addr ADRP+ADD pairs inside .text
+    // get relocations too (against a .text section symbol).
+    uint64 pc_rel_n = 0
+    if arch == 1 { pc_rel_n = a64_pc_count() * 2 }
     uint64 has_relocs = 0
-    if extern_call_count > 0 { has_relocs = 1 }
+    if extern_call_count > 0 || static_rel_n > 0 || pc_rel_n > 0 { has_relocs = 1 }
     uint64 shstrtab_size = 55
     if has_relocs != 0 { shstrtab_size = 66 }
 
@@ -19744,6 +20550,8 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // then one per extern function.
     // Elf64_Sym = 24 bytes each
     uint64 sym_count = 1 + fn_count + extern_fn_count
+    if static_rel_n > 0 { sym_count = sym_count + 1 }   // .data section symbol
+    if pc_rel_n > 0 { sym_count = sym_count + 1 }       // .text section symbol
     uint64 symtab_size = sym_count * 24
 
     // Build strtab: copy each function name from source
@@ -19827,7 +20635,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // then: .rela.text (optional, only if externs exist)
     // then: section headers (6 or 7 * 64 bytes)
 
-    uint64 rela_count = extern_call_count
+    uint64 rela_count = extern_call_count + static_rel_n + pc_rel_n
     uint64 rela_size = rela_count * 24   // Elf64_Rela = 24 bytes
 
     uint64 elf_hdr_size = 64
@@ -19961,6 +20769,31 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         fi = fi + 1
     }
 
+    // .data STT_SECTION symbol (LOCAL), the target of every static reference.
+    uint64 data_sec_sym = 0
+    if static_rel_n > 0 {
+        emit_u32_le(0)
+        emit_byte(0x03)
+        emit_byte(0)
+        emit_u16_le(2)
+        emit_u64_le(0)
+        emit_u64_le(0)
+        data_sec_sym = local_count
+        local_count = local_count + 1
+    }
+
+    uint64 text_sec_sym = 0
+    if pc_rel_n > 0 {
+        emit_u32_le(0)
+        emit_byte(0x03)
+        emit_byte(0)
+        emit_u16_le(1)
+        emit_u64_le(0)
+        emit_u64_le(0)
+        text_sec_sym = local_count
+        local_count = local_count + 1
+    }
+
     // Second pass: emit GLOBAL functions (main)
     if main_fn_idx != 0xFFFFFFFF {
         uint64 no_ptr = name_offsets + main_fn_idx * 8
@@ -20089,7 +20922,7 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // --- Emit .rela.text section content ---
     if has_relocs != 0 {
         uint64 ri = 0
-        while ri < rela_count {
+        while ri < extern_call_count {
             uint64 re = extern_call_sites + ri * 16
             uint32 rco = 0
             unsafe { *(re as uint32) -> rco }
@@ -20114,6 +20947,47 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
                 emit_u64_le(0xFFFFFFFFFFFFFFFC)
             }
             ri = ri + 1
+        }
+        uint64 sfi = 0
+        while static_rel_n > 0 && sfi < static_fixup_count {
+            uint64 sfe = static_fixups + sfi * 8
+            uint32 sf_code = 0
+            unsafe { *(sfe as uint32) -> sf_code }
+            uint64 sfe4 = sfe + 4
+            uint32 sf_data = 0
+            unsafe { *(sfe4 as uint32) -> sf_data }
+            uint64 wsc = sf_code
+            uint64 wsd = sf_data
+            if arch == 1 {
+                emit_u64_le(wsc)                               // ADRP
+                emit_u64_le((data_sec_sym << 32) | 275)        // R_AARCH64_ADR_PREL_PG_HI21
+                emit_u64_le(wsd)
+                uint64 lo_p = blob + wsc + 4
+                uint32 lo_insn = 0
+                unsafe { *(lo_p as uint32) -> lo_insn }
+                uint64 lo_type = 286                           // R_AARCH64_LDST64_ABS_LO12_NC
+                if (lo_insn & 0xFF800000) == 0x91000000 { lo_type = 277 }   // ADD (imm) -> ADD_ABS_LO12_NC
+                emit_u64_le(wsc + 4)
+                emit_u64_le((data_sec_sym << 32) | lo_type)
+                emit_u64_le(wsd)
+            } else {
+                emit_u64_le(wsc)                               // disp32 field
+                emit_u64_le((data_sec_sym << 32) | 2)          // R_X86_64_PC32
+                emit_u64_le(wsd - 4)
+            }
+            sfi = sfi + 1
+        }
+        uint64 pci = 0
+        while pc_rel_n > 0 && pci < a64_pc_count() {
+            uint64 pcs = a64_pc_site(pci)
+            uint64 pct = a64_pc_target(pci)
+            emit_u64_le(pcs)
+            emit_u64_le((text_sec_sym << 32) | 275)         // R_AARCH64_ADR_PREL_PG_HI21
+            emit_u64_le(pct)
+            emit_u64_le(pcs + 4)
+            emit_u64_le((text_sec_sym << 32) | 277)         // R_AARCH64_ADD_ABS_LO12_NC
+            emit_u64_le(pct)
+            pci = pci + 1
         }
     }
 
@@ -20217,6 +21091,97 @@ fn emit_elf_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
 }
 
+// #298/#299 (Mach-O arm64): the symbol a __text reference (a string literal or
+// fn_addr) is relocated against: the function symbol at or before `target`,
+// with mo_text_ref_addend = target - that function's offset. Apple's linker
+// refuses a relocation against ltmp0 when a function symbol shares its
+// address ("invalid r_symbolnum"; ld64.lld accepts it), so __text references
+// name a real symbol plus an offset, as clang's do. Symbol order is the
+// writer's: locals (non-main, non-@export), the ltmp symbols, the @export
+// functions, then main. Returns 0xFFFFFFFF when no function precedes target.
+static uint64 mo_text_ref_addend = 0
+fn macho_a64_text_ref_sym(uint64 target, uint64 nlocal, uint64 main_fn_idx) -> uint64 {
+    uint64 best = 0xFFFFFFFF
+    uint64 best_off = 0
+    uint64 i = 0
+    while i < fn_count {
+        uint64 fe = fn_table + i * 8 + 4
+        uint32 co = 0
+        unsafe { *(fe as uint32) -> co }
+        uint64 wco = co
+        if wco <= target && (best == 0xFFFFFFFF || wco >= best_off) {
+            best = i
+            best_off = wco
+        }
+        i = i + 1
+    }
+    if best == 0xFFFFFFFF { return 0xFFFFFFFF }
+    mo_text_ref_addend = target - best_off
+    uint64 nloc = 0
+    uint64 nexp = 0
+    uint64 j = 0
+    while j < best {
+        uint64 je = fn_table + j * 8
+        uint32 jt = 0
+        unsafe { *(je as uint32) -> jt }
+        uint64 wjt = jt
+        if j != main_fn_idx {
+            if export_fn_is_exported(wjt) != 0 { nexp = nexp + 1 } else { nloc = nloc + 1 }
+        }
+        j = j + 1
+    }
+    uint64 be = fn_table + best * 8
+    uint32 bt = 0
+    unsafe { *(be as uint32) -> bt }
+    uint64 wbt = bt
+    if best == main_fn_idx {
+        uint64 nall = 0
+        uint64 k = 0
+        while k < fn_count {
+            uint64 ke = fn_table + k * 8
+            uint32 kt = 0
+            unsafe { *(ke as uint32) -> kt }
+            uint64 wkt = kt
+            if k != main_fn_idx && export_fn_is_exported(wkt) != 0 { nall = nall + 1 }
+            k = k + 1
+        }
+        return nlocal + nall
+    }
+    if export_fn_is_exported(wbt) != 0 { return nlocal + nexp }
+    return nloc
+}
+
+// #345 (Mach-O arm64): ARM64_RELOC_ADDEND carries a signed 24-bit addend, so a
+// reference never names a symbol more than MO_ADDEND_SPAN bytes before its
+// target. Past that, the writer adds a local symbol: a __data label at every
+// MO_ADDEND_SPAN boundary a static reference needs (_krd<offset>), and a label
+// at the exact __text target of a far string or fn_addr (_krt<offset>).
+// mo_extra holds (section 1 = __text / 2 = __data, offset) per added symbol.
+static uint64 mo_extra = 0
+static uint64 mo_extra_count = 0
+fn mo_extra_find(uint64 sect, uint64 off) -> uint64 {
+    uint64 i = 0
+    while i < mo_extra_count {
+        uint64 e = mo_extra + i * 16
+        uint64 es = 0
+        unsafe { *(e as uint64) -> es }
+        uint64 e8 = e + 8
+        uint64 eo = 0
+        unsafe { *(e8 as uint64) -> eo }
+        if es == sect && eo == off { return i }
+        i = i + 1
+    }
+    return 0xFFFFFFFF
+}
+fn mo_extra_add(uint64 sect, uint64 off) {
+    if mo_extra_find(sect, off) != 0xFFFFFFFF { return }
+    uint64 e = mo_extra + mo_extra_count * 16
+    unsafe { *(e as uint64) = sect }
+    uint64 e8 = e + 8
+    unsafe { *(e8 as uint64) = off }
+    mo_extra_count = mo_extra_count + 1
+}
+
 // ---------------------------------------------------------------------------
 // Mach-O relocatable (MH_OBJECT) emission — macOS .o files
 // Layout:
@@ -20248,14 +21213,81 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     out_len = 0
 
-    // Merge text+data into one section (we use the same trick as ELF).
-    uint64 section_size = text_len + data_len
+    // #301: statics get their own __DATA,__data section at address text_len
+    // (= data_start, so the x86_64 displacements baked against the blob stay
+    // right), reached through relocations: x86_64 a section-relative
+    // X86_64_RELOC_SIGNED per site; arm64 ARM64_RELOC_PAGE21 + PAGEOFF12
+    // against a section-start local symbol (ltmp0 / ltmp1) with
+    // ARM64_RELOC_ADDEND, as the LLVM assembler writes them. arm64 string
+    // and fn_addr pairs (#298/#299) get the same pair against the function
+    // symbol at or before their target (macho_a64_text_ref_sym), not ltmp0.
+    uint64 section_size = text_len
+    uint64 has_data = 0
+    if data_len > 0 { has_data = 1 }
+    uint64 n_sfix = 0
+    if has_data != 0 { n_sfix = static_fixup_count }
+    uint64 n_pc = 0
+    if arch == 1 { n_pc = a64_pc_count() }
+    uint64 n_ltmp = 0
+    if arch == 1 && n_pc > 0 { n_ltmp = 1 }
+    if arch == 1 && n_sfix > 0 { n_ltmp = 2 }
+    if arch == 1 {
+        uint64 zi = 0
+        while zi < n_sfix + n_pc {
+            uint64 zsite = 0
+            if zi < n_sfix {
+                uint64 zfe = static_fixups + zi * 8
+                uint32 zc = 0
+                unsafe { *(zfe as uint32) -> zc }
+                zsite = zc
+            } else {
+                zsite = a64_pc_site(zi - n_sfix)
+            }
+            uint64 zp = blob + zsite
+            uint32 zw = 0
+            unsafe { *(zp as uint32) -> zw }
+            uint32 zw1 = zw & 0x9F00001F
+            unsafe { *(zp as uint32) = zw1 }
+            uint64 zp2 = zp + 4
+            uint32 zw2 = 0
+            unsafe { *(zp2 as uint32) -> zw2 }
+            uint32 zw3 = zw2 & 0xFFC003FF
+            unsafe { *(zp2 as uint32) = zw3 }
+            zi = zi + 1
+        }
+    }
+
+    // #345: the extra local symbols a far arm64 reference needs (mo_extra_add):
+    // a __data label at each 4 MiB boundary a static reference lies past, a
+    // __text label at a string or fn_addr target 4 MiB or more past the
+    // function symbol before it (or with none before it). The 4 MiB step keeps
+    // every ARM64_RELOC_ADDEND well inside its signed 24 bits.
+    mo_extra_count = 0
+    if arch == 1 {
+        mo_extra = cg_alloc((n_sfix + n_pc) * 16 + 16)
+        uint64 mxi = 0
+        while mxi < n_sfix + n_pc {
+            if mxi < n_sfix {
+                uint64 mxe = static_fixups + mxi * 8 + 4
+                uint32 mxd = 0
+                unsafe { *(mxe as uint32) -> mxd }
+                uint64 wmxd = mxd
+                uint64 mxchunk = wmxd / 0x400000
+                if mxchunk != 0 { mo_extra_add(2, mxchunk * 0x400000) }
+            } else {
+                uint64 mxt = a64_pc_target(mxi - n_sfix)
+                uint64 mxs = macho_a64_text_ref_sym(mxt, 0, 0xFFFFFFFF)
+                if mxs == 0xFFFFFFFF || mo_text_ref_addend >= 0x400000 { mo_extra_add(1, mxt) }
+            }
+            mxi = mxi + 1
+        }
+    }
 
     // Build string table:
     //   idx 0: \0 (null)
     //   idx 1: _<fn_name>\0 for each local/main
     //   idx N: _<extern_name>\0 for each extern
-    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes())
+    uint64 strtab_buf = cg_alloc(reloc_strtab_bytes() + mo_extra_count * 16)
     uint64 strtab_len = 1
     uint64 sb0 = strtab_buf
     uint8 nul = 0
@@ -20333,14 +21365,82 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         }
     }
 
+    uint64 ltmp0_str = strtab_len
+    if n_ltmp > 0 {
+        uint64 lt = 0
+        while lt < 2 {
+            uint64 lp0 = strtab_buf + strtab_len
+            uint8 c_l = 108
+            unsafe { *(lp0 as uint8) = c_l }
+            uint64 lp1 = lp0 + 1
+            uint8 c_t = 116
+            unsafe { *(lp1 as uint8) = c_t }
+            uint64 lp2 = lp0 + 2
+            uint8 c_m = 109
+            unsafe { *(lp2 as uint8) = c_m }
+            uint64 lp3 = lp0 + 3
+            uint8 c_p = 112
+            unsafe { *(lp3 as uint8) = c_p }
+            uint64 lp4 = lp0 + 4
+            uint8 c_d = 48 + lt
+            unsafe { *(lp4 as uint8) = c_d }
+            uint64 lp5 = lp0 + 5
+            unsafe { *(lp5 as uint8) = nul }
+            strtab_len = strtab_len + 6
+            lt = lt + 1
+        }
+    }
+
+    // #345: _krt<offset> (a __text label) / _krd<offset> (a __data label),
+    // the offset in eight hex digits; 13 bytes each with the NUL.
+    uint64 mo_extra_str = strtab_len
+    uint64 mxn = 0
+    while mxn < mo_extra_count {
+        uint64 mxne = mo_extra + mxn * 16
+        uint64 mxns = 0
+        unsafe { *(mxne as uint64) -> mxns }
+        uint64 mxne8 = mxne + 8
+        uint64 mxno = 0
+        unsafe { *(mxne8 as uint64) -> mxno }
+        uint64 mxp = strtab_buf + strtab_len
+        uint8 mc_u = 95
+        unsafe { *(mxp as uint8) = mc_u }
+        uint64 mxp1 = mxp + 1
+        uint8 mc_k = 107
+        unsafe { *(mxp1 as uint8) = mc_k }
+        uint64 mxp2 = mxp + 2
+        uint8 mc_r = 114
+        unsafe { *(mxp2 as uint8) = mc_r }
+        uint64 mxp3 = mxp + 3
+        uint8 mc_s = 116
+        if mxns == 2 { mc_s = 100 }
+        unsafe { *(mxp3 as uint8) = mc_s }
+        uint64 mxh = 0
+        while mxh < 8 {
+            uint64 nib = (mxno >> ((7 - mxh) * 4)) & 15
+            uint8 hc = 48 + nib
+            if nib >= 10 { hc = 87 + nib }
+            uint64 mxph = mxp + 4 + mxh
+            unsafe { *(mxph as uint8) = hc }
+            mxh = mxh + 1
+        }
+        uint64 mxp12 = mxp + 12
+        unsafe { *(mxp12 as uint8) = nul }
+        strtab_len = strtab_len + 13
+        mxn = mxn + 1
+    }
+
     // Layout offsets
     uint64 hdr_size = 288  // mach_header + LC_SEGMENT_64 + LC_SYMTAB + LC_DYSYMTAB
+    if has_data != 0 { hdr_size = 288 + 80 }
     uint64 text_off = hdr_size
-    uint64 text_end = text_off + section_size
+    uint64 text_end = text_off + section_size + data_len
     // Align to 8
     uint64 pad_text = (8 - (text_end & 7)) & 7
     uint64 reloc_off = text_end + pad_text
-    uint64 nreloc = extern_call_count
+    uint64 n_srel = n_sfix
+    if arch == 1 { n_srel = (n_sfix + n_pc) * 4 }
+    uint64 nreloc = extern_call_count + n_srel
     uint64 reloc_end = reloc_off + nreloc * 8
     uint64 sym_count = 0
     if main_fn_idx != 0xFFFFFFFF { sym_count = 1 }
@@ -20348,14 +21448,19 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Add local (non-main) functions as N_SECT (not strictly needed but keeps parity)
     uint64 local_sym_count = fn_count - sym_count + extern_fn_count
     // Actually, we emit: locals first (non-main fns), then extdef (main), then undef (externs).
-    uint64 nlocal = 0
-    if main_fn_idx != 0xFFFFFFFF {
-        nlocal = fn_count - 1
-    } else {
-        nlocal = fn_count
-    }
+    // #296 (Mach-O side): main and every @export function are external.
     uint64 nextdef = 0
-    if main_fn_idx != 0xFFFFFFFF { nextdef = 1 }
+    uint64 xfi = 0
+    while xfi < fn_count {
+        uint64 xfe = fn_table + xfi * 8
+        uint32 xft = 0
+        unsafe { *(xfe as uint32) -> xft }
+        uint64 wxft = xft
+        if xfi == main_fn_idx || export_fn_is_exported(wxft) != 0 { nextdef = nextdef + 1 }
+        xfi = xfi + 1
+    }
+    uint64 nlocal = fn_count - nextdef + n_ltmp + mo_extra_count
+    uint64 ltmp_base = fn_count - nextdef
     uint64 nundef = extern_fn_count
     uint64 total_syms = nlocal + nextdef + nundef
     uint64 symtab_off = reloc_end
@@ -20373,23 +21478,23 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     emit_u32_le(1)                   // MH_OBJECT
     emit_u32_le(3)                   // ncmds
-    emit_u32_le(152 + 24 + 80)       // sizeofcmds = 256
+    emit_u32_le(152 + 80 * has_data + 24 + 80)   // sizeofcmds
     emit_u32_le(0x2000)              // MH_SUBSECTIONS_VIA_SYMBOLS
     emit_u32_le(0)                   // reserved
 
     // --- LC_SEGMENT_64 (72 header + 80 section = 152) ---
     emit_u32_le(0x19)                // LC_SEGMENT_64
-    emit_u32_le(152)                 // cmdsize
+    emit_u32_le(152 + 80 * has_data) // cmdsize
     // segname: empty (16 bytes of zero)
     uint64 pi = 0
     while pi < 16 { emit_byte(0); pi = pi + 1 }
     emit_u64_le(0)                   // vmaddr
-    emit_u64_le(section_size)        // vmsize
+    emit_u64_le(section_size + data_len)  // vmsize
     emit_u64_le(text_off)            // fileoff
-    emit_u64_le(section_size)        // filesize
+    emit_u64_le(section_size + data_len)  // filesize
     emit_u32_le(7)                   // maxprot
     emit_u32_le(7)                   // initprot
-    emit_u32_le(1)                   // nsects
+    emit_u32_le(1 + has_data)        // nsects
     emit_u32_le(0)                   // flags
 
     // Section: __text,__TEXT
@@ -20411,6 +21516,23 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     emit_u32_le(nreloc)              // nreloc
     emit_u32_le(0x80000400)          // S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS
     emit_u32_le(0); emit_u32_le(0); emit_u32_le(0)  // reserved
+    if has_data != 0 {
+        // Section: __data,__DATA
+        emit_byte(95); emit_byte(95); emit_byte(100); emit_byte(97)
+        emit_byte(116); emit_byte(97); emit_byte(0); emit_byte(0)
+        emit_u64_le(0)
+        emit_byte(95); emit_byte(95); emit_byte(68); emit_byte(65)
+        emit_byte(84); emit_byte(65); emit_byte(0); emit_byte(0)
+        emit_u64_le(0)
+        emit_u64_le(section_size)        // addr = data_start
+        emit_u64_le(data_len)            // size
+        emit_u32_le(text_off + section_size)  // offset
+        emit_u32_le(3)                   // align = 2^3
+        emit_u32_le(0)                   // reloff
+        emit_u32_le(0)                   // nreloc
+        emit_u32_le(0)                   // S_REGULAR
+        emit_u32_le(0); emit_u32_le(0); emit_u32_le(0)
+    }
 
     // --- LC_SYMTAB (24 bytes) ---
     emit_u32_le(2)                   // LC_SYMTAB
@@ -20438,7 +21560,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
 
     // --- Section content ---
     mi = 0
-    while mi < section_size {
+    while mi < section_size + data_len {
         uint64 p = blob + mi
         uint64 bv = 0
         unsafe { *(p as uint8) -> bv }
@@ -20454,7 +21576,7 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Symbol index for externs starts at nlocal + nextdef.
     uint64 undef_base = nlocal + nextdef
     uint64 ri = 0
-    while ri < nreloc {
+    while ri < extern_call_count {
         uint64 re = extern_call_sites + ri * 16
         uint32 rco = 0
         unsafe { *(re as uint32) -> rco }
@@ -20476,12 +21598,71 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         emit_u32_le(info)
         ri = ri + 1
     }
+    uint64 sr = 0
+    while sr < n_sfix + n_pc {
+        uint64 rsite = 0
+        uint64 rtarget = 0
+        uint64 rsec = 1                  // ltmp index: 0 = __text, 1 = __data
+        uint64 rsecond = 4               // ARM64_RELOC_PAGEOFF12
+        if sr < n_sfix {
+            uint64 rfe = static_fixups + sr * 8
+            uint32 rc = 0
+            unsafe { *(rfe as uint32) -> rc }
+            uint64 rfe4 = rfe + 4
+            uint32 rd = 0
+            unsafe { *(rfe4 as uint32) -> rd }
+            rsite = rc
+            rtarget = rd
+        } else {
+            rsite = a64_pc_site(sr - n_sfix)
+            rtarget = a64_pc_target(sr - n_sfix)
+            rsec = 0
+        }
+        if arch == 0 {
+            emit_u32_le(rsite)
+            // symbolnum = section ordinal 2, pcrel, length 2, extern 0, X86_64_RELOC_SIGNED (1)
+            emit_u32_le(2 | (1 << 24) | (2 << 25) | (1 << 28))
+        } else {
+            uint64 lsym = ltmp_base + rsec
+            if rsec == 0 {
+                uint64 tsym = macho_a64_text_ref_sym(rtarget, nlocal, main_fn_idx)
+                if tsym != 0xFFFFFFFF && mo_text_ref_addend < 0x400000 {
+                    lsym = tsym
+                    rtarget = mo_text_ref_addend
+                } else {
+                    // #345: a far (or function-less) __text target: its own label
+                    lsym = ltmp_base + n_ltmp + mo_extra_find(1, rtarget)
+                    rtarget = 0
+                }
+            } else {
+                uint64 rchunk = rtarget / 0x400000
+                if rchunk != 0 {
+                    // #345: a static 4 MiB or more into __data: the label at its 4 MiB boundary
+                    lsym = ltmp_base + n_ltmp + mo_extra_find(2, rchunk * 0x400000)
+                    rtarget = rtarget - rchunk * 0x400000
+                }
+            }
+            emit_u32_le(rsite)
+            emit_u32_le((rtarget & 0xFFFFFF) | (2 << 25) | (10 << 28))     // ARM64_RELOC_ADDEND
+            emit_u32_le(rsite)
+            emit_u32_le(lsym | (1 << 24) | (2 << 25) | (1 << 27) | (3 << 28))  // ARM64_RELOC_PAGE21
+            emit_u32_le(rsite + 4)
+            emit_u32_le((rtarget & 0xFFFFFF) | (2 << 25) | (10 << 28))     // ARM64_RELOC_ADDEND
+            emit_u32_le(rsite + 4)
+            emit_u32_le(lsym | (2 << 25) | (1 << 27) | (rsecond << 28))      // ARM64_RELOC_PAGEOFF12
+        }
+        sr = sr + 1
+    }
 
     // --- nlist_64 symbol table ---
     // 1) Locals: all non-main functions (N_SECT | external=0)
     uint64 sfi = 0
     while sfi < fn_count {
-        if sfi != main_fn_idx {
+        uint64 sfe0 = fn_table + sfi * 8
+        uint32 sft0 = 0
+        unsafe { *(sfe0 as uint32) -> sft0 }
+        uint64 wsft0 = sft0
+        if sfi != main_fn_idx && export_fn_is_exported(wsft0) == 0 {
             uint64 fop2 = fn_str_offs + sfi * 8
             uint64 so = 0
             unsafe { *(fop2 as uint64) -> so }
@@ -20498,7 +21679,54 @@ fn emit_macho_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         }
         sfi = sfi + 1
     }
-    // 2) Extdef: main
+    // ltmp0 (__text start), ltmp1 (__data start): relocation targets
+    uint64 ltn = 0
+    while ltn < n_ltmp {
+        emit_u32_le(ltmp0_str + ltn * 6)
+        emit_byte(0x0E)
+        emit_byte(1 + ltn)
+        emit_u16_le(0)
+        if ltn == 0 { emit_u64_le(0) } else { emit_u64_le(section_size) }
+        ltn = ltn + 1
+    }
+    // #345: the far-reference labels, right after the ltmp symbols
+    uint64 mxs2 = 0
+    while mxs2 < mo_extra_count {
+        uint64 mxe2 = mo_extra + mxs2 * 16
+        uint64 mxsect = 0
+        unsafe { *(mxe2 as uint64) -> mxsect }
+        uint64 mxe28 = mxe2 + 8
+        uint64 mxoff = 0
+        unsafe { *(mxe28 as uint64) -> mxoff }
+        emit_u32_le(mo_extra_str + mxs2 * 13)
+        emit_byte(0x0E)
+        emit_byte(mxsect)
+        emit_u16_le(0)
+        if mxsect == 2 { emit_u64_le(section_size + mxoff) } else { emit_u64_le(mxoff) }
+        mxs2 = mxs2 + 1
+    }
+    // 2) Extdef: every @export function, then main
+    uint64 efi = 0
+    while efi < fn_count {
+        uint64 efe = fn_table + efi * 8
+        uint32 eft = 0
+        unsafe { *(efe as uint32) -> eft }
+        uint64 weft = eft
+        if efi != main_fn_idx && export_fn_is_exported(weft) != 0 {
+            uint64 efo = fn_str_offs + efi * 8
+            uint64 eso = 0
+            unsafe { *(efo as uint64) -> eso }
+            emit_u32_le(eso)
+            emit_byte(0x0F)
+            emit_byte(1)
+            emit_u16_le(0)
+            uint64 efe4 = efe + 4
+            uint32 ecoff = 0
+            unsafe { *(efe4 as uint32) -> ecoff }
+            emit_u64_le(ecoff)
+        }
+        efi = efi + 1
+    }
     if main_fn_idx != 0xFFFFFFFF {
         uint64 fop3 = fn_str_offs + main_fn_idx * 8
         uint64 so2 = 0
@@ -20600,7 +21828,46 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     }
     out_len = 0
 
-    uint64 section_size = text_len + data_len
+    // #149: statics go in their own writable .data section (data_len > 0),
+    // reached through relocations against one STATIC symbol per reference
+    // (value = the target's offset in its section, so every addend is 0:
+    // COFF addends are implicit and live in the instruction fields).
+    uint64 section_size = text_len
+    uint64 has_data = 0
+    if data_len > 0 { has_data = 1 }
+    uint64 n_sfix = 0
+    if has_data != 0 { n_sfix = static_fixup_count }
+    uint64 n_pc = 0
+    if arch == 1 { n_pc = a64_pc_count() }
+    uint64 rel_per = 1
+    if arch == 1 { rel_per = 2 }
+    // arm64: clear the immediates of every relocated ADRP and its ADD/LDR/STR
+    // (lld-link adds the existing immediate as the addend)
+    if arch == 1 {
+        uint64 zi = 0
+        while zi < n_sfix + n_pc {
+            uint64 zsite = 0
+            if zi < n_sfix {
+                uint64 zfe = static_fixups + zi * 8
+                uint32 zc = 0
+                unsafe { *(zfe as uint32) -> zc }
+                zsite = zc
+            } else {
+                zsite = a64_pc_site(zi - n_sfix)
+            }
+            uint64 zp = blob + zsite
+            uint32 zw = 0
+            unsafe { *(zp as uint32) -> zw }
+            uint32 zw1 = zw & 0x9F00001F
+            unsafe { *(zp as uint32) = zw1 }
+            uint64 zp2 = zp + 4
+            uint32 zw2 = 0
+            unsafe { *(zp2 as uint32) -> zw2 }
+            uint32 zw3 = zw2 & 0xFFC003FF
+            unsafe { *(zp2 as uint32) = zw3 }
+            zi = zi + 1
+        }
+    }
 
     // Symbol order: non-main fns (STATIC), main (EXTERNAL), externs (EXTERNAL UNDEF)
     uint64 main_fn_idx = 0xFFFFFFFF
@@ -20620,6 +21887,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     uint64 uw_tabs = uw_coff_wanted()
     uint64 nsect = 1
     if uw_tabs != 0 { nsect = 3 }
+    uint64 data_secno = nsect + 1          // appended last: .pdata/.xdata keep their numbers
     uint64 sym_text = total_syms             // section symbols follow every existing one
     uint64 sym_xdata = total_syms + 4
 
@@ -20756,9 +22024,10 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // Layout
     uint64 hdr_size = 20
     uint64 sec_hdr_size = 40
-    uint64 text_off = hdr_size + sec_hdr_size * nsect  // 60, or 140 with .pdata/.xdata
-    uint64 nreloc = extern_call_count
-    uint64 reloc_off = text_off + section_size
+    uint64 text_off = hdr_size + sec_hdr_size * (nsect + has_data)  // 60, or 140 with .pdata/.xdata (+40 with .data)
+    uint64 nreloc = extern_call_count + (n_sfix + n_pc) * rel_per
+    uint64 data_raw_off = text_off + section_size
+    uint64 reloc_off = data_raw_off + data_len
     uint64 reloc_size = nreloc * 10
     uint64 symtab_off = reloc_off + reloc_size
     uint64 stroff = symtab_off + sym_size  // string table comes right after
@@ -20769,14 +22038,12 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     } else {
         emit_u16_le(0xAA64)          // IMAGE_FILE_MACHINE_ARM64
     }
-    emit_u16_le(nsect)               // NumberOfSections
+    emit_u16_le(nsect + has_data)    // NumberOfSections
     emit_u32_le(0)                   // TimeDateStamp
     emit_u32_le(symtab_off)          // PointerToSymbolTable (patched below with tables)
-    if uw_tabs != 0 {
-        emit_u32_le(total_syms + 6)  // + .text/.pdata/.xdata symbols, one aux each
-    } else {
-        emit_u32_le(total_syms)      // NumberOfSymbols
-    }
+    uint64 extra_base = total_syms
+    if uw_tabs != 0 { extra_base = total_syms + 6 }
+    emit_u32_le(extra_base + n_sfix + n_pc)   // NumberOfSymbols (+ one per relocated reference)
     emit_u16_le(0)                   // SizeOfOptionalHeader
     emit_u16_le(0)                   // Characteristics
 
@@ -20798,10 +22065,22 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // .pdata at 60 and .xdata at 100: zero here, patched once their data is out
     uint64 zh = 0
     while zh < (nsect - 1) * 40 { emit_byte(0)  zh = zh + 1 }
+    if has_data != 0 {
+        emit_byte(46); emit_byte(100); emit_byte(97); emit_byte(116)   // ".data\0\0\0"
+        emit_byte(97); emit_byte(0); emit_byte(0); emit_byte(0)
+        emit_u32_le(0)                   // VirtualSize
+        emit_u32_le(0)                   // VirtualAddress
+        emit_u32_le(data_len)            // SizeOfRawData
+        emit_u32_le(data_raw_off)        // PointerToRawData
+        emit_u32_le(0)                   // PointerToRelocations
+        emit_u32_le(0)                   // PointerToLineNumbers
+        emit_u32_le(0)                   // NumberOfRelocations, NumberOfLineNumbers
+        emit_u32_le(0xC0400040)          // INITIALIZED_DATA | ALIGN_8BYTES | READ | WRITE
+    }
 
     // --- Section raw data ---
     ci = 0
-    while ci < section_size {
+    while ci < section_size + data_len {
         uint64 p = blob + ci
         uint64 bv = 0
         unsafe { *(p as uint8) -> bv }
@@ -20813,7 +22092,7 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
     // --- Relocations ---
     uint64 undef_base = fn_count
     uint64 ri = 0
-    while ri < nreloc {
+    while ri < extern_call_count {
         uint64 re = extern_call_sites + ri * 16
         uint32 rco = 0
         unsafe { *(re as uint32) -> rco }
@@ -20830,6 +22109,38 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_u16_le(3)           // IMAGE_REL_ARM64_BRANCH26
         }
         ri = ri + 1
+    }
+    uint64 xr = 0
+    while xr < n_sfix + n_pc {
+        uint64 xsite = 0
+        uint64 xsecond = 0
+        if xr < n_sfix {
+            uint64 xfe = static_fixups + xr * 8
+            uint32 xc = 0
+            unsafe { *(xfe as uint32) -> xc }
+            xsite = xc
+            if arch == 1 {
+                uint64 xip = blob + xsite + 4
+                uint32 xins = 0
+                unsafe { *(xip as uint32) -> xins }
+                xsecond = 7                                  // PAGEOFFSET_12L (LDR/STR X)
+                if (xins & 0xFF800000) == 0x91000000 { xsecond = 6 }   // ADD -> PAGEOFFSET_12A
+            }
+        } else {
+            xsite = a64_pc_site(xr - n_sfix)
+            xsecond = 6
+        }
+        emit_u32_le(xsite)
+        emit_u32_le(extra_base + xr)
+        if arch == 0 {
+            emit_u16_le(4)                                   // IMAGE_REL_AMD64_REL32
+        } else {
+            emit_u16_le(4)                                   // IMAGE_REL_ARM64_PAGEBASE_REL21
+            emit_u32_le(xsite + 4)
+            emit_u32_le(extra_base + xr)
+            emit_u16_le(xsecond)
+        }
+        xr = xr + 1
     }
 
     // --- #143 A13: .pdata + .xdata raw data, then the .pdata relocations ---
@@ -20891,8 +22202,11 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
             emit_u32_le(code_off)        // Value
             emit_u16_le(1)               // SectionNumber = 1
             emit_u16_le(0x20)            // Type = function
-            if wi == main_fn_idx {
-                emit_byte(2)             // EXTERNAL
+            uint32 wexp_tok = 0
+            unsafe { *(fentry as uint32) -> wexp_tok }
+            uint64 wexp = wexp_tok
+            if wi == main_fn_idx || export_fn_is_exported(wexp) != 0 {
+                emit_byte(2)             // EXTERNAL (main and every @export, #296)
             } else {
                 emit_byte(3)             // STATIC (internal)
             }
@@ -20911,6 +22225,30 @@ fn emit_coff_relocatable(uint64 text_len, uint64 data_len, uint64 arch) {
         coff_section_symbol(0x7865742E, 0x74, 1, section_size, nreloc)                 // ".text"
         coff_section_symbol(0x6164702E, 0x6174, 2, uw_pdata_dir_size, uw_coff_nrelocs(arch))  // ".pdata"
         coff_section_symbol(0x6164782E, 0x6174, 3, uw_xdata_vsize, 0)                 // ".xdata"
+    }
+    // #149: one STATIC symbol per relocated reference, "$krs" (.data) / "$krt" (.text)
+    uint64 xs = 0
+    while xs < n_sfix + n_pc {
+        uint64 xval = 0
+        uint64 xsec = 1
+        if xs < n_sfix {
+            uint64 xfe2 = static_fixups + xs * 8 + 4
+            uint32 xd = 0
+            unsafe { *(xfe2 as uint32) -> xd }
+            xval = xd
+            xsec = data_secno
+            emit_u32_le(0x73726B24)          // "$krs"
+        } else {
+            xval = a64_pc_target(xs - n_sfix)
+            emit_u32_le(0x74726B24)          // "$krt"
+        }
+        emit_u32_le(0)
+        emit_u32_le(xval)
+        emit_u16_le(xsec)
+        emit_u16_le(0)
+        emit_byte(3)                         // STATIC
+        emit_byte(0)
+        xs = xs + 1
     }
 
     // --- String table ---
@@ -20946,7 +22284,7 @@ static uint64 import_failed = 0
 // created yet therefore got a green build and no artifact.
 //
 // Checked HERE, not in codegen_write_output: main.kr:1967 (asm listing) and
-// main.kr:5697 (esp32 image) call this directly and bypass
+// main.kr:5698 (esp32 image) call this directly and bypass
 // codegen_write_output entirely. This is the one choke point every output
 // path shares, so a new writer cannot forget it.
 fn open_output_or_die(uint64 output_path) -> uint64 {

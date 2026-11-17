@@ -1,0 +1,14 @@
+struct Node {
+    u64 value
+    u64 next
+}
+fn idp(Node p) -> u64 { return p }
+fn main() {
+    Node n
+    n.value = 1234567
+    n.next = 5
+    u64 r = idp(n)
+    if r == 1234567 { exit(1) }
+    if r < 4096 { exit(2) }
+    exit(40)
+}

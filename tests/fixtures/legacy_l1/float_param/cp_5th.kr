@@ -1,0 +1,3 @@
+fn g3(uint64 a, uint64 b, uint64 c, f64 d, f64 e) -> uint64 { uint64 r = 0; while r < 1 { r = r + 1 } f64 y = d + e; return f64_to_int(y) + a + b + c }
+fn f() -> uint64 { uint64 fp = fn_addr("g3"); f64 d = 2.5; f64 e = 4.5; uint64 r = call_ptr(fp, 1, 2, 3, d, e); return r }
+fn main() { exit(f()) }

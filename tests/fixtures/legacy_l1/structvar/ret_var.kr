@@ -1,0 +1,15 @@
+struct Node {
+    u64 value
+    u64 next
+}
+fn mk() -> u64 {
+    Node n = alloc(16)
+    n.value = 7
+    n.next = 0
+    return n
+}
+fn main() {
+    u64 p = mk()
+    Node m = p
+    exit(m.value)
+}

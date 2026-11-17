@@ -1,0 +1,21 @@
+const uint64 C1 = 1
+fn h(uint64 a) -> uint64 { return (a != 0) + (a != 0) + (a != 0) + (a != 0) }
+fn f(uint64 a) -> uint64 {
+    uint64 i = 0
+    loop {
+        asm { "mov x21, x9" } in(a -> x9) clobbers(x21)
+        i = i + 1
+        if i > 0 { break }
+    }
+    if i != 1 { return 100 }
+    return 7
+}
+fn main() {
+    uint64 s = 0x5A5A
+    uint64 got = 0
+    asm { "mov x21, x9" } in(s -> x9) clobbers(x21)
+    uint64 z = f(11)
+    asm { "mov x9, x21" } out(x9 -> got)
+    if got != 0x5A5A { exit(120) }
+    exit(z)
+}

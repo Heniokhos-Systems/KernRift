@@ -4640,6 +4640,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // function, not a separate entry point, so this check runs before
     // either is reached.
     refuse_unresolved_externs(emit_mode_is_executable(emit_mode))
+    if arch == 2 && emit_mode == 3 { refuse_rv32_obj_struct_abi(root) }   // #307
 
     // IR dump: lower each function to IR and print, then exit early
     if emit_mode == 6 {
@@ -4759,7 +4760,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         // --emit=image: raw headerless flat binary. header_size = 0 FROM THE
         // START — the rv_raw shape (:3490-3494) — never truncation of an
         // emitted ELF. a64_compute_va maps file offset -> 0x400000 + offset
-        // (codegen_aarch64.kr:7172) and the ADRP page arithmetic is baked
+        // (codegen_aarch64.kr:7779) and the ADRP page arithmetic is baked
         // from that map, so chopping a 0x78-byte header off a finished ELF
         // shifts every offset by a non-page amount and leaves every baked
         // page_off 0x78 too large — the image boots to SILENCE at any
@@ -4919,7 +4920,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // 64 bytes at file offset 0, EMITTED BEFORE THE FUNCTION EMIT LOOP, and
     // that ordering is the entire design. a64_compute_va maps a file offset
     // to 0x400000 + offset with no notion of a header
-    // (codegen_aarch64.kr:7172), and every ADRP page computation is baked
+    // (codegen_aarch64.kr:7779), and every ADRP page computation is baked
     // from that map DURING codegen. Emitting the prefix first therefore moves
     // the payload and re-bakes the page arithmetic around it in one step, with
     // no VA-map change and not one line in codegen_aarch64.kr. Glue the same
@@ -5216,7 +5217,7 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
                     // codegen so no local stub/symbol is emitted; the call
                     // site records an R_RISCV_CALL_PLT relocation instead
                     // (mirror of gen_function/gen_function_a64's extern
-                    // early-return, codegen.kr:15102 / codegen_aarch64.kr:6375).
+                    // early-return, codegen.kr:15773 / codegen_aarch64.kr:6876).
                     uint32 rv_ann_flags = ast_data4(wchild)
                     uint64 rv_is_extern = rv_ann_flags & 8
                     // Raw mode already emitted the entry function at
@@ -5888,7 +5889,12 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
     // nonzero ("Invalid relocation target, existing value is nonzero"),
     // so the disp32 placeholders must stay 0. String-literal fixups are
     // still resolved (they're intra-.text and position-independent).
-    if emit_mode != 7 {
+    // An ELF relocatable (-c, x86_64/arm64) keeps its statics in a separate
+    // writable .data section and refers to them through relocations, like
+    // LKM output (#294), so the displacements are left 0 here.
+    uint64 elf_obj_data = 0
+    if emit_mode == 3 && (arch == 0 || arch == 1) && target_os != 1 { elf_obj_data = 1 }   // ELF and COFF (#149)
+    if emit_mode != 7 && elf_obj_data == 0 {
         if arch == 0 {
             resolve_static_fixups(data_start)
         } else if arch == 1 {
@@ -5920,16 +5926,16 @@ fn compile(uint64 input_path, uint64 output_path, uint64 arch, uint64 emit_mode)
         uint64 total_code = codegen_output_len()
         if arch == 2 {
             // riscv is Linux-ELF only — bypass the target_os Mach-O/COFF split.
-            emit_elf_relocatable_rv32(total_code, 0)
+            emit_elf_relocatable_rv32(data_start, total_code - data_start)
         } else if arch == 3 {
             xtensa_nyi("relocatable (.o) emission")
         } else if target_os == 1 {
-            emit_macho_relocatable(total_code, 0, arch)
+            emit_macho_relocatable(data_start, total_code - data_start, arch)
         } else if target_os == 2 {
             uw_maybe_write_listing(uw_test_listing_path, arch, text_start, source)
-            emit_coff_relocatable(total_code, 0, arch)
+            emit_coff_relocatable(data_start, total_code - data_start, arch)
         } else {
-            emit_elf_relocatable(total_code, 0, arch)
+            emit_elf_relocatable(data_start, total_code - data_start, arch)
         }
         codegen_write_output(output_path)
 

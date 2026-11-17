@@ -10615,6 +10615,949 @@ for LCS_P in "x86_64|xw.kr|19" "arm64|aw.kr|8"; do
 done
 rm -rf $LCS_D
 
+# --- L1: legacy backend correctness (#247 #291 #248 #293 #294 #149 #295-#303
+# #305-#310 #312 #314, and L1's own #315 part) --------------------------------
+# Runtime rows run each program in several configurations and require the same
+# exit status from every one; the default backend (IR) is the oracle, so a row
+# checks that --legacy (and -c / --emit=obj / fat slices / Windows) agree with
+# it. Every want value is below 128, so a program killed by a signal (status
+# 128 + n) can never pass. Fixtures: tests/fixtures/legacy_l1 (programs) and
+# tests/fixtures/obj_rows (object-file sides and their C callers, shared with
+# the macOS / Windows CI steps). Every row below was red on krc 2.11.0 and on
+# main@A1 (the base of L1) unless it is marked "control" or "guard".
+L1_D=$SUITE_TMP/l1rows; rm -rf $L1_D; mkdir -p $L1_D
+L1_FX="$DIR/fixtures/legacy_l1"
+L1_OR="$DIR/fixtures/obj_rows"
+L1_WINE=$(wine_path)
+l1_ok() { PASS=$((PASS + 1)); echo "  $1: PASS ($2)"; }
+l1_bad() { echo "FAIL: $1 ($2)"; FAIL=$((FAIL + 1)); }
+# l1_need ROW CFG...: 0 when every configuration CFG (below) can be built and
+# run on this host; otherwise ROW (already in TOTAL) is skipped and 1 returned.
+l1_need() {
+    local row=$1 c; shift
+    for c in "$@"; do
+        case ${c%%:*} in
+            x|xf) arch_runner x86_64 || { skip_row $row "$ARCH_NORUN"; return 1; } ;;
+            a|af) arch_runner arm64 || { skip_row $row "$ARCH_NORUN"; return 1; } ;;
+            r) [ -n "$QEMU_RV32" ] || { skip_row $row "no qemu-riscv32"; return 1; } ;;
+            w) [ -n "$L1_WINE" ] || { wine_na $row; return 1; } ;;
+        esac
+        case ${c%%:*} in
+            xf|af) command -v python3 > /dev/null 2>&1 || { skip_row $row "needs python3 (tests/helpers/krbo_slice.py)"; return 1; } ;;
+        esac
+    done
+    return 0
+}
+# l1_status RUNNER... BIN -> the exit status of BIN run under RUNNER (no
+# runner on the host's own arch); TIMEOUT when the limit fired, SIG<n>(<s>)
+# when a signal killed it (status s = 128 + n). No L1 want is 124 or above.
+l1_status() {
+    local r t0=$SECONDS
+    r=$( ( ulimit -c 0; timeout -k 5 "$RUN_TEST_TIMEOUT" "$@" < /dev/null > /dev/null 2>&1; echo $? ) 2> /dev/null )
+    if rb_timed_out "$r" $t0; then r="TIMEOUT($r)"
+    elif [ "$r" -ge 128 ] 2> /dev/null; then r="SIG$((r - 128))($r)"; fi
+    echo "$r"
+}
+# l1_exec CFG SRC -> the exit status of SRC built and run in configuration CFG,
+# CE(<first error line>) when it does not build. CFG = PLATFORM:MODE with
+# PLATFORM x (x86_64 Linux), a (arm64 Linux), r (riscv32 Linux), w (x86_64
+# Windows PE under $KR_WINE / wine), xf / af (the linux-x64 / linux-arm64 slice
+# of a --targets= build, tests/helpers/krbo_slice.py) and MODE IR, --O0 or
+# --legacy.
+l1_exec() {
+    local p=${1%%:*} m=${1#*:} src=$2 out=$L1_D/bin
+    [ "$m" = IR ] && m=""
+    case $p in w) out=$L1_D/bin.exe ;; xf|af) out=$L1_D/bin.krbo ;; esac
+    rm -f $L1_D/bin $L1_D/bin.exe $L1_D/bin.krbo
+    case $p in
+        x) set -- $KRC --arch=x86_64 ;;
+        a) set -- $KRC --arch=arm64 ;;
+        r) set -- $KRC --arch=riscv32 ;;
+        w) set -- $KRC --arch=x86_64 --target=windows --emit=pe ;;
+        xf) set -- "$KRC_RAW_CC" --targets=linux-x64 ;;
+        af) set -- "$KRC_RAW_CC" --targets=linux-arm64 ;;
+    esac
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" "$@" $m "$src" -o $out > $L1_D/ce 2>&1 || [ ! -f $out ]; then
+        printf 'CE(%s)' "$(grep -m1 error $L1_D/ce | cut -c1-140)"; return
+    fi
+    case $p in
+        xf) python3 -B "$DIR/helpers/krbo_slice.py" $out 1 $L1_D/bin 2> /dev/null || { printf 'CE(krbo_slice)'; return; } ;;
+        af) python3 -B "$DIR/helpers/krbo_slice.py" $out 2 $L1_D/bin 2> /dev/null || { printf 'CE(krbo_slice)'; return; } ;;
+    esac
+    case $p in
+        x|xf) chmod +x $L1_D/bin; arch_runner x86_64; l1_status $ARCH_RUNNER $L1_D/bin ;;
+        a|af) chmod +x $L1_D/bin; arch_runner arm64; l1_status $ARCH_RUNNER $L1_D/bin ;;
+        r) chmod +x $L1_D/bin; l1_status $QEMU_RV32 -R 0x20000000 $L1_D/bin ;;
+        w) ( cd $L1_D && l1_status $L1_WINE ./bin.exe ) ;;
+    esac
+}
+# l1_row ROW WANT "SRC..." CFG...: every SRC in every CFG must exit WANT; a
+# SRC written PATH@N must exit N instead.
+l1_row() {
+    local row=$1 want=$2 srcs=$3 got="" bad=0 c s r w
+    shift 3
+    TOTAL=$((TOTAL + 1))
+    l1_need $row "$@" || return
+    for s in $srcs; do
+        w=$want
+        case $s in *@*) w=${s##*@}; s=${s%@*} ;; esac
+        for c in "$@"; do
+            r=$(l1_exec $c $s)
+            got="$got $(basename $s .kr) $c=$r,"
+            [ "$r" = "$w" ] || bad=1
+        done
+    done
+    if [ $bad = 0 ]; then l1_ok $row "want $want:${got%,}"; else l1_bad $row "want $want:${got%,}"; fi
+}
+# l1_trio BASE WANT "SRC...": BASE_x86_64 and BASE_arm64 (IR, --O0, --legacy)
+# and <BASE>_windows_x86_64_wine (IR, --legacy).
+l1_trio() {
+    l1_row ${1}_x86_64 $2 "$3" x:IR x:--O0 x:--legacy
+    l1_row ${1}_arm64 $2 "$3" a:IR a:--O0 a:--legacy
+    l1_row ${1}_windows_x86_64_wine $2 "$3" w:IR w:--legacy
+}
+# l1_cc ROW ARCH: sets L1_CC (the C compiler + flags that link a freestanding
+# C caller with a KernRift -c object for ARCH and run here) and L1_RUN (the
+# runner); skips ROW (already in TOTAL) and returns 1 when this host cannot.
+# x86_64: cc on an x86_64 host; arm64: cc on an arm64 host, else clang + ld.lld
+# under qemu; riscv32: clang + ld.lld under qemu-riscv32.
+l1_cc() {
+    L1_RUN=""
+    case $2 in
+        x86_64)
+            if [ "$RUN_ARCH" != x86_64 ]; then skip_row $1 "RUN_ARCH=$RUN_ARCH, an x86_64 C caller"; return 1; fi
+            if ! command -v cc > /dev/null 2>&1; then skip_row $1 "no cc (links the -c object into a C caller)"; return 1; fi
+            L1_CC="cc -O1 -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -static" ;;
+        arm64)
+            if ! arch_runner arm64; then skip_row $1 "$ARCH_NORUN"; return 1; fi
+            L1_RUN=$ARCH_RUNNER
+            if [ "$RUN_ARCH" = arm64 ]; then
+                if ! command -v cc > /dev/null 2>&1; then skip_row $1 "no cc (links the -c object into a C caller)"; return 1; fi
+                L1_CC="cc -O1 -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -static"
+            else
+                if ! command -v clang > /dev/null 2>&1 || ! command -v ld.lld > /dev/null 2>&1; then
+                    skip_row $1 "clang and ld.lld needed (link the arm64 -c object into a C caller)"; return 1
+                fi
+                L1_CC="clang --target=aarch64-linux-gnu -O1 -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -static -fuse-ld=lld"
+            fi ;;
+        riscv32)
+            if [ -z "$QEMU_RV32" ]; then skip_row $1 "no qemu-riscv32"; return 1; fi
+            if ! command -v clang > /dev/null 2>&1 || ! command -v ld.lld > /dev/null 2>&1; then
+                skip_row $1 "clang and ld.lld needed (link the riscv32 -c object into a C caller)"; return 1
+            fi
+            L1_RUN=$QEMU_RV32
+            L1_CC="clang --target=riscv32-linux-gnu -march=rv32imac -O1 -ffreestanding -fno-stack-protector -fno-builtin -nostdlib -static -fuse-ld=lld" ;;
+    esac
+    return 0
+}
+# l1_cobj ROW ARCH WANT "KR..." CFILE...: each KR built with -c for ARCH and
+# linked with the C files (fixture paths); every program must exit WANT (a KR
+# written PATH@N: N).
+l1_cobj() {
+    local row=$1 a=$2 want=$3 krs=$4 got="" bad=0 kr r w
+    shift 4
+    TOTAL=$((TOTAL + 1))
+    l1_cc $row $a || return
+    for kr in $krs; do
+        w=$want
+        case $kr in *@*) w=${kr##*@}; kr=${kr%@*} ;; esac
+        rm -f $L1_D/o.o $L1_D/cp
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$a -c $kr -o $L1_D/o.o > $L1_D/err 2>&1 || [ ! -f $L1_D/o.o ]; then
+            r="CE($(grep -m1 error $L1_D/err | cut -c1-140))"
+        elif ! $L1_CC "$@" $L1_D/o.o -o $L1_D/cp > $L1_D/err 2>&1; then
+            r="LINK($(grep -m1 -i 'error\|undefined' $L1_D/err | cut -c1-140))"
+        else
+            r=$(l1_status $L1_RUN $L1_D/cp)
+        fi
+        got="$got $(basename $kr .kr)=$r,"
+        [ "$r" = "$w" ] || bad=1
+    done
+    if [ $bad = 0 ]; then l1_ok $row "-c + C caller, want $want:${got%,}"; else l1_bad $row "-c + C caller, want $want:${got%,}"; fi
+}
+# l1_win_tools: clang (x86_64-pc-windows-msvc / aarch64-pc-windows-msvc) and
+# lld-link link the COFF rows.
+l1_win_tools() { command -v clang > /dev/null 2>&1 && command -v lld-link > /dev/null 2>&1; }
+# l1_coff_link OBJ_KR OUT.exe CFLAGS...: OBJ_KR built --freestanding
+# --target=windows --emit=obj for x86_64, linked with the C file(s) of CFLAGS
+# by clang + lld-link (entry `start`, no CRT). L1_WHY says why it failed.
+l1_coff_link() {
+    local kr=$1 exe=$2
+    shift 2
+    rm -f $L1_D/k.obj $L1_D/c.obj $exe
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --freestanding --arch=x86_64 --target=windows --emit=obj $kr -o $L1_D/k.obj > $L1_D/err 2>&1 || [ ! -f $L1_D/k.obj ]; then
+        L1_WHY="krc --emit=obj failed: $(grep -m1 error $L1_D/err | cut -c1-140)"; return 1
+    fi
+    if ! clang --target=x86_64-pc-windows-msvc -O1 -ffreestanding -fno-stack-protector -fno-builtin "$@" -c -o $L1_D/c.obj > $L1_D/err 2>&1 \
+       || ! lld-link /nodefaultlib /entry:start /subsystem:console $L1_D/c.obj $L1_D/k.obj "/out:$exe" > $L1_D/err 2>&1; then
+        L1_WHY="link failed: $(grep -m1 -i 'error\|undefined' $L1_D/err | cut -c1-140)"; return 1
+    fi
+    return 0
+}
+# l1_coff ROW WANT KR CFLAGS...: the COFF object of KR with a C caller, run
+# under $KR_WINE / wine (natively in the N1 batch); must exit WANT.
+l1_coff() {
+    local row=$1 want=$2 kr=$3 got
+    shift 3
+    TOTAL=$((TOTAL + 1))
+    if [ -z "$L1_WINE" ]; then wine_na $row; return; fi
+    if ! l1_win_tools; then skip_row $row "clang and lld-link needed (link the COFF object into a C caller)"; return; fi
+    if ! l1_coff_link $kr $L1_D/c.exe "$@"; then l1_bad $row "$L1_WHY"; return; fi
+    got=$( cd $L1_D && l1_status $L1_WINE ./c.exe )
+    if [ "$got" = "$want" ]; then l1_ok $row "$(basename $kr) COFF + C caller exits $got"; else l1_bad $row "$(basename $kr) COFF + C caller: want $want, got $got"; fi
+}
+
+# #247: `loop { }` was While(Compare(IntLit, IntLit)) whose operator field held
+# the number 35 where every backend reads a token index, so the condition used
+# whatever operator token #35 of the file was. l1_loop_src SHAPE OP [TYPE]
+# [obj] writes a program whose token #35 is OP (the fourth OP of h): a correct
+# loop returns 7 (brk, cont, nest, ret, asmx = x86_64 asm in the body, asma =
+# arm64 asm); `obj` writes an @export f and no main (-c rows, C caller f(5)).
+# Red: 0 (nest: 1) wherever token #35 makes the condition false -- `!=`, `<`,
+# `>` everywhere, and any non-comparison token under --legacy / -c.
+l1_loop_src() {
+    local sh=$1 op=$2 t=${3:-uint64} body
+    printf 'const %s C1 = 1\n' $t
+    printf 'fn h(%s a) -> %s { return (a %s 0) + (a %s 0) + (a %s 0) + (a %s 0) }\n' $t $t "$op" "$op" "$op" "$op"
+    case $sh in
+        brk) body='    loop {
+        n = n + 1
+        if n == 7 { break }
+    }
+    return n' ;;
+        cont) body='    loop {
+        n = n + 1
+        if n < 7 { continue }
+        break
+    }
+    return n' ;;
+        nest) body='    uint64 i = 0
+    loop {
+        i = i + 1
+        uint64 j = 0
+        loop {
+            j = j + 1
+            n = n + 1
+            if j == 2 { break }
+        }
+        if i == 3 { break }
+    }
+    return n + 1' ;;
+        ret) body='    loop {
+        n = n + 1
+        if n == 7 { return n }
+    }' ;;
+        asmx) body='    uint64 m = 0
+    loop {
+        n = n + 1
+        asm { "mov rax, rcx" } in(n -> rcx) out(rax -> m)
+        if m == 7 { break }
+    }
+    return m' ;;
+        asma) body='    uint64 m = 0
+    loop {
+        n = n + 1
+        asm { "mov x0, x9" } in(n -> x9) out(x0 -> m)
+        if m == 7 { break }
+    }
+    return m' ;;
+    esac
+    body=${body//uint64/$t}
+    if [ "${4:-}" = obj ]; then
+        printf '@export\nfn f(%s a) -> %s {\n    %s n = a - 5\n%s\n}\n' $t $t $t "$body"
+    else
+        printf 'fn f(%s a) -> %s {\n    %s n = a - 5\n%s\n}\nfn main() { exit(f(5)) }\n' $t $t $t "$body"
+    fi
+}
+for L1_S in brk cont nest ret; do
+    l1_loop_src $L1_S '!=' > $L1_D/loop_$L1_S.kr
+    l1_row loop_tok35_${L1_S}_x86_64 7 $L1_D/loop_$L1_S.kr x:IR x:--O0 x:--legacy
+    l1_row loop_tok35_${L1_S}_arm64 7 $L1_D/loop_$L1_S.kr a:IR a:--O0 a:--legacy
+done
+l1_loop_src asmx '!=' > $L1_D/loop_asmx.kr
+l1_loop_src asma '!=' > $L1_D/loop_asma.kr
+l1_row loop_tok35_asm_x86_64 7 $L1_D/loop_asmx.kr x:IR x:--O0 x:--legacy
+l1_row loop_tok35_asm_arm64 7 $L1_D/loop_asma.kr a:IR a:--O0 a:--legacy
+# -c objects always use the legacy backends: the brk and asm shapes.
+l1_loop_src brk '!=' uint64 obj > $L1_D/loopo_brk.kr
+l1_loop_src asmx '!=' uint64 obj > $L1_D/loopo_asmx.kr
+l1_loop_src asma '!=' uint64 obj > $L1_D/loopo_asma.kr
+l1_cobj loop_tok35_obj_x86_64 x86_64 7 "$L1_D/loopo_brk.kr $L1_D/loopo_asmx.kr" "$L1_FX/c_one_x86_64.c"
+l1_cobj loop_tok35_obj_arm64 arm64 7 "$L1_D/loopo_brk.kr $L1_D/loopo_asma.kr" "$L1_FX/c_one_arm64.c"
+# Fat slices follow --legacy: the linux-x64 / linux-arm64 slice, IR and
+# --legacy ($KRC_RAW_CC: --targets= takes no --arch=).
+l1_row loop_tok35_fat_x86_64 7 $L1_D/loop_brk.kr xf:IR xf:--legacy
+l1_row loop_tok35_fat_arm64 7 $L1_D/loop_brk.kr af:IR af:--legacy
+l1_row loop_tok35_windows_x86_64_wine 7 $L1_D/loop_brk.kr w:IR w:--legacy
+l1_loop_src brk '!=' uint32 > $L1_D/loop_brk32.kr
+l1_row loop_tok35_riscv32 7 $L1_D/loop_brk32.kr r:IR r:--O0
+# Every operator at token #35; red: `!=`, `<`, `>` on both backends, and `+`
+# under --legacy (`>=` is the vacuous case: true by accident).
+L1_OPS=""
+L1_I=0
+for L1_OP in '!=' '<' '>' '==' '<=' '>=' '+'; do
+    L1_I=$((L1_I + 1))
+    l1_loop_src brk "$L1_OP" > $L1_D/loop_op$L1_I.kr
+    L1_OPS="$L1_OPS $L1_D/loop_op$L1_I.kr"
+done
+l1_row loop_tok35_ops_x86_64 7 "$L1_OPS" x:IR x:--legacy
+l1_row loop_tok35_ops_arm64 7 "$L1_OPS" a:IR a:--legacy
+# asm_legacy_callee_saved_loop_run_arm64: the runtime sibling of M3's
+# compile-only asm_legacy_callee_saved_loop_compile_arm64. f's loop writes
+# x21 and must run exactly once (`!=` at token #35); main checks its own x21.
+# Red: 100 (the body never ran). 120 = main's x21 destroyed.
+l1_row asm_legacy_callee_saved_loop_run_arm64 7 "$L1_FX/loop/callee_saved_run_arm64.kr" a:--legacy a:IR a:--O0
+# #291: the analysis took `while 1 < 1 { }` for an infinite loop when that
+# `<` was token #35, so a function falling off its end compiled. Now only
+# `loop` is infinite (the parser's data4 flag). Red: built.
+TOTAL=$((TOTAL + 1))
+rm -f $L1_D/a3
+if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC "$L1_FX/loop/analysis_tok35_lt.kr" -o $L1_D/a3 > $L1_D/err 2>&1 || [ -f $L1_D/a3 ]; then
+    l1_bad loop_analysis_tok35_lt_refused "built: a function ending in while 1 < 1 { } (token #35) must be refused"
+elif grep -q 'may not return a value on all paths' $L1_D/err; then
+    l1_ok loop_analysis_tok35_lt_refused "refused: may not return a value on all paths"
+else
+    l1_bad loop_analysis_tok35_lt_refused "refused without the may-not-return message: $(grep -m1 error $L1_D/err | cut -c1-140)"
+fi
+# Controls: a function ending in `loop { }` builds (it does not fall
+# through), and a statement after `loop { }` is reported unreachable.
+TOTAL=$((TOTAL + 1))
+rm -f $L1_D/le
+if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC "$L1_FX/loop/analysis_loop_end.kr" -o $L1_D/le > $L1_D/err 2>&1 && [ -f $L1_D/le ]; then
+    l1_ok loop_analysis_loop_end_accepted "fn spin() -> uint64 { loop { } } builds"
+else
+    l1_bad loop_analysis_loop_end_accepted "not built: $(grep -m1 error $L1_D/err | cut -c1-140)"
+fi
+TOTAL=$((TOTAL + 1))
+timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC "$L1_FX/loop/analysis_unreachable.kr" -o $L1_D/le > $L1_D/err 2>&1
+if grep -q 'analysis_unreachable.kr:3:5: warning: unreachable code after return/break/exit' $L1_D/err; then
+    l1_ok loop_analysis_unreachable_after_loop "the statement after loop { } is reported unreachable"
+else
+    l1_bad loop_analysis_unreachable_after_loop "no unreachable-code warning at 3:5"
+fi
+
+# #248: gen_expr's "this value is a struct" flag leaked out of a call whose
+# last argument was a struct (p.go() on a struct p, g(p), load64(p),
+# call_ptr(fp, p)), so --legacy treated the scalar result as a struct:
+# `return`, `v =` and passing it on read memory at the returned value. Red:
+# --legacy 139 (Windows 5). l1_m248 NAME LINES writes m248_prelude.kr, LINES
+# (the row's f, and h) and main.
+l1_m248() {
+    { cat "$L1_FX/m248_prelude.kr"; printf '%s\n' "$2"; printf 'fn main() { exit(f()) }\n'; } > $L1_D/m_$1.kr
+}
+l1_m248 u64 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return p.go() }'
+l1_m248 bool 'fn h() -> bool { P p; p.a = 1; p.b = 2; return p.ok() }
+fn f() -> uint64 { if h() { return 3 } return 0 }'
+l1_m248 i32 'fn f() -> int32 { P p; p.a = 1; p.b = 2; return p.geti() }'
+l1_m248 ptr 'fn h() -> uint64 { P p; p.a = 1; p.b = 2; return p.ad() }
+fn f() -> uint64 { uint64 q = h(); store64(q, 3); return load64(q) }'
+l1_m248 assign 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; uint64 v = 0; v = p.go(); return v }'
+l1_m248 arg 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return k(p.go()) }'
+l1_m248 chained 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return p.mk().go() }'
+l1_m248 nested_if 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; if p.a == 1 { return p.go() } else { return 0 } }'
+l1_m248 free_last 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return g(p) }'
+l1_m248 free_2nd 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return g2(1, p) }'
+l1_m248 free_big 'fn f() -> uint64 { R p; p.a = 1; p.b = 2; p.c = 3; return gr(p) }'
+l1_m248 generic 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return t(p) }'
+l1_m248 self 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return p.go3() }'
+l1_m248 tuple 'fn f2() -> uint64 { P p; p.a = 1; p.b = 2; return (p.go(), p.go()) }
+fn f() -> uint64 { (uint64 x, uint64 y) = f2(); return x + y - 3 }'
+for L1_S in u64 bool i32 ptr; do
+    l1_row legacy_ret_method_${L1_S}_x86_64 3 $L1_D/m_$L1_S.kr x:IR x:--O0 x:--legacy
+    l1_row legacy_ret_method_${L1_S}_arm64 3 $L1_D/m_$L1_S.kr a:IR a:--O0 a:--legacy
+done
+for L1_S in assign:assign arg:arg ret_chained:chained ret_nested_if:nested_if ret_generic:generic ret_self_method:self; do
+    l1_row legacy_${L1_S%%:*}_method_x86_64 3 $L1_D/m_${L1_S#*:}.kr x:IR x:--O0 x:--legacy
+    l1_row legacy_${L1_S%%:*}_method_arm64 3 $L1_D/m_${L1_S#*:}.kr a:IR a:--O0 a:--legacy
+done
+l1_row legacy_ret_free_struct_arg_x86_64 3 "$L1_D/m_free_last.kr $L1_D/m_free_2nd.kr $L1_D/m_free_big.kr" x:IR x:--O0 x:--legacy
+l1_row legacy_ret_free_struct_arg_arm64 3 "$L1_D/m_free_last.kr $L1_D/m_free_2nd.kr $L1_D/m_free_big.kr" a:IR a:--O0 a:--legacy
+l1_row legacy_ret_tuple_method_x86_64 3 $L1_D/m_tuple.kr x:IR x:--O0 x:--legacy
+# Builtins too: return load64(p), v = load64(p), return call_ptr(fp, p).
+L1_BI="$L1_FX/callptr/ld64_ret.kr $L1_FX/callptr/ld64_assign.kr $L1_FX/callptr/ret_callptr.kr"
+l1_row legacy_ret_builtin_struct_arg_x86_64 3 "$L1_BI" x:IR x:--O0 x:--legacy
+l1_row legacy_ret_builtin_struct_arg_arm64 3 "$L1_BI" a:IR a:--O0 a:--legacy
+# -c (the C caller calls f(5); f takes no argument), fat slice, Windows PE.
+sed 's/^fn f()/@export\nfn f()/; /^fn main/d' $L1_D/m_u64.kr > $L1_D/mo_u64.kr
+l1_cobj legacy_ret_method_obj_x86_64 x86_64 3 $L1_D/mo_u64.kr "$L1_FX/c_one_x86_64.c"
+l1_cobj legacy_ret_method_obj_arm64 arm64 3 $L1_D/mo_u64.kr "$L1_FX/c_one_arm64.c"
+l1_row legacy_ret_method_fat_x86_64 3 $L1_D/m_u64.kr xf:--legacy
+l1_row legacy_ret_method_fat_arm64 3 $L1_D/m_u64.kr af:--legacy
+l1_row legacy_ret_method_windows_x86_64_wine 3 $L1_D/m_u64.kr w:IR w:--legacy
+# Control (green at base): calls that do return a struct stay struct-valued
+# -- P r = p.mk(), fn h() -> P { return p.mk() }, the 24-byte MEMORY class,
+# uint64 v = p.go(), p.go2(3). Both rows FAIL on a scratch mutation of the
+# gen_expr / gen_expr_a64 wrappers that clears the flag after every call
+# (ctl_ret --legacy crashes, ctl_big exits 0).
+l1_m248 ctl_var 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; P r = p.mk(); return r.a + 2 }'
+l1_m248 ctl_ret 'fn h() -> P { P p; p.a = 1; p.b = 2; return p.mk() }
+fn f() -> uint64 { P r = h(); return r.a + 2 }'
+l1_m248 ctl_big 'fn h() -> R { R p; p.a = 1; return p.mkr() }
+fn f() -> uint64 { R r = h(); return r.a }'
+l1_m248 ctl_decl 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; uint64 v = p.go(); return v }'
+l1_m248 ctl_arg 'fn f() -> uint64 { P p; p.a = 1; p.b = 2; return p.go2(3) }'
+L1_CTL="$L1_D/m_ctl_var.kr $L1_D/m_ctl_ret.kr $L1_D/m_ctl_big.kr $L1_D/m_ctl_decl.kr $L1_D/m_ctl_arg.kr"
+l1_row legacy_struct_ret_method_x86_64 3 "$L1_CTL" x:IR x:--O0 x:--legacy
+l1_row legacy_struct_ret_method_arm64 3 "$L1_CTL" a:IR a:--O0 a:--legacy
+# Control (compile-only, green at base): --emit=lkm builds a returned method
+# call (it takes the same Call arm as -c).
+TOTAL=$((TOTAL + 1))
+sed 's/^fn f()/@export\nfn f()/; /^fn main/d' $L1_D/m_u64.kr > $L1_D/mk.kr
+printf '@module_init\nfn init() -> uint64 { return 0 }\n@module_exit\nfn fini() { }\n' >> $L1_D/mk.kr
+rm -f $L1_D/mk.ko
+if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=x86_64 --emit=lkm $L1_D/mk.kr -o $L1_D/mk.ko > $L1_D/err 2>&1 && [ -s $L1_D/mk.ko ]; then
+    l1_ok legacy_ret_method_lkm_x86_64 "--emit=lkm builds return p.go()"
+else
+    l1_bad legacy_ret_method_lkm_x86_64 "--emit=lkm failed: $(grep -m1 error $L1_D/err | cut -c1-140)"
+fi
+
+# #293: --legacy call_ptr passed a by-value struct as its address where the
+# callee expects the struct itself (SysV eightbytes, Win64 by value up to 8
+# bytes, AAPCS64), and arm64 put an f64 argument in an integer register; the
+# default backend passed the caller's own struct instead of a copy. The want
+# value of each row is the direct call's (fixtures in legacy_l1/callptr).
+L1_CP="$L1_FX/callptr"
+for L1_S in one:cp_one:12 scal_struct:cp_scal_struct:112 struct_scal:cp_struct_scal:112 two:cp_two:109 8b:cp_8b:42 u32pair:cp_h32:57 sse:cp_sse:12; do
+    L1_F=${L1_S#*:}; L1_W=${L1_F#*:}; L1_F=${L1_F%%:*}
+    l1_row callptr_struct_${L1_S%%:*}_x86_64 $L1_W $L1_CP/$L1_F.kr x:IR x:--O0 x:--legacy
+    l1_row callptr_struct_${L1_S%%:*}_arm64 $L1_W $L1_CP/$L1_F.kr a:IR a:--O0 a:--legacy
+done
+# Windows x64: 8 B, {u32,u32} and 16 B (the 16-byte one goes by reference).
+l1_row callptr_struct_windows_x86_64_wine 0 "$L1_CP/cp_8b.kr@42 $L1_CP/cp_h32.kr@57 $L1_CP/cp_one.kr@12" w:IR w:--legacy
+l1_row callptr_struct_7th_arm64 15 $L1_CP/cp_7.kr a:IR a:--O0 a:--legacy
+# arm64 --legacy call_ptr with an f64 argument: d0, not x0. Red: 130.
+l1_row callptr_f64_arm64_legacy 12 $L1_CP/cp_f64.kr a:IR a:--O0 a:--legacy
+# Value semantics: the callee writes its parameter; the caller's struct must
+# not change. Red: IR 224 (the caller's own struct), legacy 10.
+l1_row callptr_valsem_x86_64 12 $L1_CP/cp_valsem.kr x:IR x:--O0 x:--legacy
+l1_row callptr_valsem_arm64 12 $L1_CP/cp_valsem.kr a:IR a:--O0 a:--legacy
+l1_row callptr_valsem_riscv32 12 $L1_CP/rv_valsem.kr r:IR r:--O0
+l1_row callptr_valsem_windows_x86_64_wine 12 $L1_CP/cp_valsem.kr w:IR w:--legacy
+# Control (green at base): a 24-byte MEMORY-class struct goes by address and
+# the callee copies it.
+l1_row callptr_memory_class_x86_64 123 $L1_CP/cp_24b.kr x:IR x:--O0 x:--legacy
+l1_row callptr_memory_class_arm64 123 $L1_CP/cp_24b.kr a:IR a:--O0 a:--legacy
+# A struct that no longer fits in the argument registers (#295 via call_ptr):
+# 5 integers + a 16-byte struct + an integer (x86_64), 7 integers + 16 bytes +
+# an integer (arm64, C.13 closes NGRN).
+l1_row callptr_struct_stack_x86_64 115 $L1_CP/cp_split5.kr x:IR x:--O0 x:--legacy
+l1_row callptr_struct_stack_arm64 115 $L1_CP/cp_a64split7.kr a:IR a:--O0 a:--legacy
+# R16: the x86_64 legacy call_ptr loader used only xmm0-5; a 7th f64 argument
+# went on the stack where the callee reads xmm6. Red: 6.
+l1_row callptr_f64_7th_x86_64 9 $L1_CP/cp_f7.kr x:IR x:--O0 x:--legacy
+# -c object, C caller passing the target address (the call_ptr target lives in
+# the object): cp_one 12, cp_two 109, cp_sse 12, cp_valsem 12.
+for L1_S in cp_one cp_two cp_sse cp_valsem; do
+    sed 's/^fn f()/@export\nfn f()/; /^fn main/d' $L1_CP/$L1_S.kr > $L1_D/o_$L1_S.kr
+done
+L1_O="$L1_D/o_cp_one.kr $L1_D/o_cp_two.kr@109 $L1_D/o_cp_sse.kr $L1_D/o_cp_valsem.kr"
+l1_cobj callptr_struct_obj_x86_64 x86_64 12 "$L1_O" "$L1_FX/c_one_x86_64.c"
+l1_cobj callptr_struct_obj_arm64 arm64 12 "$L1_O" "$L1_FX/c_one_arm64.c"
+# The Windows arm64 legacy call_ptr / direct call whose by-value struct
+# arguments overflow the registers is refused, located (the #143 pre-scan
+# sized the outgoing area from the AST argument count): exit 1, no output.
+for L1_S in callptr:"$L1_OR/refuse_win_arm64_overflow.kr":11:10 direct:"$L1_FX/refuse/direct_win_arm64_overflow.kr":10:10; do
+    L1_N=${L1_S%%:*}; L1_F=${L1_S#*:}; L1_P=${L1_F#*:}; L1_F=${L1_F%%:*}
+    TOTAL=$((TOTAL + 1))
+    rm -f $L1_D/r.exe
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --legacy --arch=arm64 --target=windows "$L1_F" -o $L1_D/r.exe > $L1_D/err 2>&1 || [ -f $L1_D/r.exe ]; then
+        l1_bad ${L1_N}_windows_arm64_overflow_refused "built (want the located refusal, exit 1, no output)"
+    elif grep -q "$(basename $L1_F):$L1_P: error: .*by-value struct arguments that overflow the argument registers are not supported on Windows arm64 with --legacy" $L1_D/err \
+         && grep -q '\^' $L1_D/err; then
+        l1_ok ${L1_N}_windows_arm64_overflow_refused "refused at $(basename $L1_F):$L1_P with a caret"
+    else
+        l1_bad ${L1_N}_windows_arm64_overflow_refused "not the located refusal: $(head -1 $L1_D/err | cut -c1-160)"
+    fi
+done
+
+# #297: a Windows x64 --legacy function read its first four f64/f32 parameters
+# from the integer registers; the Win64 ABI passes them in xmm0-3. KernRift's
+# direct calls fill both, so only call_ptr (and C) callers were wrong. Red
+# (Windows --legacy): 2 / 2 / 0 / 10.
+L1_FP="$L1_FX/float_param"
+l1_row win_float_param_pos0_x86_64_wine 12 $L1_FP/cp_pos0.kr w:IR w:--legacy
+l1_row win_float_param_pos1_x86_64_wine 12 $L1_FP/cp_pos1.kr w:IR w:--legacy
+l1_row win_float_param_all4_x86_64_wine 12 $L1_FP/cp_all4.kr w:IR w:--legacy
+l1_row win_float_param_stack_x86_64_wine 13 $L1_FP/cp_5th.kr w:IR w:--legacy
+# Control: the same as direct calls (12 / 12 / 12 / 13 at base).
+l1_row win_float_param_direct_x86_64_wine 12 "$L1_FP/d_pos0.kr $L1_FP/d_pos1.kr $L1_FP/d_all4.kr $L1_FP/d_5th.kr@13" w:IR w:--legacy
+l1_coff obj_float_param_coff_x86_64_wine 12 "$L1_OR/fd.kr" "$L1_OR/c_win_fd.c"
+
+# #295: a by-value struct that no longer fits in the remaining argument
+# registers goes whole on the stack (SysV 3.2.3; AAPCS64 C.3/C.13 also closes
+# that register class; Win64 positions 5+ pass the value or the address);
+# caller and callee. The IR value is the want (legacy_l1/after_regs).
+L1_AR="$L1_FX/after_regs"
+# mem7 (6 integers + a 24-byte struct) is a guard: green at base, it went to
+# 139 in the first #295 prototype. mem7, three_p and win5_q exit f() - 100
+# (the note's 124 / 214 / 141), so every want stays below 124 (timeout's
+# status) and 128 (a signal).
+for L1_S in s7:15 split5:115 q8:43 mem7:24 three_p:114 sse_ovf:9 valsem7:12; do
+    l1_row legacy_struct_after_regs_${L1_S%%:*}_x86_64 ${L1_S#*:} $L1_AR/${L1_S%%:*}.kr x:IR x:--O0 x:--legacy
+done
+for L1_S in win5_q:41 win5_p:113 s7:15 split5:115 valsem7:12; do
+    l1_row legacy_struct_after_regs_${L1_S%%:*}_windows_x86_64_wine ${L1_S#*:} $L1_AR/${L1_S%%:*}.kr w:IR w:--legacy
+done
+for L1_S in a64q9:43 a64split7:115 sse_ovf:9; do
+    l1_row legacy_struct_after_regs_${L1_S%%:*}_arm64 ${L1_S#*:} $L1_AR/${L1_S%%:*}.kr a:IR a:--O0 a:--legacy
+done
+
+# #294: ELF objects (-c / --emit=obj) kept the statics inside the read-only
+# .text, so the first write from a linked program faulted. Statics now live in
+# .data, reached through relocations. The C callers call f(5) twice, so a
+# static's state carries over: multi.kr 61 (five statics incl. two arrays),
+# ext.kr 83 (statics + a C function). Red: 139.
+l1_cobj obj_static_write_x86_64 x86_64 61 "$L1_OR/multi.kr" "$L1_OR/c_linux_x86_64.c"
+l1_cobj obj_static_write_arm64 arm64 61 "$L1_OR/multi.kr" "$L1_OR/c_linux_arm64.c"
+l1_cobj obj_static_write_riscv32 riscv32 61 "$L1_OR/multir.kr" "$L1_OR/c_linux_rv32.c"
+l1_cobj obj_static_extern_mix_x86_64 x86_64 83 "$L1_OR/ext.kr" "$L1_OR/c_linux_x86_64.c"
+l1_cobj obj_static_extern_mix_arm64 arm64 83 "$L1_OR/ext.kr" "$L1_OR/c_linux_arm64.c"
+# #298/#299: an arm64 object baked the ADRP pairs of a string literal and of
+# fn_addr("g") as if its .text were page-aligned at its object offset; they
+# are relocations now. Two calls: 'e' (101) -> 1111 & 255 = 87; g = a + 3 ->
+# 88. Red: 0 and SIGILL.
+l1_cobj obj_string_arm64 arm64 87 "$L1_OR/strl.kr" "$L1_OR/c_linux_arm64.c"
+l1_cobj obj_fn_addr_arm64 arm64 88 "$L1_OR/fa.kr" "$L1_OR/c_linux_arm64.c"
+# l1_elf_check OBJ: "<.data size> <.data flags> <relocations against .data or
+# local labels, by type> symtab-info-ok|symtab-info-bad" of an ELF object.
+l1_elf_check() {
+    python3 -B - "$1" <<'L1PY'
+import struct, sys
+b = open(sys.argv[1], 'rb').read()
+c64 = b[4] == 2
+if c64:
+    shoff, = struct.unpack_from('<Q', b, 0x28); shentsize, shnum, shstrndx = struct.unpack_from('<HHH', b, 0x3a)
+else:
+    shoff, = struct.unpack_from('<I', b, 0x20); shentsize, shnum, shstrndx = struct.unpack_from('<HHH', b, 0x2e)
+def sh(i):
+    o = shoff + i * shentsize
+    if c64:
+        n, t, fl, a, off, sz, lk, inf, al, es = struct.unpack_from('<IIQQQQIIQQ', b, o)
+    else:
+        n, t, fl, a, off, sz, lk, inf, al, es = struct.unpack_from('<IIIIIIIIII', b, o)
+    return dict(name=n, type=t, flags=fl, off=off, size=sz, link=lk, info=inf, entsize=es)
+S = [sh(i) for i in range(shnum)]
+strs = S[shstrndx]
+def nm(s): o = strs['off'] + s['name']; return b[o:b.index(b'\0', o)].decode()
+for s in S: s['n'] = nm(s)
+data = [s for s in S if s['n'] == '.data']
+dsz = data[0]['size'] if data else -1
+dfl = ('W' if data and data[0]['flags'] & 1 else '') + ('A' if data and data[0]['flags'] & 2 else '')
+symtab = [s for s in S if s['type'] == 2][0]
+syms = []
+for i in range(symtab['size'] // symtab['entsize']):
+    o = symtab['off'] + i * symtab['entsize']
+    if c64:
+        n, info, other, shndx, val, sz = struct.unpack_from('<IBBHQQ', b, o)
+    else:
+        n, val, sz, info, other, shndx = struct.unpack_from('<IIIBBH', b, o)
+    syms.append((info >> 4, info & 15, shndx))
+firstg = next((i for i, s in enumerate(syms) if s[0] != 0), len(syms))
+ok = symtab['info'] == firstg and all(s[0] != 0 for s in syms[firstg:])
+types = {}
+for s in S:
+    if s['type'] not in (4, 9) or s['n'] not in ('.rela.text', '.rel.text'):
+        continue
+    for i in range(s['size'] // s['entsize']):
+        o = s['off'] + i * s['entsize']
+        info = struct.unpack_from('<Q', b, o + 8)[0] if c64 else struct.unpack_from('<I', b, o + 4)[0]
+        sym, t = (info >> 32, info & 0xffffffff) if c64 else (info >> 8, info & 0xff)
+        bind, typ, shndx = syms[sym]
+        if bind == 0 and shndx < len(S) and S[shndx]['n'] in ('.data', '.text'):
+            types[t] = types.get(t, 0) + 1
+print(dsz, dfl or '-', ' '.join('%d:%d' % kv for kv in sorted(types.items())) or 'none', 'symtab-info-ok' if ok else 'symtab-info-bad')
+L1PY
+}
+# obj_static_relocs_<arch>: multi.kr (multir.kr on riscv32): .data is WA and
+# holds the 160 (144) static bytes; one R_X86_64_PC32 (2) per static site; on
+# arm64 one ADR_PREL_PG_HI21 (275) per site + 4 ADD_ABS_LO12_NC (277) + 7
+# LDST64_ABS_LO12_NC (286); on riscv32 one PCREL_HI20 (23) + PCREL_LO12_I (24)
+# per site; .symtab's sh_info = the first GLOBAL. Red: .data size 0, none.
+for L1_S in x86_64:multi:"160 WA 2:11 symtab-info-ok" arm64:multi:"160 WA 275:11 277:4 286:7 symtab-info-ok" riscv32:multir:"144 WA 23:11 24:11 symtab-info-ok"; do
+    L1_A=${L1_S%%:*}; L1_F=${L1_S#*:}; L1_W=${L1_F#*:}; L1_F=${L1_F%%:*}
+    TOTAL=$((TOTAL + 1))
+    rm -f $L1_D/r.o
+    if ! command -v python3 > /dev/null 2>&1; then skip_row obj_static_relocs_$L1_A "needs python3 (reads the ELF object)"; continue; fi
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$L1_A -c "$L1_OR/$L1_F.kr" -o $L1_D/r.o > $L1_D/err 2>&1 || [ ! -f $L1_D/r.o ]; then
+        l1_bad obj_static_relocs_$L1_A "krc -c failed: $(grep -m1 error $L1_D/err | cut -c1-140)"; continue
+    fi
+    L1_G=$(l1_elf_check $L1_D/r.o 2>&1)
+    if [ "$L1_G" = "$L1_W" ]; then l1_ok obj_static_relocs_$L1_A "$L1_G"; else l1_bad obj_static_relocs_$L1_A "want '$L1_W', got '$L1_G'"; fi
+done
+# Control (green at base): an object without statics or arm64 string/fn_addr
+# references (exp.kr; expr.kr, its uint32 twin, on riscv32) keeps an empty .data and gets no relocation or section
+# symbol (its bytes are identical to main@A1's; G-ID records that).
+for L1_A in x86_64 arm64 riscv32; do
+    TOTAL=$((TOTAL + 1))
+    rm -f $L1_D/r.o
+    L1_F=exp; [ $L1_A = riscv32 ] && L1_F=expr
+    if ! command -v python3 > /dev/null 2>&1; then skip_row obj_no_static_identical_$L1_A "needs python3 (reads the ELF object)"; continue; fi
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$L1_A -c "$L1_OR/$L1_F.kr" -o $L1_D/r.o > $L1_D/err 2>&1 || [ ! -f $L1_D/r.o ]; then
+        l1_bad obj_no_static_identical_$L1_A "krc -c failed: $(grep -m1 error $L1_D/err | cut -c1-140)"; continue
+    fi
+    L1_G=$(l1_elf_check $L1_D/r.o 2>&1)
+    if [ "$L1_G" = "0 WA none symtab-info-ok" ]; then l1_ok obj_no_static_identical_$L1_A "$L1_G"; else l1_bad obj_no_static_identical_$L1_A "want '0 WA none symtab-info-ok', got '$L1_G'"; fi
+done
+# #149 / #296 (COFF, --target=windows --emit=obj): statics in a writable .data
+# section after .pdata/.xdata, reached through REL32 (x86_64) or PAGEBASE_REL21
+# + PAGEOFFSET_12A/12L (arm64) relocations against appended STATIC symbols; an
+# @export function is EXTERNAL. Red: lld-link "undefined symbol: f" (#296);
+# with f named main, a static write exits 5 (#149). The same objects and C
+# callers run natively in the CI Windows jobs (coff_obj_* rows).
+l1_coff obj_static_write_coff_x86_64_wine 61 "$L1_OR/multi.kr" "$L1_OR/c_win.c"
+l1_coff obj_static_extern_coff_x86_64_wine 83 "$L1_OR/ext.kr" "$L1_OR/c_win.c"
+l1_coff obj_string_coff_x86_64_wine 87 "$L1_OR/strl.kr" "$L1_OR/c_win.c"
+l1_coff obj_fn_addr_coff_x86_64_wine 88 "$L1_OR/fa.kr" "$L1_OR/c_win.c"
+l1_coff obj_export_coff_x86_64_wine 11 "$L1_OR/exp.kr" "$L1_OR/c_win.c"
+# obj_coff_arm64_targets (#149/#296/#298/#299): the arm64 COFF objects of
+# multi, ext, strl, fa and exp, each linked by lld-link /machine:arm64 with
+# c_win.c (exp has no ADRP: it must link, #296); every decoded ADRP pair of
+# the image must land in .data or .text (tests/helpers/a64_adrp_targets.py),
+# and multi's 11 static references in .data. Red:
+# undefined symbol f (#296); renamed, the targets fall outside every section.
+TOTAL=$((TOTAL + 1))
+if ! command -v python3 > /dev/null 2>&1 || ! l1_win_tools; then
+    skip_row obj_coff_arm64_targets "needs python3, clang and lld-link"
+else
+    L1_W=""
+    for L1_F in multi ext strl fa exp; do
+        rm -f $L1_D/a.obj $L1_D/ca.obj $L1_D/a.exe
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --freestanding --arch=arm64 --target=windows --emit=obj "$L1_OR/$L1_F.kr" -o $L1_D/a.obj > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_F: krc failed;"; continue
+        fi
+        if ! clang --target=aarch64-pc-windows-msvc -O1 -ffreestanding -fno-stack-protector -fno-builtin -c "$L1_OR/c_win.c" -o $L1_D/ca.obj > $L1_D/err 2>&1 \
+           || ! lld-link /machine:arm64 /nodefaultlib /entry:start /subsystem:console $L1_D/ca.obj $L1_D/a.obj /out:$L1_D/a.exe > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_F: link failed ($(grep -m1 -i 'error\|undefined' $L1_D/err | cut -c1-80));"; continue
+        fi
+        [ $L1_F = exp ] && continue
+        python3 -B "$DIR/helpers/a64_adrp_targets.py" $L1_D/a.exe > $L1_D/t 2>&1 || L1_W="$L1_W $L1_F: $(head -1 $L1_D/t);"
+        if [ $L1_F = multi ] && [ "$(python3 -B "$DIR/helpers/a64_adrp_targets.py" --list $L1_D/a.exe 2> /dev/null | grep -c ' in \.data$')" != 11 ]; then
+            L1_W="$L1_W multi: the 11 static references are not all in .data;"
+        fi
+    done
+    if [ -z "$L1_W" ]; then l1_ok obj_coff_arm64_targets "multi/ext/strl/fa/exp link; every ADRP target in .data or .text; multi's 11 statics in .data"
+    else l1_bad obj_coff_arm64_targets "$L1_W"; fi
+fi
+# Control (green at base): a COFF object without statics, arm64 references or
+# @export functions (exp.kr's f renamed main) keeps one .text and its section
+# count (G-ID records its bytes).
+TOTAL=$((TOTAL + 1))
+sed 's/fn f(/fn main(/' "$L1_OR/exp.kr" | grep -v '^@export' > $L1_D/nost.kr
+if ! command -v llvm-readobj > /dev/null 2>&1; then
+    skip_row obj_no_static_identical_coff "needs llvm-readobj"
+else
+    L1_W=""
+    for L1_A in x86_64 arm64; do
+        rm -f $L1_D/n.obj
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --freestanding --arch=$L1_A --target=windows --emit=obj $L1_D/nost.kr -o $L1_D/n.obj > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_A: krc failed;"; continue
+        fi
+        llvm-readobj -S $L1_D/n.obj 2> /dev/null | grep -q 'Name: .data' && L1_W="$L1_W $L1_A: has a .data section;"
+        llvm-readobj -S $L1_D/n.obj 2> /dev/null | grep -q 'Name: .text' || L1_W="$L1_W $L1_A: no .text;"
+    done
+    if [ -z "$L1_W" ]; then l1_ok obj_no_static_identical_coff "x86_64 and arm64: .text, no .data"; else l1_bad obj_no_static_identical_coff "$L1_W"; fi
+fi
+
+# #301 / #296 (Mach-O, --target=macos -c): statics in __DATA,__data;
+# X86_64_RELOC_SIGNED (section-relative) per site on x86_64, ARM64_RELOC_ADDEND
+# + PAGE21 / PAGEOFF12 against the local ltmp0 / ltmp1 on arm64 (strings and
+# fn_addr too); @export functions are external. Nothing on this host runs
+# Mach-O: these rows are build-side, and the runtime is deferred to CI
+# (test-macos / test-macos-x64, the macho_obj_* rows). Red: one __text
+# section, no relocations, _f undefined.
+for L1_S in x86_64:"2 X86_64_RELOC_SIGNED:11" arm64:"2 ARM64_RELOC_PAGE21:11 ARM64_RELOC_PAGEOFF12:11 ARM64_RELOC_ADDEND:22"; do
+    L1_A=${L1_S%%:*}; L1_W=${L1_S#*:}
+    TOTAL=$((TOTAL + 1))
+    rm -f $L1_D/m.o
+    if ! command -v llvm-objdump > /dev/null 2>&1; then skip_row obj_macho_relocs_$L1_A "needs llvm-objdump"; continue; fi
+    if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$L1_A --target=macos -c "$L1_OR/multi.kr" -o $L1_D/m.o > $L1_D/err 2>&1 || [ ! -f $L1_D/m.o ]; then
+        l1_bad obj_macho_relocs_$L1_A "krc failed: $(grep -m1 error $L1_D/err | cut -c1-140)"; continue
+    fi
+    llvm-objdump -h -r --syms $L1_D/m.o > $L1_D/m.txt 2>&1
+    L1_G="$(grep -cE '^ +[0-9]+ __(text|data) ' $L1_D/m.txt)"
+    for L1_T in $(echo "$L1_W" | tr ' ' '\n' | grep : | cut -d: -f1); do
+        L1_G="$L1_G $L1_T:$(grep -c " $L1_T " $L1_D/m.txt)"
+    done
+    L1_X=""
+    grep -qE '^ +1 __data +000000a0 ' $L1_D/m.txt || L1_X="$L1_X __data is not the 160 static bytes;"
+    grep -qE ' g +F __TEXT,__text _f$' $L1_D/m.txt || L1_X="$L1_X _f is not external;"
+    if [ $L1_A = arm64 ]; then
+        grep -qE ' l +F __TEXT,__text ltmp0$' $L1_D/m.txt && grep -qE ' l +O __DATA,__data ltmp1$' $L1_D/m.txt || L1_X="$L1_X no local ltmp0/ltmp1;"
+    fi
+    if [ "$L1_G" = "$L1_W" ] && [ -z "$L1_X" ]; then l1_ok obj_macho_relocs_$L1_A "sections + relocations: $L1_G; _f external (runtime: CI test-macos)"
+    else l1_bad obj_macho_relocs_$L1_A "want '$L1_W', got '$L1_G';$L1_X"; fi
+done
+# obj_macho_link_<arch>: multi, strl, fa and exp linked by ld64.lld with the
+# hosted C caller (built for <arch>-apple-macos11): every reference f makes
+# must resolve into __data (multi's statics) or __text (strl's string, fa's g):
+# arm64 decoded by tests/helpers/a64_adrp_targets.py --list, x86_64 from
+# llvm-objdump's `##` targets; on arm64 no relocation may name ltmp0 (CI
+# found Apple's ld refusing it). Runtime: CI test-macos / test-macos-x64.
+for L1_A in x86_64 arm64; do
+    TOTAL=$((TOTAL + 1))
+    if ! command -v ld64.lld > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1 || ! command -v clang > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+        skip_row obj_macho_link_$L1_A "needs ld64.lld, llvm-objdump, clang and python3"; continue
+    fi
+    L1_W=""
+    rm -f $L1_D/cm.o
+    clang --target=$L1_A-apple-macos11 -O1 -c "$L1_OR/c_macos.c" -o $L1_D/cm.o > /dev/null 2>&1 || L1_W="the C caller does not build;"
+    for L1_S in multi:__data strl:__text fa:__text exp:-; do
+        L1_F=${L1_S%%:*}; L1_E=${L1_S#*:}
+        rm -f $L1_D/m.o $L1_D/mm
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$L1_A --target=macos -c "$L1_OR/$L1_F.kr" -o $L1_D/m.o > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_F: krc failed;"; continue
+        fi
+        if ! ld64.lld -arch $L1_A -platform_version macos 11.0 11.0 -e _main $L1_D/cm.o $L1_D/m.o -o $L1_D/mm > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_F: link failed ($(grep -m1 -i 'error\|undefined' $L1_D/err | cut -c1-80));"; continue
+        fi
+        [ "$L1_E" = - ] && continue
+        # Apple's ld refuses a relocation against ltmp0 when a function symbol
+        # shares its address ("invalid r_symbolnum"; ld64.lld accepts it), so
+        # a __text reference must name a function symbol plus an offset.
+        if [ $L1_A = arm64 ] && llvm-objdump -r $L1_D/m.o 2> /dev/null | grep -q ' ltmp0$'; then
+            L1_W="$L1_W $L1_F: a relocation names ltmp0 (Apple ld: invalid r_symbolnum);"
+        fi
+        python3 -B "$DIR/helpers/a64_adrp_targets.py" --list $L1_D/mm _f > $L1_D/t 2>&1
+        if [ ! -s $L1_D/t ] || grep -qv " in $L1_E\$" $L1_D/t; then
+            L1_W="$L1_W $L1_F: $(grep -v " in $L1_E\$" $L1_D/t | head -1) (want every reference in $L1_E);"
+        fi
+    done
+    if [ -z "$L1_W" ]; then l1_ok obj_macho_link_$L1_A "statics resolve into __data, the string and fn_addr into __text, _f links (runtime: CI)"
+    else l1_bad obj_macho_link_$L1_A "$L1_W"; fi
+done
+# obj_macho_far_refs_arm64 (#345): ARM64_RELOC_ADDEND holds a signed 24-bit
+# addend, so a reference 8 MiB or more past its symbol resolved elsewhere. Two
+# objects linked by ld64.lld with the hosted C caller: far.kr's static 9000000
+# bytes into __data, and a "hello" placed after a 9000000-byte string literal
+# (more than 8 MiB past f's start). Every reference f makes must resolve: the
+# static to __data + 9000000, the string to the bytes `hello`. Red (main@A1
+# and L1 before #345): targets outside every section.
+TOTAL=$((TOTAL + 1))
+if ! command -v ld64.lld > /dev/null 2>&1 || ! command -v llvm-objdump > /dev/null 2>&1 || ! command -v llvm-objcopy > /dev/null 2>&1 \
+   || ! command -v clang > /dev/null 2>&1 || ! command -v python3 > /dev/null 2>&1; then
+    skip_row obj_macho_far_refs_arm64 "needs ld64.lld, llvm-objdump, llvm-objcopy, clang and python3"
+else
+    L1_W=""
+    python3 -c "print('@export\nfn f(uint64 a) -> uint64 {\n    uint64 p = \"' + 'a' * 9000000 + '\"\n    uint64 q = \"hello\"\n    return load8(p) - 97 + load8(q + 1)\n}')" > $L1_D/farstr.kr
+    rm -f $L1_D/cm.o
+    clang --target=arm64-apple-macos11 -O1 -c "$L1_OR/c_macos.c" -o $L1_D/cm.o > /dev/null 2>&1 || L1_W="the C caller does not build;"
+    for L1_S in data:"$L1_OR/far.kr" str:$L1_D/farstr.kr; do
+        L1_N=${L1_S%%:*}; L1_F=${L1_S#*:}
+        rm -f $L1_D/m.o $L1_D/mm
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=arm64 --target=macos -c "$L1_F" -o $L1_D/m.o > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_N: krc failed;"; continue
+        fi
+        if ! ld64.lld -arch arm64 -platform_version macos 11.0 11.0 -e _main $L1_D/cm.o $L1_D/m.o -o $L1_D/mm > $L1_D/err 2>&1; then
+            L1_W="$L1_W $L1_N: link failed;"; continue
+        fi
+        python3 -B "$DIR/helpers/a64_adrp_targets.py" --list $L1_D/mm _f > $L1_D/t 2>&1
+        L1_O=$(python3 -B - $L1_D/mm $L1_D/t $L1_N <<'L1PY'
+import re, subprocess, sys
+img, lst, kind = sys.argv[1:4]
+secs = {}
+for l in subprocess.run(['llvm-objdump', '-h', img], capture_output=True, text=True).stdout.splitlines():
+    m = re.match(r'\s*\d+\s+(\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)', l)
+    if m: secs[m.group(1)] = int(m.group(3), 16)
+tg = [(int(m.group(1), 16), m.group(2)) for m in re.finditer(r'-> 0x([0-9a-f]+) in (\S+)', open(lst).read())]
+if not tg: print('no references decoded'); sys.exit()
+if kind == 'data':
+    bad = [hex(t) for t, s in tg if s != '__data']
+    if bad: print('outside __data: ' + ' '.join(bad)); sys.exit()
+    if secs['__data'] + 9000000 not in [t for t, s in tg]: print('no reference to __data + 9000000'); sys.exit()
+else:
+    subprocess.run(['llvm-objcopy', '--dump-section', '__TEXT,__text=' + img + '.text', img], capture_output=True)
+    b = open(img + '.text', 'rb').read()
+    want = secs['__text'] + b.find(b'hello')
+    bad = [hex(t) for t, s in tg if s != '__text']
+    if bad: print('outside __text: ' + ' '.join(bad)); sys.exit()
+    if want not in [t for t, s in tg]: print('no reference to the bytes hello (0x%x)' % want); sys.exit()
+print('ok')
+L1PY
+)
+        [ "$L1_O" = ok ] || L1_W="$L1_W $L1_N: $L1_O;"
+    done
+    if [ -z "$L1_W" ]; then l1_ok obj_macho_far_refs_arm64 "a static 9000000 bytes into __data and a string 9 MB past f resolve exactly (runtime: CI macho_obj_far_static_arm64)"
+    else l1_bad obj_macho_far_refs_arm64 "$L1_W"; fi
+fi
+# Control (green at base): a Mach-O object without statics, arm64 references
+# or @export functions keeps its single __text section.
+TOTAL=$((TOTAL + 1))
+if ! command -v llvm-objdump > /dev/null 2>&1; then
+    skip_row obj_no_static_identical_macho "needs llvm-objdump"
+else
+    L1_W=""
+    for L1_A in x86_64 arm64; do
+        rm -f $L1_D/n.o
+        if ! timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$L1_A --target=macos -c $L1_D/nost.kr -o $L1_D/n.o > $L1_D/err 2>&1; then L1_W="$L1_W $L1_A: krc failed;"; continue; fi
+        [ "$(llvm-objdump -h $L1_D/n.o 2> /dev/null | grep -cE '^ +[0-9]+ __')" = 1 ] || L1_W="$L1_W $L1_A: not one section;"
+    done
+    if [ -z "$L1_W" ]; then l1_ok obj_no_static_identical_macho "x86_64 and arm64: one __text section"; else l1_bad obj_no_static_identical_macho "$L1_W"; fi
+fi
+
+# #302 (+ #305): --legacy float sinks. An f32 destination given an f64 value
+# (every float literal without `f`) stored the f64's low bits; a float static
+# was read as an integer; mixed f32/f64 operations used the LHS's width; `-x`
+# negated the integer register. --legacy now converts at every sink, as the
+# default backend does (legacy_l1/f32; IR = the want). Red on --legacy (all
+# three platforms): 0 / 1 / 12 (§22.1 of the L1 note).
+L1_F3="$L1_FX/f32"
+for L1_S in lit_f64:2 assign_lit:2 narrow:2 widen:3 mul_lit:3 mix_add:7 cmp_eq:1 static_init:2 static_lit:3 static_rd2:2 static_f32add:2 field:3 nested_field:2 self_field:2 static_struct_field:2 ptr_store_lit:2 neg:7 neg64:7 negvar32:2 param_mul:12; do
+    l1_trio legacy_f32_${L1_S%%:*} ${L1_S#*:} $L1_F3/${L1_S%%:*}.kr
+done
+# Controls (green at base): f32 literals with `f`, f32 op f32, the conversion
+# builtins, f16 round trips, f32 parameters/returns of f32 values, f32 array
+# elements and pointer stores of f32 values, ternaries, compound +=.
+for L1_S in lit_fsuf:2 add_ff:15 cmp_ff:1 conv_builtins:53 f16rt:2 param_var:3 ret_var:2 arr_var:2 ptr_store_var:2 ternary:3 compound:2; do
+    l1_trio legacy_f32_${L1_S%%:*} ${L1_S#*:} $L1_F3/${L1_S%%:*}.kr
+done
+# #305: an f64 stored into an f32 array element (f32[4] a; a[1] = 2.5) wrote
+# the double's low 32 bits on every backend. Red: 0 everywhere, IR included.
+l1_trio legacy_f32_array_store 2 $L1_F3/array_store.kr
+# A -c object: an f32 static, an f32 field and a negation; two calls of f(5)
+# return 2 each: 22. Red: 201.
+l1_cobj legacy_f32_obj_x86_64 x86_64 22 "$L1_F3/obj.kr" "$L1_OR/c_linux_x86_64.c"
+l1_cobj legacy_f32_obj_arm64 arm64 22 "$L1_F3/obj.kr" "$L1_OR/c_linux_arm64.c"
+
+# #303 / #306: a by-value struct passed to C. Windows x64 (sizes other than
+# 1/2/4/8) and arm64 (> 16 bytes, not an HFA) pass a pointer to a caller-owned
+# copy; x86_64 SysV passes a > 16-byte struct's bytes on the stack (#306, a
+# convention change). k.kr calls C cmod(R) (24 bytes), which writes its
+# parameter: the caller's r.a must stay 1 (115). Red: 147 (arm64, Windows
+# with the #296 rename), 196 (SysV); Windows also failed to link (#296).
+l1_coff abi_struct_copy_kr_to_c_coff_x86_64_wine 115 "$L1_OR/k.kr" "$L1_OR/c_win_cmod.c"
+l1_cobj abi_struct_copy_kr_to_c_arm64 arm64 115 "$L1_OR/k.kr" "$L1_OR/c_linux_arm64_cmod.c"
+l1_cobj abi_struct_memory_class_kr_to_c_x86_64 x86_64 115 "$L1_OR/k.kr" "$L1_OR/c_linux_x86_64_cmod.c"
+# C passes a 24-byte struct to g.kr's g, which writes its parameter; C's own
+# r.a must stay 1 (114). Controls on Windows / arm64 (the callee always
+# copied); red on SysV (139: the callee expected a pointer).
+l1_coff abi_struct_c_to_kr_coff_x86_64_wine 114 "$L1_OR/g.kr" "$L1_OR/c_win_g.c"
+l1_cobj abi_struct_c_to_kr_arm64 arm64 114 "$L1_OR/g.kr" "$L1_OR/c_linux_arm64_g.c"
+l1_cobj abi_struct_memory_class_c_to_kr_x86_64 x86_64 114 "$L1_OR/g.kr" "$L1_OR/c_linux_x86_64_g.c"
+
+# The C struct ABI matrix (#303 #306 #308 #309 #315): abi_<T>.kr (KernRift,
+# -c / --emit=obj) and abi_<T>.h (C) each pass and return struct T, in four
+# checks, one process each (-DMODE=1|4|8|32 with abi_main_<platform>.c):
+#   args_kr_to_c  KR passes T to C (and keeps its own copy)        MODE 1
+#   ret_c_to_kr   KR calls an extern fn returning T (#308)          MODE 4
+#   args_c_to_kr  C passes T to KR (and keeps its own copy)         MODE 8
+#   ret_kr_to_c   C calls a KR function returning T (#309, #315)    MODE 32
+# Exit 0, else the failing bits. The shapes are C-compatible under the L3
+# rule (their packed KernRift layout is C's): S8/S16/S24 {u64 x1/2/3}, F16
+# {f64,f64}, H8 {u32,u32}, U3 {u8 x3}, S6 {u16 x3}, S12 {u32 x3}, S20 {u32 x5},
+# and S5 {u8 x5} on Windows. A check that passed at base is a guard (the
+# conventions #306/#309/#315 changed must keep it). Red at base: every
+# ret_c_to_kr (139 / 5); S24 x86_64 args 1 / 139; Windows S16/F16/S24
+# ret_kr_to_c 32 / 0-5, U3/S5/S6 5/8/5, S12/S20 ret 5. The checks green at
+# base (x86_64 and arm64 args / ret_kr_to_c of every shape but S24 args) are
+# guards.
+l1_abi() {   # l1_abi T PLATFORM(x86_64|arm64|windows)
+    local T=$1 p=$2 m ck row sfx got
+    case $p in windows) sfx=windows_x86_64_wine ;; *) sfx=$p ;; esac
+    for m in 1:args_kr_to_c 4:ret_c_to_kr 8:args_c_to_kr 32:ret_kr_to_c; do
+        ck=${m#*:}; m=${m%%:*}
+        row=abi_c_struct_${T}_${ck}_$sfx
+        if [ $p = windows ]; then
+            TOTAL=$((TOTAL + 1))
+            if [ -z "$L1_WINE" ]; then wine_na $row; continue; fi
+            if ! l1_win_tools; then skip_row $row "clang and lld-link needed"; continue; fi
+            if ! l1_coff_link "$L1_OR/abi_$T.kr" $L1_D/abi.exe -DMODE=$m -include "$L1_OR/abi_$T.h" "$L1_OR/abi_main_win.c"; then l1_bad $row "$L1_WHY"; continue; fi
+            got=$( cd $L1_D && l1_status $L1_WINE ./abi.exe )
+            if [ "$got" = 0 ]; then l1_ok $row "abi_$T MODE $m: exit 0"; else l1_bad $row "abi_$T MODE $m: want 0, got $got"; fi
+        else
+            l1_cobj $row $p 0 "$L1_OR/abi_$T.kr" -DMODE=$m -include "$L1_OR/abi_$T.h" "$L1_OR/abi_main_linux_$p.c"
+        fi
+    done
+}
+for L1_T in S8 S16 S24 F16 H8 U3 S6 S12 S20; do
+    l1_abi $L1_T x86_64
+    l1_abi $L1_T arm64
+    l1_abi $L1_T windows
+done
+l1_abi S5 windows
+# #309: Windows x64 struct returns follow Win64 (1/2/4/8 bytes in rax, any
+# other size through the result pointer the caller passes in rcx). ret.kr +
+# c_win_ret.c: {u32}, {f64}, a 12-byte result after five arguments, KR <-> KR
+# 24-byte results and a method returning one, both directions. Red: 5.
+l1_coff abi_c_struct_ret_shapes_windows_x86_64_wine 0 "$L1_OR/ret.kr" "$L1_OR/c_win_ret.c"
+# KR <-> KR on the six configurations: struct returns of 4/8/12/24 bytes with
+# arguments (red: Windows --legacy 5; the x86_64 and arm64 rows are guards).
+L1_RT="$L1_FX/ret"
+l1_trio legacy_struct_ret_shapes 40 $L1_RT/struct_ret_shapes.kr
+# #310: after `lea rax, [sret]; mov rdi, rax` the rax cache still claimed the
+# first argument, so fn mk(u64 x) -> R (24 bytes) received the result address
+# as x. Red: x86_64 --legacy 76-252 (garbage), Windows --legacy 5 (#309); the
+# arm64 row is a guard (AAPCS64 passes the result address in x8).
+l1_trio legacy_memory_ret_with_arg 55 $L1_RT/memory_ret_with_arg.kr
+# #315 (L1's part): the result copy through the caller's pointer wrote whole
+# eightbytes, so a 3/12/20-byte result clobbered the bytes after the caller's
+# object (Win64; and SysV MEMORY returns whose size is not a multiple of 8).
+# The C side passes a buffer followed by a guard word: exit 0; 4 = the guard
+# was overwritten. Red: 4 (on the #309 path; base Windows did not use the
+# result pointer at all and gives 1-6).
+for L1_S in 12:S12 20:S20 3:U3; do
+    l1_coff win64_struct_ret_guard_${L1_S%%:*}_wine 0 "$L1_OR/abi_${L1_S#*:}.kr" "$L1_OR/guard_win64_ret_${L1_S%%:*}.c"
+done
+l1_cobj sysv_struct_ret_guard_20_x86_64 x86_64 0 "$L1_OR/abi_S20.kr" "$L1_OR/guard_sysv_ret_20_x86_64.c"
+# Guard: KR <-> KR odd sizes ({u8 x3} after an integer, {u16 x3} + {u8 x3}
+# with five arguments, a 3-byte return) agree on the six configurations under
+# the Win64 1/2/4/8 by-value rule (40 at base too).
+l1_trio legacy_struct_odd_sizes 40 $L1_RT/struct_odd_sizes.kr
+
+# #307 (refusals; the full riscv32 ILP32 lowering is v2.11.2): a routed
+# Windows import (kernel32/ws2_32/bcrypt through the import table) declared
+# with a struct parameter or return type is refused, like a float one;
+# exit 1, located, no output file. Red: built.
+for L1_S in x86_64: x86_64:--legacy arm64: arm64:--legacy; do
+    L1_A=${L1_S%%:*}; L1_M=${L1_S#*:}
+    L1_N=refuse_routed_import_struct_${L1_A}_windows${L1_M:+_legacy}
+    TOTAL=$((TOTAL + 1))
+    rm -f $L1_D/wi.exe
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=$L1_A --target=windows --emit=pe $L1_M "$L1_FX/refuse/routed_import_struct.kr" -o $L1_D/wi.exe > $L1_D/err 2>&1 || [ -f $L1_D/wi.exe ]; then
+        l1_bad $L1_N "built (want the routed-import struct refusal)"
+    elif grep -q "routed_import_struct.kr:5:37: error: routed Windows import 'GetStdHandle' has a struct parameter or return type; routed Windows imports take integer/pointer arguments only (#307)" $L1_D/err; then
+        l1_ok $L1_N "refused at 5:37"
+    else
+        l1_bad $L1_N "not the refusal: $(head -1 $L1_D/err | cut -c1-160)"
+    fi
+done
+# riscv32 objects: an extern fn or an @export fn taking or returning a struct
+# by value is refused (the IR's struct convention is not ILP32 yet). Red:
+# built (and miscompiled).
+for L1_S in extern:rv32_extern_struct:5:17:"extern fn 'c_arg' takes or returns a struct by value; riscv32 objects do not follow the" export:rv32_export_struct:6:20:"fn 'mk' is @export and takes or returns a struct by value; riscv32 objects do not"; do
+    L1_N=${L1_S%%:*}; L1_F=${L1_S#*:}; L1_P=${L1_F#*:}; L1_F=${L1_F%%:*}; L1_M=${L1_P#*:*:}; L1_P=${L1_P%:"$L1_M"}
+    TOTAL=$((TOTAL + 1))
+    rm -f $L1_D/rv.o
+    if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=riscv32 -c "$L1_FX/refuse/$L1_F.kr" -o $L1_D/rv.o > $L1_D/err 2>&1 || [ -f $L1_D/rv.o ]; then
+        l1_bad refuse_rv32_obj_${L1_N}_struct "built (want the riscv32 object struct refusal)"
+    elif grep -qF "$L1_F.kr:$L1_P: error: $L1_M" $L1_D/err && grep -q 'Pass a pointer to the struct instead.' $L1_D/err; then
+        l1_ok refuse_rv32_obj_${L1_N}_struct "refused at $L1_P"
+    else
+        l1_bad refuse_rv32_obj_${L1_N}_struct "not the refusal: $(head -1 $L1_D/err | cut -c1-160)"
+    fi
+done
+# Control: a non-@export function with a struct parameter still builds.
+TOTAL=$((TOTAL + 1))
+rm -f $L1_D/rv.o
+if timeout -k 5 "$RUN_TEST_TIMEOUT" $KRC --arch=riscv32 -c "$L1_FX/refuse/rv32_internal_struct_ok.kr" -o $L1_D/rv.o > $L1_D/err 2>&1 && [ -f $L1_D/rv.o ]; then
+    l1_ok rv32_obj_internal_struct_ok "builds"
+else
+    l1_bad rv32_obj_internal_struct_ok "not built: $(grep -m1 error $L1_D/err | cut -c1-140)"
+fi
+
+# #312 / #314: a struct variable used where an integer is expected is its
+# address (the default backend's meaning): `return s` from `-> u64`, `f(s)`
+# into a u64 parameter (also through a method), `p = s` / `o.f = s` / `g = s`.
+# --legacy returned or passed its contents, or crashed. Red: --legacy 139
+# (Windows 5). arg24 (the #306 regression witness) and ret_field_ctl are
+# guards; ret_param, ret_struct_ok and assign_ctl are controls. Guards too:
+# arg16 and scalar_param_method on Windows (a 16-byte struct went by address
+# there already). ret_struct_ok was red on x86_64 (#310) and Windows (#309).
+L1_SV="$L1_FX/structvar"
+for L1_S in ret_var:7 ret_ifelse:34 ret_self:36 ret_field:89 arg8:34 arg16:34 arg24:34 ret_field_ctl:89 ret_param:40 ret_struct_ok:55 assign:34 assign_global:34 assign_ctl:34; do
+    l1_trio legacy_struct_var_as_scalar_${L1_S%%:*} ${L1_S#*:} $L1_SV/${L1_S%%:*}.kr
+done
+l1_trio legacy_scalar_param_method 34 $L1_SV/scalar_param_method.kr
+rm -rf $L1_D
+
 # asm_naked_spill_warns_x86_64 (#222, a visible decision, not a fix): an
 # @naked body whose six in() registers are the whole naked colour file. The
 # bans make its values spill (2 -> 8 slots), which is still only a warning
@@ -16750,10 +17693,13 @@ done
 #      calls are bound by the platform linker. --target=windows --emit=obj
 #      runs the legacy codegen, which does route on an executable build, so
 #      the predicate's "executable build" clause is what keeps these as
-#      relocations. win_iat_abi.kr makes five extern calls; the COFF .text
-#      section header (the first section, NumberOfRelocations at +32) must
-#      count exactly five relocations on both arches. Routed calls carry no
-#      relocation, so a leak drops the count to 0.
+#      relocations. win_iat_abi.kr makes five extern calls; the .text
+#      relocations (the first section's; PointerToRelocations at +24,
+#      NumberOfRelocations at +32) must hold exactly five call relocations
+#      (IMAGE_REL_AMD64_REL32 = 4 / IMAGE_REL_ARM64_BRANCH26 = 3) on both
+#      arches. Routed calls carry no relocation, so a leak drops the count to
+#      0. Since L1 (#298/#299) an arm64 object also relocates its string
+#      literals (PAGEBASE_REL21 + PAGEOFFSET_12A), which are not counted.
 TOTAL=$((TOTAL + 1))
 RWI_WHY=""
 for rwi_a in x86_64 arm64; do
@@ -16764,7 +17710,14 @@ for rwi_a in x86_64 arm64; do
         RWI_WHY="$RWI_WHY $rwi_a:first-section-not-.text"; continue
     fi
     RWI_NREL=$(pe_u "$RWI_DIR/o.obj" 52 2)
-    [ "$RWI_NREL" = "5" ] || RWI_WHY="$RWI_WHY $rwi_a:$RWI_NREL-relocations-want-5"
+    RWI_RP=$(pe_u "$RWI_DIR/o.obj" 44 4)
+    RWI_CT=4; [ $rwi_a = arm64 ] && RWI_CT=3
+    RWI_NCALL=0; RWI_I=0
+    while [ $RWI_I -lt "$RWI_NREL" ]; do
+        [ "$(pe_u "$RWI_DIR/o.obj" $((RWI_RP + RWI_I * 10 + 8)) 2)" = "$RWI_CT" ] && RWI_NCALL=$((RWI_NCALL + 1))
+        RWI_I=$((RWI_I + 1))
+    done
+    [ "$RWI_NCALL" = "5" ] || RWI_WHY="$RWI_WHY $rwi_a:$RWI_NCALL-call-relocations-want-5"
 done
 if [ -z "$RWI_WHY" ]; then
     PASS=$((PASS + 1)); echo "  win_import_obj_keeps_relocations: PASS"
@@ -39642,8 +40595,9 @@ done
 #    the hidden --test-coff-reloc-limit=N lowers 65535 so pe_unwind_obj_chain
 #    (5 functions: 15 x64 / 10 arm64 relocations) is refused at one below its
 #    count with the error and no output file, and builds at exactly its count;
-#  * a module that defines no function (statics only) stays a one-section
-#    object without .pdata/.xdata, while the fixture gets three sections.
+#  * a module that defines no function (statics only) gets no .pdata/.xdata:
+#    its sections are .text and, since L1 (#149), the writable .data holding
+#    the statics; the fixture (functions, no statics) gets three sections.
 if ! command -v python3 > /dev/null 2>&1; then
     pe_row_skip pe_unwind_obj_reloc_limit "no python3"; pe_row_skip pe_unwind_obj_no_functions "no python3"
 else
@@ -39670,7 +40624,7 @@ else
     PEU_WHY=""
     printf 'static uint64 PEU_K1 = 7\nstatic uint64 PEU_K2 = 0x1234\n' > "$T10_D/peu_consts.kr"
     for PEU_A in x86_64 arm64; do
-        for PEU_SN in peu_consts:1 pe_unwind_obj_chain:3; do
+        for PEU_SN in peu_consts:2 pe_unwind_obj_chain:3; do
             PEU_S=${PEU_SN%%:*}; PEU_WANT=${PEU_SN#*:}
             PEU_SRC="$T10_D/$PEU_S.kr"; [ -e "$PEU_SRC" ] || PEU_SRC="$DIR/fixtures/$PEU_S.kr"
             if ! $T10_KRC --freestanding --arch=$PEU_A --target=windows --emit=obj "$PEU_SRC" -o "$T10_D/peu_nf.obj" > "$T10_D/peu_nf.log" 2>&1; then
@@ -39684,13 +40638,13 @@ print(n, ','.join(b[20 + 40 * i:28 + 40 * i].rstrip(b'\0').decode() for i in ran
 PEUNFEOF
 )
             case "$PEU_WANT" in
-                1) [ "$PEU_O" = "1 .text" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '1 .text';" ;;
+                2) [ "$PEU_O" = "2 .text,.data" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '2 .text,.data';" ;;
                 3) [ "$PEU_O" = "3 .text,.pdata,.xdata" ] || PEU_WHY="$PEU_WHY $PEU_A $PEU_S: sections '$PEU_O', want '3 .text,.pdata,.xdata';" ;;
             esac
         done
     done
     rm -f "$T10_D"/peu_rl.* "$T10_D"/peu_nf.* "$T10_D/peu_consts.kr"
-    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_no_functions "a statics-only module is a one-section object on both arches; a module with functions gets .text/.pdata/.xdata"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok pe_unwind_obj_no_functions "a statics-only module gets .text/.data and no unwind sections on both arches; a module with functions gets .text/.pdata/.xdata"
     else pe_row_bad pe_unwind_obj_no_functions "$PEU_WHY"; fi
 fi
 

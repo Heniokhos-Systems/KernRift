@@ -305,6 +305,30 @@ jobs:
           file /tmp/cross-android-x86 | grep -qi "shared object\|DYN"
           echo "Android x86_64 PIE: OK"
 
+      # L1: the object files and C callers of the macOS / Windows runtime rows
+      # (test-macos, test-windows-x64, test-windows-arm64; the native Intel
+      # leg builds its own in cross-platform.yml). One tree, /tmp/obj-rows,
+      # uploaded with cross-compiled: /tmp/bins/obj-rows on macOS,
+      # C:\tmp\bins\obj-rows on Windows. Fixtures: tests/fixtures/obj_rows.
+      - name: Object-file fixtures for the macOS / Windows runtime rows (#294 #149 #301 #296 #297 #298 #299 #303 #306 #308 #309 #315)
+        run: |
+          set -eu; O=/tmp/obj-rows; F=tests/fixtures/obj_rows
+          mkdir -p $O/macho $O/coff-x64 $O/coff-arm64 $O/src
+          SH="S8 S16 S24 F16 H8 U3 S6 S12 S20"
+          for a in x86_64 arm64; do
+            for t in multi ext strl fa exp; do ./build/krc2 --arch=$a --target=macos -c $F/$t.kr -o $O/macho/$t-$a.o; done
+            for T in $SH; do ./build/krc2 --arch=$a --target=macos -c $F/abi_$T.kr -o $O/macho/abi_$T-$a.o; done
+          done
+          for t in multi ext strl fa exp k g fd ret; do
+            ./build/krc2 --freestanding --arch=x86_64 --target=windows --emit=obj $F/$t.kr -o $O/coff-x64/$t.obj
+          done
+          for T in $SH; do ./build/krc2 --freestanding --arch=x86_64 --target=windows --emit=obj $F/abi_$T.kr -o $O/coff-x64/abi_$T.obj; done
+          for t in multi ext strl fa exp; do
+            ./build/krc2 --freestanding --arch=arm64 --target=windows --emit=obj $F/$t.kr -o $O/coff-arm64/$t.obj
+          done
+          ./build/krc2 --arch=arm64 --target=macos -c $F/far.kr -o $O/macho/far-arm64.o   # #345
+          cp $F/*.c $F/*.h $F/refuse_win_arm64_overflow.kr $O/src/
+
       - name: Android x86_64 execution test
         run: |
           # Run PIE ELF directly via glibc loader (bypasses PT_INTERP=/system/bin/linker64)
@@ -496,6 +520,7 @@ jobs:
             /tmp/winret-x64.exe
             /tmp/winret-arm.exe
             /tmp/peu-arm64/
+            /tmp/obj-rows/
 
   build-test-linux-arm64:
     name: Build and Test (Linux ARM64, native)
@@ -755,6 +780,38 @@ jobs:
           name: cross-compiled
           path: /tmp/bins
 
+      # L1: the Mach-O objects of the Linux job, linked here with Xcode's clang
+      # and run (x86_64 under Rosetta; natively in cross-platform.yml
+      # test-macos-x64). A signal is a FAIL whatever the want; all 83 rows
+      # must PASS.
+      - name: Mach-O object rows (#294 #301 #296 #298 #299 + C struct ABI)
+        run: |
+          set -u; FAIL=0; D=/tmp/bins/obj-rows; N=0
+          row() { # row NAME ARCH WANT CFLAGS... -- OBJ
+            local name=$1 a=$2 want=$3; shift 3
+            if ! clang -arch $a -O1 "$@" -o /tmp/r_$name 2>/tmp/r_$name.err; then
+              echo "FAIL: $name (link: $(head -1 /tmp/r_$name.err))"; FAIL=1; return; fi
+            set +e; /tmp/r_$name; got=$?; set -e
+            if [ $got -ge 128 ]; then echo "FAIL: $name (signal $((got-128)))"; FAIL=1
+            elif [ "$got" = "$want" ]; then echo "  $name: PASS (exit $got)"; N=$((N+1))
+            else echo "FAIL: $name (want $want, got $got)"; FAIL=1; fi
+          }
+          for a in arm64 x86_64; do       # x86_64 under Rosetta here; natively in cross-platform.yml test-macos-x64
+            row macho_obj_static_write_$a  $a 61 $D/src/c_macos.c $D/macho/multi-$a.o
+            row macho_obj_static_extern_$a $a 83 $D/src/c_macos.c $D/macho/ext-$a.o
+            row macho_obj_string_$a        $a 87 $D/src/c_macos.c $D/macho/strl-$a.o
+            row macho_obj_fn_addr_$a       $a 88 $D/src/c_macos.c $D/macho/fa-$a.o
+            row macho_obj_export_$a        $a 11 $D/src/c_macos.c $D/macho/exp-$a.o
+            for T in S8 S16 S24 F16 H8 U3 S6 S12 S20; do for m in 1 4 8 32; do
+              row macho_obj_struct_abi_${T}_${m}_$a $a 0 -I$D/src -DMODE=$m -include $D/src/abi_$T.h $D/src/abi_main_macos.c $D/macho/abi_$T-$a.o
+            done; done
+          done
+          # #345: a static 9000000 bytes into __data (past the 24-bit ADDEND reach)
+          row macho_obj_far_static_arm64 arm64 93 $D/src/c_macos.c $D/macho/far-arm64.o
+          echo "macho_obj rows passed: $N (want 83)"
+          [ $N -eq 83 ] || FAIL=1
+          exit $FAIL
+
       - name: Download krc.krbo + kr runners
         uses: actions/download-artifact@v7
         with:
@@ -929,6 +986,39 @@ jobs:
           name: krc-fatbinary
           path: C:\tmp\fatbin
 
+      # L1: the x86_64 COFF objects of the Linux job, linked here with clang +
+      # lld-link (entry `start`, no CRT) and run natively. A crash (negative
+      # or > 255 NTSTATUS) always FAILs; all 45 rows must PASS.
+      - name: COFF object rows, x86_64 (#149 #296 #297 #303 #306 #308 #309 #315)
+        shell: pwsh
+        run: |
+          $D = "C:\tmp\bins\obj-rows"; $script:fail = 0; $script:n = 0
+          foreach ($t in "clang","lld-link") { if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { Write-Host "FAIL: coff_obj_* ($t missing)"; exit 1 } }
+          function Row($name, $want, $obj, [string[]]$cargs) {
+            & clang --target=x86_64-pc-windows-msvc -O1 -ffreestanding -fno-stack-protector -fno-builtin @cargs -c -o "$env:TEMP\$name.c.obj"
+            & lld-link /nodefaultlib /entry:start /subsystem:console "$env:TEMP\$name.c.obj" "$D\coff-x64\$obj" "/out:$env:TEMP\$name.exe"
+            if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: $name (link)"; $script:fail = 1; return }
+            & "$env:TEMP\$name.exe"; $got = $LASTEXITCODE
+            if ($got -lt 0 -or $got -gt 255) { Write-Host ("FAIL: $name (crash 0x{0:X8})" -f $got); $script:fail = 1 }
+            elseif ($got -eq $want) { Write-Host "  ${name}: PASS (exit $got)"; $script:n++ }
+            else { Write-Host "FAIL: $name (want $want, got $got)"; $script:fail = 1 }
+          }
+          Row coff_obj_static_write          61  multi.obj @("$D\src\c_win.c")
+          Row coff_obj_static_extern         83  ext.obj   @("$D\src\c_win.c")
+          Row coff_obj_string                87  strl.obj  @("$D\src\c_win.c")
+          Row coff_obj_fn_addr               88  fa.obj    @("$D\src\c_win.c")
+          Row coff_obj_export                11  exp.obj   @("$D\src\c_win.c")
+          Row coff_obj_float_param           12  fd.obj    @("$D\src\c_win_fd.c")
+          Row coff_obj_struct_copy_kr_to_c   115 k.obj     @("$D\src\c_win_cmod.c")
+          Row coff_obj_struct_c_to_kr        114 g.obj     @("$D\src\c_win_g.c")
+          Row coff_obj_struct_ret_shapes     0   ret.obj   @("$D\src\c_win_ret.c")
+          foreach ($T in "S8","S16","S24","F16","H8","U3","S6","S12","S20") { foreach ($m in 1,4,8,32) {
+            Row "coff_obj_struct_abi_${T}_$m" 0 "abi_$T.obj" @("-DMODE=$m", "-include", "$D\src\abi_$T.h", "$D\src\abi_main_win.c")
+          } }
+          Write-Host "coff_obj x86_64 rows passed: $script:n (want 45)"
+          if ($script:n -ne 45) { $script:fail = 1 }
+          exit $script:fail
+
       - name: Run Windows x86_64 binary
         shell: pwsh
         run: |
@@ -986,6 +1076,38 @@ jobs:
         with:
           name: krc-fatbinary
           path: C:\tmp\fatbin
+
+      # L1: the arm64 COFF objects of the Linux job, linked with clang +
+      # lld-link /machine:arm64 and run natively, and the located refusal of a
+      # Windows-arm64 --legacy call_ptr whose by-value struct arguments
+      # overflow the registers (native kr runner + krc.krbo). All 6 must PASS.
+      # The first ci/** push confirms clang/lld-link on this image.
+      - name: COFF object rows, arm64 (#149 #296 #298 #299) and the Windows-arm64 refusal
+        shell: pwsh
+        run: |
+          $D = "C:\tmp\bins\obj-rows"; $script:fail = 0; $script:n = 0
+          foreach ($t in "clang","lld-link") { if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { Write-Host "FAIL: coff_obj_*_arm64 ($t missing)"; exit 1 } }
+          function Row($name, $want, $obj) {
+            & clang --target=aarch64-pc-windows-msvc -O1 -ffreestanding -fno-stack-protector -fno-builtin -c "$D\src\c_win.c" -o "$env:TEMP\$name.c.obj"
+            & lld-link /machine:arm64 /nodefaultlib /entry:start /subsystem:console "$env:TEMP\$name.c.obj" "$D\coff-arm64\$obj" "/out:$env:TEMP\$name.exe"
+            if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: $name (link)"; $script:fail = 1; return }
+            & "$env:TEMP\$name.exe"; $got = $LASTEXITCODE
+            if ($got -lt 0 -or $got -gt 255) { Write-Host ("FAIL: $name (crash 0x{0:X8})" -f $got); $script:fail = 1 }
+            elseif ($got -eq $want) { Write-Host "  ${name}: PASS (exit $got)"; $script:n++ }
+            else { Write-Host "FAIL: $name (want $want, got $got)"; $script:fail = 1 }
+          }
+          Row coff_obj_static_write_arm64  61 multi.obj
+          Row coff_obj_static_extern_arm64 83 ext.obj
+          Row coff_obj_string_arm64        87 strl.obj
+          Row coff_obj_fn_addr_arm64       88 fa.obj
+          Row coff_obj_export_arm64        11 exp.obj
+          # the native arm64 krc (kr runner + krc.krbo) must refuse, located, and write no output
+          $kr = "C:\tmp\fatbin\kr-runners\kr-windows-arm64.exe"; $krbo = "C:\tmp\fatbin\krc.krbo"
+          $out = & $kr $krbo --legacy --arch=arm64 --target=windows "$D\src\refuse_win_arm64_overflow.kr" -o "$env:TEMP\r.exe" 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0 -and $out -match "not supported on Windows arm64 with --legacy" -and -not (Test-Path "$env:TEMP\r.exe")) { Write-Host "  win_arm64_struct_overflow_refusal: PASS"; $script:n++ }
+          else { Write-Host "FAIL: win_arm64_struct_overflow_refusal (exit $LASTEXITCODE): $out"; $script:fail = 1 }
+          Write-Host "Windows arm64 rows passed: $script:n (want 6)"; if ($script:n -ne 6) { $script:fail = 1 }
+          exit $script:fail
 
       - name: Fat-binary krc via kr runner (Windows ARM64)
         shell: pwsh

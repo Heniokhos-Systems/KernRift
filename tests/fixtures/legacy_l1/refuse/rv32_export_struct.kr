@@ -1,0 +1,6 @@
+struct S {
+    uint32 a
+    uint32 b
+}
+@export
+fn mk(uint32 x) -> S { S s; s.a = x; s.b = x; return s }

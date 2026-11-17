@@ -1,0 +1,31 @@
+struct U3 {
+    uint8 a
+    uint8 b
+    uint8 c
+}
+struct S6 {
+    uint16 a
+    uint16 b
+    uint16 c
+}
+fn g3(uint64 z, U3 q) -> uint64 { uint64 r = q.a * 100 + q.b * 10 + q.c; q.a = 9; return r + z }
+fn g6(U3 p, S6 q, uint64 k, uint64 l, uint64 m) -> uint64 { uint64 r = q.a * 100 + q.b * 10 + q.c + p.c + m; q.a = 9; return r }
+fn mk3(uint64 x) -> U3 { U3 r; r.a = x; r.b = x + 1; r.c = x + 2; return r }
+fn main() {
+    U3 t
+    t.a = 1
+    t.b = 2
+    t.c = 3
+    S6 s
+    s.a = 4
+    s.b = 5
+    s.c = 6
+    uint64 bad = 0
+    if g3(1, t) != 124 { bad = bad + 1 }
+    if t.a != 1 { bad = bad + 2 }
+    if g6(t, s, 0, 0, 7) != 466 { bad = bad + 4 }
+    if s.a != 4 { bad = bad + 8 }
+    U3 u = mk3(5)
+    if u.a != 5 || u.c != 7 { bad = bad + 16 }
+    exit(bad + 40)
+}

@@ -467,7 +467,9 @@ while true {
 
 ### loop
 
-`loop { ... }` is an infinite loop — sugar for `while true`. Exit with
+`loop { ... }` is an infinite loop, and the infinite-loop form the compiler
+knows: a function ending in `loop { }` does not fall through (it needs no final
+`return`), which is not true of `while true` or any other `while`. Exit with
 `break` or `return`:
 
 ```kr
@@ -1891,7 +1893,7 @@ signed_le(a, b)    signed_ge(a, b)
 | Function | Description |
 |---|---|
 | `fn_addr("name")` | Get the address of a named function. **The name is a string literal**, resolved at link time — `fn_addr(name)` with a bare identifier is refused, because the resolver strips the quotes it expects and would otherwise look up a name two characters shorter than the one you wrote. |
-| `call_ptr(addr, ...)` | Call a function by address with any number of arguments. The caller's signature must match the target's or the result is undefined. |
+| `call_ptr(addr, ...)` | Call a function by address with any number of arguments. The caller's signature must match the target's or the result is undefined. A struct argument is passed by value, exactly as in a direct call. The target must return a scalar: `call_ptr` cannot know its target's return type, so a struct-returning target is undefined. |
 | `call_ptr_f64(addr, ...)` | As `call_ptr`, for a callee returning `f64`. The result comes back in the float return register, which `call_ptr` does not read. |
 
 Example — passing a comparator to a generic sort-ish loop:
@@ -1956,9 +1958,12 @@ linking or ELF object introspection).
 fn my_entry() { }
 ```
 
+In an object file (`-c` / `--emit=obj`: ELF, COFF and Mach-O alike) an
+`@export` function is an external symbol a C program can call; the other
+functions stay local.
+
 **Calling KernRift from C on Windows** (a COFF object linked into a C
-program, Appendix C; there `@export` does not make a function global, only
-`main` is): KernRift code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15`,
+program, Appendix C): KernRift code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15`,
 which Win64 makes nonvolatile (#160) — nor does an asm block that writes
 them (§14). The C caller must treat every call into
 KernRift as clobbering them (for example, call through a small wrapper that
@@ -3422,6 +3427,10 @@ error: float (f16/f32/f64) not supported on riscv32 (no hardware FPU)
 error: riscv32: IR op 70 not yet implemented        // IR_ALLOC: struct or alloc()
 ```
 
+In a riscv32 object (`-c` / `--emit=obj`), an `extern fn` or `@export` fn
+cannot take or return a struct by value yet: that is a compile error (#307;
+planned for v2.11.2). Pass a pointer to the struct instead.
+
 The 64-bit restriction is the one that bites first when porting existing code,
 because `u64` is the language's integer default (§3). On these targets the word
 is 4 bytes; write `u32` (or `uint32`) everywhere.
@@ -3538,7 +3547,8 @@ call through that import's IAT slot, using the Windows calling convention
 32-byte shadow area; ARM64: AAPCS64, `x0`–`x7` then the stack). Routed imports
 take integer/pointer arguments only: every argument travels in a
 general-purpose register or stack slot, so declaring one with an `f32`/`f64`
-parameter or return type is a compile error at the declaration. The result is
+parameter or return type is a compile error at the declaration; a struct
+parameter or return type is refused the same way (#307). The result is
 the raw `rax`/`x0`: a Win32 `BOOL` or `DWORD` return only defines the low 32
 bits, so mask it (`ok & 0xFFFFFFFF`) before testing it. The name must be
 declared `extern fn` — a function you define yourself with the same name
@@ -3555,6 +3565,30 @@ executable is produced, so `--emit=asm` and `--emit=ir` dumps for
 `--target=windows` show the pre-routing form (a stub body for the extern and
 a direct call to it), while the `.exe` calls through the IAT; `--emit=obj`
 keeps ordinary linker relocations.
+
+**What an object file holds.** `static` variables live in a writable data
+section of the object — `.data` in ELF and COFF, `__DATA,__data` in Mach-O —
+reached through relocations, so a linked program can read and write them.
+Zero-initialised statics are stored as zero bytes there too (there is no
+`.bss`). Every `@export` function is an external symbol in all three formats;
+the others are local (riscv32 objects export every function). String literals
+stay in the code section.
+
+**Structs across the C boundary.** In an object file (`-c` / `--emit=obj`,
+which always use the legacy backends) and `--emit=lkm`, by-value struct
+arguments and returns of `extern fn` and `@export` functions follow the
+platform C ABI (x86_64 System V, Windows x64, AAPCS64) for structs whose
+KernRift layout equals C's — no `f16`/`f32` fields (they take an 8-byte slot
+in KernRift) and every field naturally aligned — when the struct is 1–8
+bytes of integer members (on Windows x64 the 3-, 5-, 6- and 7-byte ones go by
+reference to a caller-owned copy, as Win64 requires), 8 or 16 bytes of `f64`
+members, 9–16 bytes of integer members, or larger than 16 bytes.
+Not yet: structs mixing `f64` and integer members in one 16-byte struct, `f64`
+HFAs of 3–4 members on arm64, and any struct with `f32`/`f16` members or
+alignment padding. Pass those by pointer; tracked as #315–#320, which will
+refuse the non-C-compatible ones at compile time. In a riscv32 object, an
+`extern fn` or `@export` function cannot take or return a struct by value yet
+(a compile error; #307, planned for v2.11.2): pass a pointer.
 
 `extern fn` names shadow built-ins: if you declare `extern fn write(...)`,
 calls to `write` resolve to the libc symbol instead of the `write` syscall
@@ -3864,43 +3898,68 @@ compiles (the `--legacy` backend does not prune such arms and refuses it).
 
 A relocatable object file (`.o` on Linux/macOS, `.obj` on Windows) produced
 by `--emit=obj` contains the minimum set of sections the platform linker
-needs. No `.rodata`, no `.bss`, no `.data` — string literals and static
-scalars are placed at the end of `.text` and referenced with RIP-relative
-addressing.
+needs. No `.rodata` and no `.bss`: string literals are placed at the end of
+`.text` and referenced PC-relatively; `static` variables (zero-initialised ones
+included, as zero bytes) live in a writable data section and are reached through
+relocations (v2.11.1: they used to sit in `.text`, so a write faulted, #294 #149
+#301).
 
 ### Linux x86_64 / arm64 (ELF)
 
 | Index | Name              | Type      | Purpose |
 |-------|-------------------|-----------|---------|
 | 0     | (null)            | NULL      | required by ELF |
-| 1     | `.text`           | PROGBITS  | code + string literals + static scalars |
-| 2     | `.data`           | PROGBITS  | (emitted empty — static data lives inside `.text`) |
-| 3     | `.symtab`         | SYMTAB    | every `fn` is a symbol; `main` is `GLOBAL`, others `LOCAL` |
+| 1     | `.text`           | PROGBITS  | code + string literals |
+| 2     | `.data`           | PROGBITS (WA, align 8) | the `static` variables (empty when there are none) |
+| 3     | `.symtab`         | SYMTAB    | every `fn` is a symbol; `main` and `@export` functions are `GLOBAL`, others `LOCAL` (riscv32: every function `GLOBAL`); a `LOCAL` section symbol for `.data` when there are statics, and on arm64 for `.text` when a string or `fn_addr` is referenced |
 | 4     | `.strtab`         | STRTAB    | symbol name strings |
 | 5     | `.shstrtab`       | STRTAB    | section header names |
 | 6     | `.note.GNU-stack` | PROGBITS (flags=0) | marks the binary as non-exec-stack so `ld` doesn't warn |
-| 7     | `.rela.text`      | RELA      | only present if the program uses `extern fn` |
+| 7     | `.rela.text`      | RELA      | `extern fn` calls, static references, and arm64 string / `fn_addr` references |
 
 Relocation types for `extern fn` call sites:
 - **x86_64**: `R_X86_64_PLT32` (disp32 = -4 addend)
 - **arm64**: `R_AARCH64_CALL26` (addend 0)
 
+Relocation types for static references (against the `.data` section symbol,
+addend = the static's offset; on arm64 also string literals and `fn_addr`,
+against `.text`):
+- **x86_64**: `R_X86_64_PC32` (addend = offset - 4)
+- **arm64**: `R_AARCH64_ADR_PREL_PG_HI21` on the `adrp`, then
+  `R_AARCH64_ADD_ABS_LO12_NC` (`add`) or `R_AARCH64_LDST64_ABS_LO12_NC`
+  (`ldr`/`str`)
+- **riscv32**: `R_RISCV_PCREL_HI20` on the `auipc`, `R_RISCV_PCREL_LO12_I` on
+  the `addi` (against a local label at the `auipc`)
+
 ### macOS x86_64 / arm64 (Mach-O)
 
-One `__TEXT,__text` section containing code + string literals. Symbol
-names are prefixed with an underscore (`_main`, `_write`) as required
-by the Darwin C ABI. `extern fn` call sites use relocations
-`X86_64_RELOC_BRANCH` (x86_64) and `ARM64_RELOC_BRANCH26` (arm64).
+A `__TEXT,__text` section containing code + string literals and, when there
+are statics, a `__DATA,__data` section right after it. Symbol names are
+prefixed with an underscore (`_main`, `_write`) as required by the Darwin C
+ABI; `_main` and every `@export` function are external. `extern fn` call sites
+use relocations `X86_64_RELOC_BRANCH` (x86_64) and `ARM64_RELOC_BRANCH26`
+(arm64). Static references use `X86_64_RELOC_SIGNED` (x86_64, against the
+section) or `ARM64_RELOC_ADDEND` + `ARM64_RELOC_PAGE21` / `ARM64_RELOC_PAGEOFF12`
+(arm64, against the local symbol `ltmp1`, the start of `__data`; a string
+literal or `fn_addr` names the function symbol at or before its target plus an
+offset, as clang does). The ADDEND is a signed 24-bit field, so a target 4 MiB
+or more past that symbol gets its own local label: `_krd<offset>` every 4 MiB
+of `__data` that is referenced, `_krt<offset>` at a far `__text` target.
 
 ### Windows x86_64 / arm64 (COFF `.obj`)
 
 A `.text` section, then `.pdata` and `.xdata` (each function's unwind record,
-with relocations against `.text`) when the module has any function, and one
-COFF symbol table; a module with only statics is a one-section `.text` object.
+with relocations against `.text`) when the module has any function, then a
+writable `.data` section when there are statics, and one COFF symbol table.
 No underscore prefix on x86_64. `extern fn` call sites use relocations
 `IMAGE_REL_AMD64_REL32` (x86_64) and `IMAGE_REL_ARM64_BRANCH26` (arm64).
+Static references use `IMAGE_REL_AMD64_REL32` (x86_64) or
+`IMAGE_REL_ARM64_PAGEBASE_REL21` + `PAGEOFFSET_12A` / `PAGEOFFSET_12L` (arm64)
+against one STATIC symbol per referenced offset (`$krs…` in `.data`; `$krt…` in
+`.text` for arm64 strings and `fn_addr`).
 
-**Linking into a C program:** only `main` is a global symbol. The object's
+**Linking into a C program:** `main` and every `@export` function are global
+symbols. The object's
 code does not preserve `rsi`, `rdi` or `xmm6`–`xmm15` (#160), nor does an
 inline-asm block that writes them (§14): the C side must
 treat a call into it as clobbering them — see the

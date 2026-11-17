@@ -1,0 +1,12 @@
+struct Node {
+    u64 value
+    u64 next
+}
+fn Node.me(Node self) -> u64 { return self }
+fn main() {
+    Node n = alloc(16)
+    n.value = 6
+    u64 p = n.me()
+    Node m = p
+    exit(m.value + 30)
+}

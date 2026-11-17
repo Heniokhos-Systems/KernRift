@@ -1,0 +1,15 @@
+struct R {
+    uint64 a
+    uint64 b
+    uint64 c
+}
+extern fn cmod(R q) -> uint64
+@export
+fn f(uint64 z) -> uint64 {
+    R r
+    r.a = 1
+    r.b = 2
+    r.c = 3
+    uint64 v = cmod(r)
+    return r.a * 100 + v
+}

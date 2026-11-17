@@ -1,0 +1,2 @@
+fn f() -> uint64 { f64 a = -2.5; f64 b = a + 10.0; return f64_to_int(b) }
+fn main() { exit(f()) }

@@ -1775,7 +1775,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_ARG (51): move value to CALL0 arg register a2..a7 -----
-    // Mirror of ir_riscv.kr:1541. imm is the 0-based arg index (ir.kr:3783):
+    // Mirror of ir_riscv.kr:1541. imm is the 0-based arg index (ir.kr:3804):
     // < 6 = register arg in a2..a7 (CALL0 ABI — six arg registers, vs
     // riscv's eight a0-a7); >= 100 = direct physical AR target (ASM I/O
     // constraints); 6..99 = overflow arg (the 7th+), stored to the pre-
@@ -1823,7 +1823,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // ----- IR_CALL (50): call0 <target> with a callee-name fixup -----
     // Mirror of ir_riscv.kr:1577, but xtensa reaches the callee in a single
     // `call0` (24-bit, PC-relative ±512 KiB) rather than an auipc+jalr pair.
-    // src1 is the ARG COUNT (ir.kr:3787), NOT a vreg — never resolve it. imm
+    // src1 is the ARG COUNT (ir.kr:3808), NOT a vreg — never resolve it. imm
     // is the callee's name token. Emit a placeholder call0 (imm18=0) and
     // record [call0_site:u32, callee_tok:u32] into the shared fixup_table;
     // resolve_fixups_xtensa() patches the imm18 after every function is laid
@@ -2035,7 +2035,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     // Mirror of ir_riscv.kr:1376. Offset is always 0 — struct/array offsets
     // are folded into a prior ADD by the IR lowering, so the address is
     // entirely in src1. Width can arrive in imm OR src2 (struct field
-    // loads reuse the src2 slot — ir.kr:4050/4086/4152 — the same as the
+    // loads reuse the src2 slot — ir.kr:4071/4107/4173 — the same as the
     // riscv/arm64 backends read it). IR has no signed-load marking
     // anywhere in ir.kr (riscv's comment at the same site: x86 uses movzx,
     // arm64 ldrb/ldrh, never a sign-extending load, for every narrow load
@@ -2355,7 +2355,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
 
     // ----- IR_STACK_ADDR (32): dst = address of a compile-time local array -----
     // imm = byte offset within this function's stack-array region (rel_off,
-    // assigned by ir.kr:4499). The region sits directly above the spill
+    // assigned by ir.kr:4520). The region sits directly above the spill
     // slots — exactly matching the frame layout already folded into
     // cs_base/total_frame above (ir_xtensa_gen step 5):
     //     base_off = XT_OVERFLOW_RESERVE + ir_spill_count*4 + imm
@@ -2383,7 +2383,7 @@ fn ir_emit_xtensa_insn(uint64 ii) {
     }
 
     // ----- IR_MEMCMP (88): fixed-length byte compare -----
-    // Semantics (ir.kr:95/11681, mirror of ir_riscv.kr:1794-1845): dest =
+    // Semantics (ir.kr:95/11719, mirror of ir_riscv.kr:1794-1845): dest =
     // (memcmp(src1, src2, imm) == 0) ? 1 : 0. src1/src2 = pointers, imm = a
     // COMPILE-TIME byte count (not a vreg — struct_total_size() folded in at
     // the one emit site, ir.kr:2148). Assume-equal result preset AFTER the

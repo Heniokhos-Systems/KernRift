@@ -1,0 +1,6 @@
+struct S {
+    f32 x
+    uint64 y
+}
+fn f() -> uint64 { S s; s.x = 2.5; s.y = 1; return f32_to_int(s.x) + s.y }
+fn main() { exit(f()) }

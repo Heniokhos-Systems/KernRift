@@ -22,6 +22,15 @@ decoded (pc, target) RVAs of the two must be identical: .text keeps RVA
 be the same.
 
 Exit 0 when every pair resolves (and, with two images, the lists agree).
+
+  a64_adrp_targets.py --list IMAGE [SYMBOL]   (L1: #294 #298 #299 #301)
+
+lists the references of SYMBOL's code (every function when absent or `*`)
+in a linked image of any format llvm-objdump reads (Mach-O, ELF, PE): for
+arm64 each `adrp` + `add`/`ldr`/`str` pair decoded as above, for x86_64 each
+RIP-relative operand llvm-objdump resolves (its `# 0x...` comment). One line
+per reference, `0x<pc> <kind> -> 0x<target> in <section>` (`?` = no section).
+Exit 0 when at least one reference is listed.
 """
 import struct
 import sys
@@ -101,7 +110,67 @@ def pairs(path):
     return out, bad, unpaired, soh
 
 
+def listing(path, sym):
+    import re
+    import subprocess
+    secs = []
+    for ln in subprocess.run(['llvm-objdump', '-h', path], capture_output=True, text=True).stdout.splitlines():
+        m = re.match(r'\s*\d+\s+(\S+)\s+([0-9a-f]+)\s+([0-9a-f]+)', ln)
+        if m:
+            secs.append((m.group(1), int(m.group(3), 16), int(m.group(2), 16)))
+
+    def where(t):
+        for n, a, sz in secs:
+            if a <= t < a + sz:
+                return n
+        return '?'
+    ins, out = [], []
+    cur = None
+    for ln in subprocess.run(['llvm-objdump', '-d', path], capture_output=True, text=True).stdout.splitlines():
+        m = re.match(r'^([0-9a-f]+) <(.*)>:', ln)
+        if m:
+            cur = m.group(2)
+            continue
+        if sym not in (None, '*') and cur != sym:
+            continue
+        m = re.match(r'\s*([0-9a-f]+):\s+([0-9a-f]{8})\s', ln)
+        if m:                                              # arm64: one word
+            ins.append((int(m.group(1), 16), int(m.group(2), 16)))
+            continue
+        m = re.match(r'\s*([0-9a-f]+):\s+((?:[0-9a-f]{2} )+).*#+ 0x([0-9a-f]+)', ln)
+        if m:                                              # x86_64: resolved RIP-relative operand
+            t = int(m.group(3), 16)
+            out.append('0x%x rip -> 0x%x in %s' % (int(m.group(1), 16), t, where(t)))
+    for k, (a, w) in enumerate(ins):
+        if (w & 0x9F000000) != 0x90000000 or k + 1 >= len(ins):
+            continue
+        imm = (((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3)
+        if imm & (1 << 20):
+            imm -= 1 << 21
+        page = (a & ~0xFFF) + (imm << 12)
+        a2, n = ins[k + 1]
+        if (n >> 5) & 31 != w & 31:
+            continue
+        if (n & 0xFFC00000) == 0x91000000:
+            lo, kind = (n >> 10) & 0xFFF, 'add'
+        else:
+            lo = None
+            for mask, val, scale in LDST:
+                if (n & mask) == val:
+                    lo, kind = ((n >> 10) & 0xFFF) * scale, 'ldst'
+                    break
+            if lo is None:
+                continue
+        t = page + lo
+        out.append('0x%x %s -> 0x%x in %s' % (a, kind, t, where(t)))
+    for x in out:
+        print(x)
+    return 0 if out else 1
+
+
 def main():
+    if len(sys.argv) in (3, 4) and sys.argv[1] == '--list':
+        return listing(sys.argv[2], sys.argv[3] if len(sys.argv) == 4 else None)
     if len(sys.argv) not in (2, 3):
         raise SystemExit(__doc__)
     a, bad, unp, soh = pairs(sys.argv[1])

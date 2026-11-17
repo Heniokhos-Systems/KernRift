@@ -1,0 +1,34 @@
+struct S8 {
+    uint64 a
+}
+extern fn c_arg(S8 q) -> uint64
+extern fn c_ret(uint64 x) -> S8
+@export
+fn k_arg(S8 q) -> uint64 {
+    uint64 s = q.a * 100
+    q.a = 9
+    return s
+}
+@export
+fn k_ret(uint64 x) -> S8 {
+    S8 r
+    r.a = x + 0
+    return r
+}
+@export
+fn f(uint64 z) -> uint64 {
+    S8 t
+    t.a = 1
+    uint64 bad = 0
+    if z == 1 {
+        uint64 v1 = c_arg(t)
+        if v1 != 100 { bad = bad + 1 }
+        if t.a != 1 { bad = bad + 2 }
+    }
+    if z == 4 {
+        S8 u = c_ret(5)
+        uint64 v2 = u.a * 100
+        if v2 != 500 { bad = bad + 4 }
+    }
+    return bad
+}
