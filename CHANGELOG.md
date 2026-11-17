@@ -398,6 +398,14 @@ row links are new.)
   binfmt handler (`tests/helpers/ci_binfmt_check.sh`). The stale `qemu-*-static` symlink step is
   gone. `qemu-system-riscv` is installed, so the x86_64 job runs the 11 riscv32 system rows it had
   been skipping since 26.04 split that package out.
+- *Rows that relied on binfmt.* Three rows passed on CI only because the qemu packages registered
+  binfmt handlers. The mutant compiler of `m2b_mutant_applies` was built for x86_64 and run directly;
+  it is now built for the host. `c1_f244_run_arm64` and the arm64-runner half of
+  `krbo_slices_selftest`, now its own row `krbo_slices_arm64_runner_matches`, run the arm64 kr runner
+  under qemu, and the runner exec()s an arm64 slice that only the kernel can run: on a host whose
+  kernel cannot run arm64 binaries (no arm64, no enabled qemu-aarch64 binfmt handler; tried with a
+  tiny program, not read from `/proc`) they are a counted skip naming the reason (a FAIL under
+  `REQUIRE_FULL_RUN=1`). The rest of `krbo_slices_selftest` runs everywhere.
 
 ## v2.11.0 — 2026-11-10
 

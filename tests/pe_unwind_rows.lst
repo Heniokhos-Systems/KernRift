@@ -33,6 +33,7 @@ pe_unwind_no_unwind_switch_arm64
 win_abi_frames_exec_arm64_legacy
 pe_unwind_tables_arm64_legacy
 krbo_slices_selftest
+krbo_slices_arm64_runner_matches
 pe_unwind_fat_slices
 pe_unwind_obj_x86_64
 pe_unwind_obj_arm64

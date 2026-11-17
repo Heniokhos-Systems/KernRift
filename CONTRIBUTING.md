@@ -28,7 +28,7 @@ first failure:
    compiles itself to a stable fixed point).
 2. **Test suite** — run it as `make test`, never as bare `bash
    tests/run_tests.sh` (which defaults `KRC` to `build/krc3` with no `--arch`
-   and reports mass failures on a healthy tree). 4981 tests on this tree.
+   and reports mass failures on a healthy tree). 4982 tests on this tree.
    Its scratch files live in one private directory under `KR_TEST_TMP`
    (else `TMPDIR`, else `/tmp`), which must be absolute, outside the
    checkout and exec-capable; the suite first checks the free space there
@@ -55,7 +55,11 @@ first failure:
 QEMU 8.2 or newer for the xtensa rows (they boot through `tests/helpers/xtensa_boot.sh`; a plain
 `qemu-system-xtensa -M lx60 -kernel <elf>` does not boot on QEMU 10.2, its commit 18727804c065);
 `qemu-user` (plain names, installed `--no-install-recommends` if foreign-arch binfmt handlers are
-unwanted) or `qemu-user-static` (which registers binfmt handlers on install); `qemu-system-riscv`
+unwanted) or `qemu-user-static` (which registers binfmt handlers on install) -- but a full
+`REQUIRE_FULL_RUN=1` run on an x86_64 host also needs an enabled qemu-aarch64 binfmt handler (or an
+arm64 host): `c1_f244_run_arm64` and `krbo_slices_arm64_runner_matches` run the arm64 kr runner under
+qemu, and the runner exec()s an arm64 slice, which only the kernel can run (without the handler
+they are skipped, so the gate fails); `qemu-system-riscv`
 on Ubuntu 26.04, where it left `qemu-system-misc`; Wine 9 or 10 (both `+unwind` trace formats and
 both `RtlCaptureStackBackTrace` counts are known to the rows). The native Windows scripts
 (`tests/windows/native_*.sh`) work with any OpenSSH: the post-quantum warning option of 10.2 is

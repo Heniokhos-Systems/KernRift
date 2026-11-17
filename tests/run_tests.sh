@@ -110,18 +110,33 @@ arch_runner() {
     return 1
 }
 # arch_execs A: whether THIS kernel runs an --arch=A Linux binary by itself,
-# as execve() from a running program does: A is the host's arch, or a
-# binfmt_misc handler for its qemu-user binary is enabled. A row whose
-# program runs ANOTHER program (the kr runner exec()s the slice it extracted)
-# needs this, not just arch_runner: qemu-user runs the first program, but the
-# kernel has to run the second, and without a handler that exec fails (exit
-# 127). CI installs qemu-user without binfmt handlers (#272), which is how
-# these rows were found; a developer host with qemu-user-binfmt has them.
+# as execve() from a running program does. A row whose program runs ANOTHER
+# program (the kr runner exec()s the slice it extracted) needs this, not just
+# arch_runner: qemu-user runs the first program, but the kernel has to run the
+# second, and on another arch's host that takes an enabled binfmt_misc handler
+# (and binfmt_misc itself enabled); without one the exec fails (exit 127). CI
+# installs qemu-user without binfmt handlers (#272), which is how these rows
+# were found; a developer host with qemu-user-binfmt has them. Decided by
+# trying, not by reading /proc: a tiny static --arch=A program (exit 42) is
+# built with the compiler under test and exec'd directly, once per arch per
+# run (ARCH_EXECS_<A>: 1 yes, 0 no). The host's own arch is always yes.
 arch_execs() {
-    local q
+    local v f
     [ "$1" = "$RUN_ARCH" ] && return 0
-    case $1 in arm64) q=qemu-aarch64 ;; x86_64) q=qemu-x86_64 ;; *) return 1 ;; esac
-    [ "$(head -1 "/proc/sys/fs/binfmt_misc/$q" 2> /dev/null)" = enabled ]
+    case $1 in arm64|x86_64) ;; *) return 1 ;; esac
+    eval "v=\${ARCH_EXECS_$1:-}"
+    if [ -z "$v" ]; then
+        f="$SUITE_TMP/arch_execs_$1"
+        v=0
+        printf 'fn main() { exit(42) }\n' > "$f.kr"
+        if krc_raw --arch="$1" "$f.kr" -o "$f" > /dev/null 2>&1 && chmod +x "$f"; then
+            timeout 30 "$f" > /dev/null 2>&1
+            [ $? = 42 ] && v=1
+        fi
+        rm -f "$f" "$f.kr"
+        eval "ARCH_EXECS_$1=$v"
+    fi
+    [ "$v" = 1 ]
 }
 # krc_raw <args...>: the compiler under test with NO flags injected. `make
 # test`'s $KRC is a wrapper that always adds --arch=, and since C1 (#234) an
@@ -40485,16 +40500,24 @@ fi
 # tests/helpers/krbo_slices.py (#143 A12, spec 6.3) reimplements the runner's
 # read path: the KRBOFAT v2 container, the LZ4 frames with LZ-Rift blocks, the
 # inverse BCJ filters. Self-check: the linux slices it extracts from a fat
-# binary must behave exactly as the runner itself executing that .krbo --
-# natively on x86_64 and, for arm64, the arm64 runner under qemu-aarch64
-# (the fat_slice_let_arm64 pattern) -- same stdout, same exit status.
+# binary must behave exactly as the runner itself executing that .krbo.
+#  krbo_slices_selftest: 8 slices extracted; on x86_64 the linux-x64 slice and
+#    the x86_64 runner running the .krbo give the same stdout and exit status;
+#    the linux-arm64 slice, run directly under qemu-aarch64, prints 285, slices
+#    and exits 23. None of this needs the kernel to run arm64 binaries itself;
+#  krbo_slices_arm64_runner_matches: the arm64 runner running the .krbo under
+#    qemu-aarch64 (the fat_slice_let_arm64 pattern) gives exactly what the
+#    linux-arm64 slice gives. The runner exec()s the slice it extracted, and
+#    qemu-user runs only the runner, so on another arch's host the kernel must
+#    run the arm64 slice itself (arch_execs: a qemu-aarch64 binfmt handler);
+#    without that it is a counted skip naming why (#272: CI installs no
+#    binfmt handlers).
 PEU_QA2="$(qemu_bin aarch64)"
-if ! command -v python3 > /dev/null 2>&1; then pe_row_skip krbo_slices_selftest "no python3"
-elif [ -z "$PEU_QA2" ]; then pe_row_skip krbo_slices_selftest "no qemu-aarch64"
-elif ! arch_execs arm64; then
-    # the arm64 runner, under qemu, exec()s the arm64 slice: the kernel must
-    # run it (an arm64 host, or a qemu-aarch64 binfmt handler)
-    pe_row_skip krbo_slices_selftest "the arm64 runner exec()s the arm64 slice: needs an arm64 host or an enabled qemu-aarch64 binfmt handler"
+PEU_SLOK=0
+if ! command -v python3 > /dev/null 2>&1; then
+    pe_row_skip krbo_slices_selftest "no python3"; pe_row_skip krbo_slices_arm64_runner_matches "no python3"
+elif [ -z "$PEU_QA2" ]; then
+    pe_row_skip krbo_slices_selftest "no qemu-aarch64"; pe_row_skip krbo_slices_arm64_runner_matches "no qemu-aarch64"
 else
     PEU_WHY=""
     printf 'fn main() -> uint32 {\n    uint64 s = 0\n    uint64 i = 0\n    while i < 10 { s = s + i * i  i = i + 1 }\n    println(s)\n    println("slices")\n    return 23\n}\n' > "$T10_D/peu_fat.kr"
@@ -40506,6 +40529,7 @@ else
     elif ! python3 -B "$DIR/helpers/krbo_slices.py" "$T10_D/peu_fat.krbo" "$T10_D/peu_sl" > "$T10_D/peu_sl.txt" 2>&1; then
         PEU_WHY="extraction: $(tail -1 "$T10_D/peu_sl.txt")"
     else
+        PEU_SLOK=1
         chmod +x "$T10_D/peu_runx" "$T10_D/peu_runa" "$T10_D/peu_sl/linux-x64" "$T10_D/peu_sl/linux-arm64"
         PEU_A=""; PEU_B=""
         if [ "$(uname -m)" = x86_64 ]; then
@@ -40513,14 +40537,20 @@ else
             PEU_B="$(timeout 60 "$T10_D/peu_sl/linux-x64" 2>&1; echo "rc=$?")"
             [ "$PEU_A" = "$PEU_B" ] || PEU_WHY="$PEU_WHY x86_64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_B")';"
         fi
-        PEU_A="$(timeout 120 "$PEU_QA2" "$T10_D/peu_runa" "$T10_D/peu_fat.krbo" 2>&1; echo "rc=$?")"
-        PEU_B="$(timeout 120 "$PEU_QA2" "$T10_D/peu_sl/linux-arm64" 2>&1; echo "rc=$?")"
-        [ "$PEU_A" = "$PEU_B" ] || PEU_WHY="$PEU_WHY arm64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_B")';"
-        [ "$PEU_B" = "$(printf '285\nslices\nrc=23')" ] || PEU_WHY="$PEU_WHY arm64 slice printed '$(tr '\n' '|' <<< "$PEU_B")', want 285|slices|rc=23;"
+        PEU_SLB="$(timeout 120 "$PEU_QA2" "$T10_D/peu_sl/linux-arm64" 2>&1; echo "rc=$?")"
+        [ "$PEU_SLB" = "$(printf '285\nslices\nrc=23')" ] || PEU_WHY="$PEU_WHY arm64 slice printed '$(tr '\n' '|' <<< "$PEU_SLB")', want 285|slices|rc=23;"
         [ "$(grep -c '^' "$T10_D/peu_sl.txt")" = 8 ] || PEU_WHY="$PEU_WHY $(grep -c '^' "$T10_D/peu_sl.txt") slices extracted, want 8;"
     fi
-    if [ -z "$PEU_WHY" ]; then pe_row_ok krbo_slices_selftest "8 slices extracted; linux-x64 natively and linux-arm64 under qemu behave exactly as the runner running the .krbo"
+    if [ -z "$PEU_WHY" ]; then pe_row_ok krbo_slices_selftest "8 slices extracted;$([ "$(uname -m)" = x86_64 ] && printf ' linux-x64 natively behaves exactly as the runner running the .krbo;') linux-arm64 under qemu prints 285|slices, exit 23"
     else pe_row_bad krbo_slices_selftest "$PEU_WHY"; fi
+    if [ "$PEU_SLOK" != 1 ]; then pe_row_bad krbo_slices_arm64_runner_matches "the .krbo or its slices could not be made (krbo_slices_selftest: $PEU_WHY)"
+    elif ! arch_execs arm64; then
+        pe_row_skip krbo_slices_arm64_runner_matches "the arm64 runner exec()s the arm64 slice: needs an arm64 host or an enabled qemu-aarch64 binfmt handler"
+    else
+        PEU_A="$(timeout 120 "$PEU_QA2" "$T10_D/peu_runa" "$T10_D/peu_fat.krbo" 2>&1; echo "rc=$?")"
+        if [ "$PEU_A" = "$PEU_SLB" ]; then pe_row_ok krbo_slices_arm64_runner_matches "the arm64 runner under qemu running the .krbo = the extracted linux-arm64 slice ($(tr '\n' '|' <<< "$PEU_A"))"
+        else pe_row_bad krbo_slices_arm64_runner_matches "arm64: runner '$(tr '\n' '|' <<< "$PEU_A")' vs slice '$(tr '\n' '|' <<< "$PEU_SLB")'"; fi
+    fi
     rm -rf "$T10_D/peu_sl"
 fi
 
